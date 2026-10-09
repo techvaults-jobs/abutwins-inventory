@@ -13,11 +13,18 @@ export default async function SendBackToSupplierPage() {
   return (
     <FormScreen
       title="Send back to supplier"
-      description="Scan every phone going back onto a list, check it, then review and send. Scanning never sends on its own. The supplier and cost fill in from the bill."
+      description="Scan or type each phone going back, one after the other. Check the list, then review and send. Nothing goes until you confirm."
       backHref="/purchases"
       aside={
         <SectionCard title="Waiting to go back" description={returnUnits.length ? `${returnUnits.length} phone${returnUnits.length === 1 ? "" : "s"}` : undefined}>
-          {returnUnits.length ? (
+          {mayDecide ? (
+            <ol className="list-decimal space-y-1.5 pl-4 text-sm text-muted-foreground">
+              <li>Scan or type every phone going back. Each one joins the list.</li>
+              <li>Check the list against the phones in front of you. Remove any that should stay.</li>
+              <li>Review and confirm. Only then do the phones leave stock.</li>
+              {returnUnits.length ? <li>Faulty and returned phones waiting to go back can be added with one tap from Waiting to go back.</li> : null}
+            </ol>
+          ) : returnUnits.length ? (
             <ul className="space-y-2 text-sm">
               {returnUnits.slice(0, 20).map((row) => (
                 <li key={row.id} className="min-w-0">
@@ -47,7 +54,7 @@ export default async function SendBackToSupplierPage() {
       }
     >
       {mayDecide ? (
-        <SupplierReturnForm />
+        <SupplierReturnForm userId={me.id} waiting={returnUnits} />
       ) : (
         <p className="text-sm text-muted-foreground">
           Sending goods back to a supplier is decided by the Vault Manager, the shop Manager, the CEO or the main admin.

@@ -1,17 +1,24 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
-import { ClipboardList, PackageX, Send, Trash2, X } from "lucide-react"
+import { AlertCircle, CheckCircle2, Loader2, PackageCheck, RotateCcw, Trash2, X } from "lucide-react"
 import { toast } from "sonner"
 import { lookupSupplierReturnImei, sendUnitsToSupplier } from "@/app/actions/ops"
 import { ScanField } from "@/components/scan-field"
 import { Button } from "@/components/ui/button"
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Textarea } from "@/components/ui/textarea"
-import { formatCurrency } from "@/lib/utils"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import { cn, formatCurrency } from "@/lib/utils"
 
-type ReturnLine = {
+type ReturnUnit = {
   imei: string
   productName: string
   supplierId: string
@@ -24,416 +31,542 @@ type ReturnLine = {
   moneyNote: string
 }
 
-/** The list being built, kept on this device so a refresh or an interruption does not lose it. */
-const DRAFT_KEY = "supplier-return-draft:v1"
+/** One number on the list: being checked, ready to go back, or with a problem to fix. */
+type Line = {
+  /** What was scanned or typed. */
+  code: string
+  state: "checking" | "ready" | "problem"
+  unit?: ReturnUnit
+  problem?: string
+}
+
+export type WaitingUnit = {
+  id: string
+  imei1: string
+  productName: string
+  supplierId: string | null
+  supplierName: string
+  shop: string
+  status: string
+}
+
+type Sent = { reference: string; supplierName: string; count: number }
 
 function cleanCode(raw: string) {
-  return raw.replace(/[\s-]/g, "").trim()
+  return raw.replace(/[\s-]/g, "").trim().toUpperCase()
 }
 
-/** Every number in a box: one per line, or split by commas, semicolons or spaces. */
-function codesIn(raw: string) {
-  return [...new Set(raw.split(/[\n,;\s]+/).map(cleanCode).filter((code) => code.length >= 4))]
+function numbersOf(line: Line) {
+  return [line.code, line.unit?.imei].filter(Boolean).map((code) => cleanCode(code as string))
 }
-
-type Looked = { line: ReturnLine } | { error: string }
 
 /**
- * Look one number up for this send-back: on the system, sendable, and from
- * the same supplier as whatever is already on `onList`.
+ * The list is kept on this device until it is sent, so a refresh, a dropped
+ * connection or stepping away from the counter does not lose the phones
+ * already scanned. It holds the numbers only; every one is checked again on load.
  */
-async function lookUp(code: string, onList: ReturnLine[]): Promise<Looked> {
-  if (onList.some((row) => row.imei === code)) return { error: `${code} is already on this list.` }
-  const found = await lookupSupplierReturnImei(code)
-  if ("error" in found && found.error) return { error: `${code}: ${found.error}` }
-  if (!("imei" in found)) return { error: `${code}: we could not find that IMEI or serial on the system.` }
-  // A serial typed for a unit booked under its IMEI comes back as that IMEI.
-  if (onList.some((row) => row.imei === found.imei)) return { error: `${code} is already on this list.` }
-  const first = onList[0]
-  if (first && found.supplierId && first.supplierId !== found.supplierId) {
-    return {
-      error: `${code} is from ${found.supplierName || "another supplier"}, but this list is for ${first.supplierName}. Send this list first, then start one for that supplier.`,
-    }
+function draftKey(userId: string) {
+  return `abutwins.send-back.draft.v1:${userId}`
+}
+
+/** Where the previous send-back screen kept its list, picked up once so an unsent list is not lost. */
+const OLD_DRAFT_KEY = "supplier-return-draft:v1"
+
+function readOldDraft(): { codes: string[]; reason: string } | null {
+  try {
+    const raw = window.localStorage.getItem(OLD_DRAFT_KEY)
+    window.localStorage.removeItem(OLD_DRAFT_KEY)
+    const saved = JSON.parse(raw || "[]") as Array<{ imei?: unknown }>
+    const codes = Array.isArray(saved) ? saved.map((row) => row?.imei).filter((code): code is string => typeof code === "string") : []
+    return codes.length ? { codes, reason: "" } : null
+  } catch {
+    return null
   }
-  return { line: found }
+}
+
+function readDraft(userId: string): { codes: string[]; reason: string } | null {
+  try {
+    const raw = window.localStorage.getItem(draftKey(userId))
+    if (!raw) return readOldDraft()
+    const parsed = JSON.parse(raw) as { codes?: unknown; reason?: unknown }
+    const codes = Array.isArray(parsed.codes) ? parsed.codes.filter((code): code is string => typeof code === "string") : []
+    return { codes, reason: typeof parsed.reason === "string" ? parsed.reason : "" }
+  } catch {
+    return null
+  }
+}
+
+function writeDraft(userId: string, lines: Line[], reason: string) {
+  try {
+    if (!lines.length && !reason.trim()) window.localStorage.removeItem(draftKey(userId))
+    else window.localStorage.setItem(draftKey(userId), JSON.stringify({ codes: lines.map((line) => line.code), reason }))
+  } catch {
+    // Private window or storage blocked: the list still works, it just is not kept.
+  }
 }
 
 /**
- * Send back to supplier, in two deliberate steps.
- *
- * 1. Build the list. Scanning or typing a number (Enter, the Add button, a
- *    scanner, the camera or a phone keyboard's Go key) only ever ADDS it to
- *    the list below, where it can be checked and removed. The list stays on
- *    this device until it is sent or cleared.
- * 2. Review and send. A summary of every phone, the supplier and the value
- *    opens; only its Send button sends.
- *
- * The scan box is its own small form whose submit means "add", so no key on
- * any keyboard or scanner can send the phones back by accident. (It used to
- * be one form with the Send button: a phone keyboard's Go key, or a scanner
- * whose Enter the page did not see as Enter, submitted it, and the phones
- * went back on the first scan.)
+ * Send back to supplier, built as a basket: scan or type each phone one after
+ * the other, watch the list fill and check it against the pile on the table,
+ * then review and send. Scanning only ever adds to the list. Nothing leaves
+ * the shop until the review is confirmed, and the scan box is not inside a
+ * form, so a scanner's Enter has nothing it could submit.
  */
-export function SupplierReturnForm() {
+export function SupplierReturnForm({ userId, waiting }: { userId: string; waiting: WaitingUnit[] }) {
   const router = useRouter()
-  const [items, setItems] = useState<ReturnLine[]>([])
-  const [loaded, setLoaded] = useState(false)
-  const [looking, setLooking] = useState(false)
-  const [scanValue, setScanValue] = useState("")
-  const [pasteMode, setPasteMode] = useState(false)
-  const [pasteValue, setPasteValue] = useState("")
-  const [pasting, setPasting] = useState(false)
-  const [reviewing, setReviewing] = useState(false)
-  const [note, setNote] = useState("")
+  const [lines, setLines] = useState<Line[]>([])
+  const [typed, setTyped] = useState("")
+  const [reason, setReason] = useState("")
+  const [reviewOpen, setReviewOpen] = useState(false)
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
-  const pasteRef = useRef<HTMLTextAreaElement>(null)
-  // The list as it stands right now, for checks made while lookups are still
-  // coming back (several numbers pasted into the scan box at once).
-  const itemsRef = useRef<ReturnLine[]>([])
-  useEffect(() => {
-    itemsRef.current = items
-  }, [items])
+  const [sent, setSent] = useState<Sent | null>(null)
+  const [flash, setFlash] = useState<string | null>(null)
+  const [loaded, setLoaded] = useState(false)
 
-  // The saved list from this device, read once after the page opens.
-  useEffect(() => {
-    try {
-      const saved = JSON.parse(window.localStorage.getItem(DRAFT_KEY) || "[]")
-      // eslint-disable-next-line react-hooks/set-state-in-effect -- one read of saved browser state after mount
-      if (Array.isArray(saved) && saved.length) setItems(saved as ReturnLine[])
-    } catch {
-      // No saved list, or storage is blocked: start empty.
-    }
-    setLoaded(true)
+  // Scanners fire faster than the server answers, so numbers wait in a queue
+  // and are checked one at a time against the list as it really is.
+  const linesRef = useRef<Line[]>([])
+  const queueRef = useRef<string[]>([])
+  const workingRef = useRef(false)
+
+  const commit = useCallback((next: Line[]) => {
+    linesRef.current = next
+    setLines(next)
   }, [])
 
-  useEffect(() => {
-    if (!loaded) return
+  const runQueue = useCallback(async () => {
+    if (workingRef.current) return
+    workingRef.current = true
     try {
-      if (items.length) window.localStorage.setItem(DRAFT_KEY, JSON.stringify(items))
-      else window.localStorage.removeItem(DRAFT_KEY)
-    } catch {
-      // Storage blocked: the list still works for this visit.
-    }
-  }, [items, loaded])
-
-  async function addOne(code: string) {
-    const clean = cleanCode(code)
-    if (!clean) return
-    setLooking(true)
-    try {
-      const result = await lookUp(clean, itemsRef.current)
-      if ("error" in result) {
-        toast.error(result.error)
-        return
-      }
-      const line = result.line
-      const current = itemsRef.current
-      if (current.some((row) => row.imei === line.imei)) {
-        toast.error(`${clean} is already on this list.`)
-        return
-      }
-      if (current[0] && line.supplierId && current[0].supplierId !== line.supplierId) {
-        toast.error(`${clean} is from ${line.supplierName || "another supplier"}, but this list is for ${current[0].supplierName}.`)
-        return
-      }
-      itemsRef.current = [...current, line]
-      setItems(itemsRef.current)
-      toast.success(`${line.productName} added to the list. Nothing is sent until you review and send.`)
-    } finally {
-      setLooking(false)
-    }
-  }
-
-  /** Paste path: parse newline/comma/space separated codes and look each one up. */
-  async function addPasted() {
-    const codes = codesIn(pasteValue)
-    if (!codes.length) {
-      toast.error("No IMEI or serial number found in what you pasted. Each number must be at least 4 characters.")
-      return
-    }
-    setPasting(true)
-    // Checked against the list as it grows, so the first phone sets the supplier for the rest.
-    let list = itemsRef.current
-    const before = list.length
-    let failed = 0
-    for (const code of codes) {
-      try {
-        const result = await lookUp(code, list)
-        if ("error" in result) {
-          toast.error(result.error)
-          failed++
-          continue
+      while (queueRef.current.length) {
+        const code = queueRef.current.shift() as string
+        if (!linesRef.current.some((line) => line.code === code)) continue // removed while waiting
+        let outcome: Partial<Line>
+        try {
+          const found = await lookupSupplierReturnImei(code)
+          if ("error" in found && found.error) outcome = { state: "problem", problem: found.error, unit: undefined }
+          else if (!("imei" in found)) {
+            outcome = { state: "problem", problem: "We could not find that IMEI or serial on the system.", unit: undefined }
+          } else {
+            const others = linesRef.current.filter((line) => line.code !== code)
+            const house = others.find((line) => line.state === "ready")?.unit
+            if (others.some((line) => line.unit && cleanCode(line.unit.imei) === cleanCode(found.imei))) {
+              outcome = { state: "problem", unit: found, problem: `This is the same phone as ${found.imei}, already on the list.` }
+            } else if (house && found.supplierId !== house.supplierId) {
+              outcome = {
+                state: "problem",
+                unit: found,
+                problem: `From ${found.supplierName || "another supplier"}, but this send-back is for ${house.supplierName}. Remove it and send it in its own send-back.`,
+              }
+            } else outcome = { state: "ready", unit: found, problem: undefined }
+          }
+        } catch {
+          outcome = { state: "problem", problem: "Could not reach the server. Check the connection, then press Check again." }
         }
-        list = [...list, result.line]
-      } catch {
-        failed++
+        commit(linesRef.current.map((line) => (line.code === code ? { ...line, ...outcome } : line)))
+        if (outcome.state === "problem" && typeof navigator !== "undefined") navigator.vibrate?.(180)
       }
+    } finally {
+      workingRef.current = false
     }
-    const added = list.length - before
-    itemsRef.current = list
-    setItems(list)
-    setPasting(false)
-    setPasteMode(false)
-    setPasteValue("")
-    if (added > 0) toast.success(`${added} phone${added === 1 ? "" : "s"} added to the list.`)
-    if (failed > 0 && added === 0) toast.error("None of those numbers could be added. Check each one and try again.")
+  }, [commit])
+
+  const add = useCallback(
+    (raw: string) => {
+      const code = cleanCode(raw)
+      if (code.length < 4) {
+        toast.error("That number is too short. Scan it again, or type every digit.")
+        return
+      }
+      const already = linesRef.current.find((line) => numbersOf(line).includes(code))
+      if (already) {
+        toast.message(`${code} is already on the list.`)
+        setFlash(already.code)
+        return
+      }
+      setSent(null)
+      commit([...linesRef.current, { code, state: "checking" }])
+      setFlash(code)
+      queueRef.current.push(code)
+      void runQueue()
+    },
+    [commit, runQueue],
+  )
+
+  function recheck(code: string) {
+    commit(linesRef.current.map((line) => (line.code === code ? { code: line.code, state: "checking" } : line)))
+    queueRef.current.push(code)
+    void runQueue()
   }
 
-  /** Open the review. A number still typed in the box is added to the list first, so it is seen before sending. */
-  async function startReview() {
-    if (scanValue.trim()) {
-      const typed = scanValue
-      setScanValue("")
-      await addOne(typed)
+  function remove(code: string) {
+    commit(linesRef.current.filter((line) => line.code !== code))
+  }
+
+  function clearAll() {
+    queueRef.current = []
+    commit([])
+    setReason("")
+  }
+
+  // Bring back what was on the list before a refresh, and check it all again:
+  // a phone may have been sold or moved since it was scanned.
+  useEffect(() => {
+    const draft = readDraft(userId)
+    if (draft?.codes.length) {
+      const codes = [...new Set(draft.codes.map(cleanCode).filter((code) => code.length >= 4))]
+      // Device storage is only readable after mount, so the draft comes back here.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      commit(codes.map((code) => ({ code, state: "checking" })))
+      queueRef.current.push(...codes)
+      void runQueue()
+      toast.message(`Your unsent list of ${codes.length} is back. Checking each one again.`)
+    }
+    if (draft?.reason) setReason(draft.reason)
+    setLoaded(true)
+  }, [userId, commit, runQueue])
+
+  useEffect(() => {
+    if (loaded) writeDraft(userId, lines, reason)
+  }, [loaded, userId, lines, reason])
+
+  useEffect(() => {
+    if (!flash) return
+    const timer = window.setTimeout(() => setFlash(null), 1600)
+    return () => window.clearTimeout(timer)
+  }, [flash])
+
+  const ready = lines.filter((line) => line.state === "ready")
+  const problems = lines.filter((line) => line.state === "problem")
+  const checking = lines.filter((line) => line.state === "checking")
+  const house = ready[0]?.unit
+  const moneyTotal = ready.reduce((sum, line) => sum + (line.unit?.moneyMoves ? line.unit.cost : 0), 0)
+  const costTotal = ready.reduce((sum, line) => sum + (line.unit?.cost ?? 0), 0)
+  const onList = new Set(lines.flatMap(numbersOf))
+
+  const blocker = !lines.length
+    ? "Scan or type the first phone going back."
+    : checking.length
+      ? `Checking ${checking.length} number${checking.length === 1 ? "" : "s"}…`
+      : problems.length
+        ? `Fix or remove the ${problems.length} line${problems.length === 1 ? "" : "s"} marked in red before you send.`
+        : null
+
+  function openReview() {
+    const left = cleanCode(typed)
+    if (left) {
+      // A number typed but not added goes on the list for checking, never straight out.
+      add(left)
+      setTyped("")
+      toast.message(`${left} was still in the box, so it is now on the list. Check it, then review again.`)
       return
     }
-    if (!items.length) {
-      toast.error("Scan or type at least one IMEI or serial number first.")
+    if (blocker) {
+      toast.error(blocker)
       return
     }
     setSendError(null)
-    setReviewing(true)
+    setReviewOpen(true)
   }
 
-  async function send() {
+  async function confirmSend() {
+    // The list may have changed while the review was open.
+    const toSend = linesRef.current.filter((line) => line.state === "ready" && line.unit)
+    if (!toSend.length || linesRef.current.some((line) => line.state !== "ready")) {
+      setSendError("The list changed. Go back to the list, check every line, then review again.")
+      return
+    }
     setSending(true)
     setSendError(null)
-    const data = new FormData()
-    data.set("imeis", items.map((row) => row.imei).join("\n"))
-    data.set("note", note.trim())
     try {
-      const result = await sendUnitsToSupplier(data)
-      if (result && "error" in result && result.error) {
-        setSendError(result.error)
+      const formData = new FormData()
+      formData.set("imeis", toSend.map((line) => line.unit!.imei).join("\n"))
+      if (reason.trim()) formData.set("note", reason.trim())
+      const result = await sendUnitsToSupplier(formData)
+      if ("error" in result && result.error) {
+        setSendError(`${result.error} Nothing was sent.`)
         return
       }
-      const reference = result && "reference" in result ? result.reference : null
+      const done: Sent = {
+        reference: "reference" in result && result.reference ? result.reference : "",
+        supplierName: toSend[0].unit?.supplierName || "the supplier",
+        count: toSend.length,
+      }
+      setSent(done)
+      setReviewOpen(false)
+      clearAll()
       toast.success(
-        `${items.length} phone${items.length === 1 ? "" : "s"} sent back to ${items[0]?.supplierName || "the supplier"}${reference ? ` on ${reference}` : ""}.`
+        `${done.count} phone${done.count === 1 ? "" : "s"} sent back to ${done.supplierName}${done.reference ? ` on ${done.reference}` : ""}.`,
       )
-      setItems([])
-      setNote("")
-      setReviewing(false)
       router.refresh()
     } catch {
-      setSendError("The network failed before the send-back was saved. Nothing was sent. Check your connection and try again.")
+      setSendError("Could not reach the server. Nothing was sent. Check the connection and try again.")
     } finally {
       setSending(false)
     }
   }
 
-  const house = items[0]
-  const moneyTotal = items.filter((row) => row.moneyMoves).reduce((sum, row) => sum + row.cost, 0)
-  const costTotal = items.reduce((sum, row) => sum + row.cost, 0)
+  const waitingLeft = waiting.filter((row) => !onList.has(cleanCode(row.imei1)))
 
   return (
     <div className="space-y-4">
-      {/* Step 1: build the list. */}
-      <div className="space-y-3 rounded-xl border border-border bg-muted/30 p-4">
-        <div className="flex items-center justify-between gap-2">
-          <div>
-            <p className="text-sm font-semibold">1. Scan or type each phone going back</p>
-            <p className="text-xs text-muted-foreground">Each one goes on the list below. Nothing is sent yet.</p>
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              setPasteMode((value) => !value)
-              if (!pasteMode) setTimeout(() => pasteRef.current?.focus(), 60)
-            }}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
-          >
-            <ClipboardList className="h-3.5 w-3.5" />
-            {pasteMode ? "Close paste" : "Paste a list"}
-          </button>
-        </div>
-
-        {pasteMode ? (
-          <div className="space-y-2">
-            <textarea
-              ref={pasteRef}
-              value={pasteValue}
-              onChange={(event) => setPasteValue(event.target.value)}
-              rows={5}
-              placeholder={"Paste IMEIs or serials here, one per line, or separated by commas or spaces.\nExample:\n356938035643809\n356938035643810"}
-              className="w-full rounded-lg border border-input bg-card px-3 py-2 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-ring"
-            />
-            <div className="flex gap-2">
-              <Button type="button" onClick={() => void addPasted()} disabled={pasting || !pasteValue.trim()} className="flex-1">
-                {pasting ? "Looking up each number" : `Add ${codesIn(pasteValue).length || ""} to the list`}
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => {
-                  setPasteMode(false)
-                  setPasteValue("")
-                }}
-              >
-                Cancel
-              </Button>
-            </div>
-          </div>
-        ) : (
-          // The scan box's own form: submitting it (a phone keyboard's Go key,
-          // a scanner's Enter) adds the number. It can never send.
-          <form
-            onSubmit={(event) => {
-              event.preventDefault()
-              const typed = scanValue
-              setScanValue("")
-              void addOne(typed)
-            }}
-          >
-            <ScanField
-              kind="ANY"
-              onScan={(code) => void addOne(code)}
-              value={scanValue}
-              onValueChange={setScanValue}
-              placeholder="Scan or type IMEI or serial, then Enter or Add"
-              hint="USB and Bluetooth scanners, the camera, or typing by hand all add to the list. All phones on one list must be from the same supplier."
-            />
-          </form>
-        )}
-
-        {looking && !pasteMode ? <p className="text-sm text-muted-foreground">Looking up this number</p> : null}
-      </div>
-
-      {/* The list. */}
-      <div className="rounded-xl border border-border bg-card">
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
-          <div>
-            <p className="text-sm font-semibold">2. Check the list</p>
-            <p className="text-xs text-muted-foreground">
-              {house
-                ? `${items.length} phone${items.length === 1 ? "" : "s"} for ${house.supplierName} · ${formatCurrency(costTotal)}${
-                    moneyTotal > 0 ? ` · ${formatCurrency(moneyTotal)} comes off what we owe them` : ""
-                  }`
-                : "Empty. Scan the first phone above."}
+      {sent ? (
+        <div className="flex items-start gap-3 rounded-xl border border-success/30 bg-success-soft/60 p-4 text-sm">
+          <PackageCheck className="mt-0.5 h-5 w-5 shrink-0 text-success" aria-hidden />
+          <div className="min-w-0">
+            <p className="font-semibold">
+              {sent.count} phone{sent.count === 1 ? "" : "s"} sent back to {sent.supplierName}
+            </p>
+            <p className="text-muted-foreground">
+              {sent.reference ? `Reference ${sent.reference}. ` : ""}Scan the next phone to start a new send-back.
             </p>
           </div>
-          {items.length ? (
-            <Button type="button" variant="ghost" size="sm" className="text-danger hover:text-danger" onClick={() => setItems([])}>
-              <Trash2 className="mr-1.5 h-3.5 w-3.5" /> Clear list
+        </div>
+      ) : null}
+
+      {/* Step 1: build the list. */}
+      <div className="space-y-3 rounded-xl border border-border bg-muted/30 p-4">
+        <div>
+          <p className="text-sm font-semibold">1. Scan or type each phone going back</p>
+          <p className="text-xs text-muted-foreground">
+            One after the other. Each one joins the list below. Nothing is sent until you review and confirm.
+          </p>
+        </div>
+        <ScanField
+          kind="ANY"
+          autoFocus
+          onScan={add}
+          value={typed}
+          onValueChange={setTyped}
+          placeholder="Scan or type an IMEI or serial, then Enter"
+          hint="Use a USB or Bluetooth scanner, the camera, or type the number and press Enter or Add. You can paste a whole list into the box too."
+        />
+      </div>
+
+      {waitingLeft.length ? (
+        <details className="group rounded-xl border border-border bg-card">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-4 py-3 text-sm font-medium">
+            <span>Waiting to go back ({waitingLeft.length})</span>
+            <span className="text-xs font-normal text-muted-foreground group-open:hidden">Tap to add without scanning</span>
+          </summary>
+          <ul className="max-h-64 divide-y divide-border overflow-auto border-t border-border">
+            {waitingLeft.map((row) => {
+              const otherHouse = Boolean(house && row.supplierId && row.supplierId !== house.supplierId)
+              return (
+                <li key={row.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
+                  <div className="min-w-0 text-sm">
+                    <p className="truncate font-medium">{row.productName}</p>
+                    <p className="truncate font-mono text-xs text-muted-foreground">
+                      {row.imei1} · {row.shop}
+                      {row.supplierName ? ` · ${row.supplierName}` : ""}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={otherHouse}
+                    title={otherHouse ? `Not from ${house?.supplierName}` : undefined}
+                    onClick={() => add(row.imei1)}
+                  >
+                    {otherHouse ? "Other supplier" : "Add"}
+                  </Button>
+                </li>
+              )
+            })}
+          </ul>
+        </details>
+      ) : null}
+
+      {/* Step 2: check the list against the phones on the table. */}
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <p className="text-sm font-semibold">2. Check the list against the phones in front of you</p>
+            <p className="text-xs text-muted-foreground">
+              {lines.length
+                ? `${lines.length} on the list · ${ready.length} ready${problems.length ? ` · ${problems.length} to fix` : ""}${checking.length ? ` · ${checking.length} checking` : ""}`
+                : "Each phone shows here as you scan it."}
+            </p>
+          </div>
+          {lines.length ? (
+            <Button type="button" size="sm" variant="ghost" className="text-muted-foreground" onClick={clearAll}>
+              <Trash2 className="mr-1.5 h-4 w-4" />
+              Clear list
             </Button>
           ) : null}
         </div>
-        {items.length ? (
-          <ul className="divide-y divide-border">
-            {items.map((item, index) => (
-              <li key={item.imei} className="flex items-start justify-between gap-3 px-4 py-3">
-                <div className="flex min-w-0 gap-3">
-                  <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-semibold tabular-nums">
-                    {index + 1}
-                  </span>
-                  <div className="min-w-0 space-y-0.5">
-                    <p className="text-sm font-medium">{item.productName}</p>
-                    <p className="font-mono text-xs text-muted-foreground">{item.imei}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {item.supplierName}
-                      {item.invoice ? ` · bill ${item.invoice}` : ""}
-                      {item.shop ? ` · ${item.shop}` : ""}
-                    </p>
-                    <p className="text-xs">
-                      Cost {formatCurrency(item.cost)}
-                      {!item.moneyMoves && item.moneyNote ? <span className="ml-1 text-muted-foreground">· {item.moneyNote}</span> : null}
-                    </p>
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  aria-label={`Remove ${item.imei} from the list`}
-                  className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-danger-soft hover:text-danger"
-                  onClick={() => setItems((current) => current.filter((row) => row.imei !== item.imei))}
-                >
-                  <X className="h-4 w-4" />
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <div className="flex flex-col items-center gap-2 px-4 py-8 text-center text-sm text-muted-foreground">
-            <PackageX className="h-6 w-6" />
-            <p>No phone on the list yet. Scan as many as are going back, check them here, then review and send.</p>
+
+        {house ? (
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-card px-4 py-3">
+            <div className="min-w-0">
+              <p className="truncate font-semibold">{house.supplierName}</p>
+              <p className="text-sm text-muted-foreground">
+                Every phone on this send-back must be from this supplier
+                {moneyTotal > 0 ? ` · ${formatCurrency(moneyTotal)} comes off what we owe them` : ""}
+              </p>
+            </div>
+            <span className="rounded-full bg-warning-soft px-3 py-1 text-sm font-semibold tabular-nums text-warning">{ready.length}</span>
           </div>
-        )}
-      </div>
+        ) : null}
 
-      {/* Step 3: the only way to send. */}
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-xs text-muted-foreground">
-          {items.length ? "The list is kept on this device until you send it or clear it." : ""}
-        </p>
-        <Button type="button" size="lg" disabled={!items.length || looking || pasting} onClick={() => void startReview()}>
-          <Send className="mr-1.5 h-4 w-4" />
-          {items.length ? `3. Review and send ${items.length} phone${items.length === 1 ? "" : "s"}` : "3. Review and send"}
-        </Button>
-      </div>
-
-      <Dialog open={reviewing} onOpenChange={(open) => !sending && setReviewing(open)}>
-        <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
-          <DialogHeader className="pr-8">
-            <DialogTitle className="text-lg font-bold">Send back to {house?.supplierName || "the supplier"}?</DialogTitle>
-            <DialogDescription>
-              Check every phone below. Once sent, they leave the shelf and are recorded as gone back to this supplier.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 pt-1">
-            <ol className="divide-y divide-border rounded-xl border border-border text-sm">
-              {items.map((item, index) => (
-                <li key={item.imei} className="flex items-start justify-between gap-3 px-3 py-2">
-                  <div className="min-w-0">
-                    <p className="font-medium">
-                      {index + 1}. {item.productName}
-                    </p>
-                    <p className="font-mono text-xs text-muted-foreground">
-                      {item.imei}
-                      {item.invoice ? ` · bill ${item.invoice}` : ""}
-                    </p>
+        {lines.length ? (
+          <ol className="space-y-2">
+            {lines
+              .map((line, index) => ({ line, number: index + 1 }))
+              .reverse()
+              .map(({ line, number }) => (
+                <li
+                  key={line.code}
+                  className={cn(
+                    "flex items-start gap-3 rounded-xl border px-4 py-3 transition-colors",
+                    line.state === "problem" ? "border-danger/40 bg-danger-soft/40" : "border-border bg-card",
+                    flash === line.code && "ring-2 ring-primary/50",
+                  )}
+                >
+                  <span className="mt-0.5 w-6 shrink-0 text-right text-xs font-semibold tabular-nums text-muted-foreground">{number}</span>
+                  <span className="mt-0.5 shrink-0" aria-hidden>
+                    {line.state === "checking" ? (
+                      <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                    ) : line.state === "ready" ? (
+                      <CheckCircle2 className="h-4 w-4 text-success" />
+                    ) : (
+                      <AlertCircle className="h-4 w-4 text-danger" />
+                    )}
+                  </span>
+                  <div className="min-w-0 flex-1 space-y-0.5">
+                    <p className="break-all font-mono text-xs text-muted-foreground">{line.unit?.imei || line.code}</p>
+                    {line.unit ? <p className="text-sm font-medium">{line.unit.productName}</p> : null}
+                    {line.state === "checking" ? <p className="text-xs text-muted-foreground">Checking this number…</p> : null}
+                    {line.state === "ready" && line.unit ? (
+                      <p className="text-xs text-muted-foreground">
+                        {[line.unit.supplierName, line.unit.invoice ? `bill ${line.unit.invoice}` : "", line.unit.shop, `cost ${formatCurrency(line.unit.cost)}`]
+                          .filter(Boolean)
+                          .join(" · ")}
+                        {!line.unit.moneyMoves && line.unit.moneyNote ? ` · ${line.unit.moneyNote}` : ""}
+                      </p>
+                    ) : null}
+                    {line.state === "problem" ? <p className="text-xs font-medium text-danger">{line.problem}</p> : null}
                   </div>
-                  <span className="shrink-0 tabular-nums">{formatCurrency(item.cost)}</span>
+                  <div className="flex shrink-0 items-center gap-1">
+                    {line.state === "problem" ? (
+                      <button
+                        type="button"
+                        aria-label={`Check ${line.code} again`}
+                        title="Check again"
+                        className="flex h-7 w-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                        onClick={() => recheck(line.code)}
+                      >
+                        <RotateCcw className="h-4 w-4" />
+                      </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      aria-label={`Remove ${line.code}`}
+                      title="Remove from the list"
+                      className="flex h-7 w-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-danger-soft hover:text-danger"
+                      onClick={() => remove(line.code)}
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
                 </li>
               ))}
-            </ol>
-            <dl className="grid grid-cols-2 gap-2 rounded-lg bg-muted/50 p-3 text-xs">
-              <div>
-                <dt className="text-muted-foreground">Phones</dt>
-                <dd className="text-base font-semibold tabular-nums">{items.length}</dd>
-              </div>
-              <div>
-                <dt className="text-muted-foreground">Value at cost</dt>
-                <dd className="text-base font-semibold tabular-nums">{formatCurrency(costTotal)}</dd>
-              </div>
-              {moneyTotal > 0 ? (
-                <div className="col-span-2">
-                  <dt className="text-muted-foreground">Comes off what we owe {house?.supplierName}</dt>
-                  <dd className="font-semibold tabular-nums">{formatCurrency(moneyTotal)}</dd>
+          </ol>
+        ) : (
+          <p className="rounded-xl border border-dashed border-border px-4 py-6 text-center text-sm text-muted-foreground">
+            No phone on the list yet. Scan or type the first one above.
+          </p>
+        )}
+
+        {lines.length ? (
+          <p className="text-xs text-muted-foreground">This list is kept on this device until you send it, even if the page is closed.</p>
+        ) : null}
+      </div>
+
+      {/* Step 3: review, then send. */}
+      <div className="space-y-3 rounded-xl border border-border bg-card p-4">
+        <p className="text-sm font-semibold">3. Review and send</p>
+        <div className="space-y-1.5">
+          <label htmlFor="send-back-reason" className="text-xs font-medium text-muted-foreground">
+            Why are these going back? (optional)
+          </label>
+          <Textarea
+            id="send-back-reason"
+            value={reason}
+            onChange={(event) => setReason(event.target.value.slice(0, 300))}
+            rows={2}
+            placeholder="For example: faulty screens, wrong model delivered"
+          />
+        </div>
+        <Button type="button" className="w-full" disabled={Boolean(blocker) && !cleanCode(typed)} onClick={openReview}>
+          {ready.length ? `Review ${ready.length} phone${ready.length === 1 ? "" : "s"} before sending` : "Review before sending"}
+        </Button>
+        {blocker && lines.length ? <p className="text-center text-xs text-muted-foreground">{blocker}</p> : null}
+      </div>
+
+      <Dialog open={reviewOpen} onOpenChange={(open) => !sending && setReviewOpen(open)}>
+        <DialogContent className="sm:max-w-[560px]">
+          <DialogHeader>
+            <DialogTitle>
+              Send {ready.length} phone{ready.length === 1 ? "" : "s"} back to {house?.supplierName || "the supplier"}?
+            </DialogTitle>
+            <DialogDescription>
+              Count the phones in front of you against this list. Once sent, they leave stock and the supplier account changes.
+            </DialogDescription>
+          </DialogHeader>
+          <ol className="max-h-72 divide-y divide-border overflow-auto rounded-xl border border-border text-sm">
+            {ready.map((line, index) => (
+              <li key={line.code} className="flex items-start justify-between gap-3 px-3 py-2">
+                <div className="min-w-0">
+                  <p className="font-medium">
+                    {index + 1}. {line.unit?.productName}
+                  </p>
+                  <p className="break-all font-mono text-xs text-muted-foreground">{line.unit?.imei}</p>
                 </div>
-              ) : null}
-            </dl>
-            <label className="block text-xs">
-              <span className="mb-1 block font-medium text-muted-foreground">Why they are going back (optional)</span>
-              <Textarea
-                value={note}
-                onChange={(event) => setNote(event.target.value)}
-                rows={2}
-                maxLength={300}
-                placeholder="Faulty screens, wrong model, supplier agreed to replace"
-              />
-            </label>
-            {sendError ? (
-              <p className="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">{sendError}</p>
+                <span className="shrink-0 tabular-nums text-xs">{formatCurrency(line.unit?.cost ?? 0)}</span>
+              </li>
+            ))}
+          </ol>
+          <div className="space-y-1 rounded-lg bg-muted/50 p-3 text-sm">
+            <p className="flex justify-between gap-3">
+              <span className="text-muted-foreground">Phones</span>
+              <span className="font-semibold tabular-nums">{ready.length}</span>
+            </p>
+            <p className="flex justify-between gap-3">
+              <span className="text-muted-foreground">Cost value</span>
+              <span className="font-semibold tabular-nums">{formatCurrency(costTotal)}</span>
+            </p>
+            {moneyTotal > 0 ? (
+              <p className="flex justify-between gap-3">
+                <span className="text-muted-foreground">Comes off what we owe {house?.supplierName}</span>
+                <span className="font-semibold tabular-nums">{formatCurrency(moneyTotal)}</span>
+              </p>
             ) : null}
-            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-              <Button type="button" variant="outline" disabled={sending} onClick={() => setReviewing(false)}>
-                Back to the list
-              </Button>
-              <Button type="button" disabled={sending} onClick={() => void send()}>
-                {sending ? "Sending these phones back" : `Send ${items.length} phone${items.length === 1 ? "" : "s"} back`}
-              </Button>
-            </div>
+            {reason.trim() ? <p className="pt-1 text-xs text-muted-foreground">Reason: {reason.trim()}</p> : null}
           </div>
+          {sendError ? (
+            <p className="flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/10 p-3 text-sm text-destructive">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+              {sendError}
+            </p>
+          ) : null}
+          <DialogFooter className="flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+            <Button type="button" variant="outline" disabled={sending} onClick={() => setReviewOpen(false)}>
+              Back to the list
+            </Button>
+            <Button type="button" disabled={sending} onClick={() => void confirmSend()}>
+              {sending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden />
+                  Sending these phones back
+                </>
+              ) : (
+                `Yes, send ${ready.length} back`
+              )}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

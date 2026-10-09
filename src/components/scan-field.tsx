@@ -38,6 +38,7 @@ export function ScanField({
   hint,
   value: controlledValue,
   onValueChange,
+  autoFocus,
 }: {
   onScan: (value: string) => void
   kind?: "IMEI" | "SERIAL" | "ANY"
@@ -50,6 +51,8 @@ export function ScanField({
    */
   value?: string
   onValueChange?: (value: string) => void
+  /** Put the cursor in the box on load, for screens that are all about scanning. */
+  autoFocus?: boolean
 }) {
   const [ownValue, setOwnValue] = useState("")
   const value = controlledValue ?? ownValue
@@ -165,6 +168,7 @@ export function ScanField({
                 : "Type, paste or scan an IMEI or serial number")
           }
           autoComplete="off"
+          autoFocus={autoFocus}
           // Serial numbers carry letters, so only a pure IMEI box opens the number pad.
           inputMode={kind === "IMEI" ? "numeric" : "text"}
           autoCapitalize="characters"
