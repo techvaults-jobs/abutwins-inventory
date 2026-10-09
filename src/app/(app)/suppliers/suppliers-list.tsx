@@ -84,11 +84,12 @@ type House = {
 }
 
 function buildHouses(suppliers: SupplierRow[]): House[] {
-  // Every opening stock name is one row, Opening stock, and is never merged
-  // with a real supplier through a shared phone number.
+  // Each opening stock name keeps its own row ("Opening Stock", "OPENING
+  // STOCK (FAULTY)", "Opening Stock Adjustment"), listed together first, and
+  // is never merged with a real supplier through a shared phone number.
   const opening = suppliers.filter((row) => row.isOpeningStock)
   const real = suppliers.filter((row) => !row.isOpeningStock)
-  const groups = [...groupByPartyIdentity(real), ...(opening.length ? [opening] : [])]
+  const groups = [...groupByPartyIdentity(real), ...opening.map((row) => [row])]
   return groups
     .map((copies) => {
       const ranked = [...copies].sort((a, b) => {
@@ -135,7 +136,7 @@ function buildHouses(suppliers: SupplierRow[]): House[] {
           .find((place) => place) || "Not recorded"
       return {
         key: primary.id,
-        name: isOpeningRow && copies.length > 1 ? "Opening stock" : primary.name,
+        name: primary.name,
         kind: primary.kind,
         phone: primary.phone,
         from,
@@ -153,7 +154,8 @@ function buildHouses(suppliers: SupplierRow[]): House[] {
         openHref: `/suppliers/${primary.id}`,
       }
     })
-    .sort((a, b) => a.name.localeCompare(b.name))
+    // Opening stock names first, together, then every supplier A to Z.
+    .sort((a, b) => Number(b.openingNames.length > 0) - Number(a.openingNames.length > 0) || a.name.localeCompare(b.name))
 }
 
 export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
@@ -197,7 +199,7 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
           <p className="font-medium">{house.name}</p>
           <p className="text-xs text-muted-foreground">
             {house.openingNames.length
-              ? `Starting stock · ${house.openingNames.length} name${house.openingNames.length === 1 ? "" : "s"}: ${house.openingNames.map((row) => row.name).join(", ")}`
+              ? "Opening stock · starting stock value, not owed"
               : `${house.kind === "NEIGHBOR" ? "Neighbouring shop" : "Carton supplier"} · ${house.phone}${house.copies.length > 1 ? ` · ${house.copies.length} copies` : ""}`}
           </p>
         </div>
@@ -311,7 +313,7 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
           card={(house) => ({
             title: house.name,
             subtitle: house.openingNames.length
-              ? `Starting stock · ${house.openingNames.length} name${house.openingNames.length === 1 ? "" : "s"} · not owed`
+              ? "Opening stock · not owed"
               : `${house.phone} · ${house.bills.length} bill${house.bills.length === 1 ? "" : "s"}${
                   house.openingValue > 0 ? ` · opening stock ${formatCurrency(house.openingValue)}` : ""
                 }`,
@@ -402,7 +404,7 @@ function HouseBreakdown({ house }: { house: House }) {
         </div>
       ) : null}
 
-      {house.openingNames.length ? (
+      {house.openingNames.length > 1 ? (
         <div>
           <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
             Names under opening stock
