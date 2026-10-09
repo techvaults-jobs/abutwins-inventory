@@ -7,7 +7,8 @@ import { money } from "@/lib/utils"
 import { prisma } from "@/lib/prisma"
 import { SwapsList } from "./swaps-list"
 
-export default async function SwapsPage() {
+export default async function SwapsPage({ searchParams }: { searchParams: Promise<{ status?: string }> }) {
+  const { status } = await searchParams
   const [swaps, bankAccounts] = await Promise.all([
     getSwaps(),
     prisma.bankAccount.findMany({
@@ -30,6 +31,7 @@ export default async function SwapsPage() {
         }
       />
       <SwapsList
+        initialStatus={status}
         banks={bankAccounts.map((bank) => ({
           id: bank.id,
           branchId: bank.branchId,

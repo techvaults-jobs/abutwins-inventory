@@ -14,6 +14,7 @@ import { Select } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
 import { formatShopWhen } from "@/lib/lagos-day"
 import { formatCurrency, money } from "@/lib/utils"
+import { useUrlFilter } from "@/lib/use-url-filter"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -435,19 +436,24 @@ function ApplyForm({
 
 // ─── Main list ────────────────────────────────────────────────────────────────
 
+const RETURN_FILTERS = ["all", "PENDING", "APPROVED", "COMPLETED"] as const
+
 export function ReturnsList({
   rows,
   stock,
   banks = [],
   canReconfirm = false,
+  initialStatus,
 }: {
   rows: ReturnRow[]
   stock: StockUnit[]
   banks?: RefundBank[]
   /** CEO and main admin: may change the course of action when applying. */
   canReconfirm?: boolean
+  /** ?status= from the address bar, e.g. Home's link to approved returns. */
+  initialStatus?: string
 }) {
-  const [status, setStatus] = useState("all")
+  const [status, setStatus] = useUrlFilter(initialStatus, RETURN_FILTERS)
 
   const filtered = useMemo(
     () => rows.filter((row) => (status === "all" ? true : row.status === status)),

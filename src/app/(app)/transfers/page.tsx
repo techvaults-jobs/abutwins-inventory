@@ -9,7 +9,8 @@ import { requireUser } from "@/lib/session"
 import { money } from "@/lib/utils"
 import { TransfersList } from "./transfers-list"
 
-export default async function TransfersPage() {
+export default async function TransfersPage({ searchParams }: { searchParams: Promise<{ status?: string }> }) {
+  const { status } = await searchParams
   // A transfer moves our own stock between our own shops; it is not a sale,
   // so it is always valued at what the stock cost us, for everyone who
   // handles it (the owner's rule), never at selling price.
@@ -77,7 +78,7 @@ export default async function TransfersPage() {
           </Button>
         }
       />
-      <TransfersList transfers={listRows} atCost={atCost} />
+      <TransfersList transfers={listRows} atCost={atCost} initialStatus={status} />
     </div>
   )
 }

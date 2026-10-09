@@ -205,7 +205,7 @@ export const navGroups: NavGroup[] = [
         href: "/transfers",
         icon: ArrowLeftRight,
         children: [
-          { name: "All transfers", href: "/transfers", icon: ArrowLeftRight, hint: "Waiting, on the way, accepted and rejected" },
+          { name: "All transfers", href: "/transfers", icon: ArrowLeftRight, hint: "Waiting, accepted and rejected" },
           { name: "Start a transfer", href: "/transfers/new", icon: PlusCircle, hint: "Send stock to another Abu Twins shop" },
         ],
       },

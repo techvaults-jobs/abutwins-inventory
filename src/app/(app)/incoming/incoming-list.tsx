@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useMemo } from "react"
 import { setIncomingVisible } from "@/app/actions/incoming"
 import { PreviewIncomingModal } from "./preview-incoming-modal"
 import { ActionForm } from "@/components/action-form"
@@ -8,7 +8,8 @@ import { EmptyState, StatusBadge } from "@/components/shared"
 import { TablePager, usePagedRows } from "@/components/table-pager"
 import { WorkflowSteps } from "@/components/workflow-steps"
 import { Badge } from "@/components/ui/badge"
-import { formatShopWhen } from "@/lib/lagos-day"
+import { formatShopWhen, watBounds, watDayKey } from "@/lib/lagos-day"
+import { useUrlFilter } from "@/lib/use-url-filter"
 
 type IncomingLot = {
   id: string
@@ -37,29 +38,43 @@ type IncomingLot = {
   }>
 }
 
+const INCOMING_FILTERS = ["all", "COMING", "LATE", "PENDING_APPROVAL", "ARRIVED", "CANCELLED"] as const
+
 export function IncomingList({
   lots,
   canBook,
   isAdmin,
+  initialStatus,
 }: {
   lots: IncomingLot[]
   canBook: boolean
   isAdmin: boolean
+  /** ?status= from the address bar, e.g. Home's link to late goods. */
+  initialStatus?: string
 }) {
-  const [status, setStatus] = useState("all")
+  const [status, setStatus] = useUrlFilter(initialStatus, INCOMING_FILTERS)
+
+  // Late: still coming after the day it was due, the same rule as Home.
+  const isLate = useMemo(() => {
+    const todayStart = watBounds(watDayKey()).start.getTime()
+    return (lot: IncomingLot) =>
+      lot.status === "COMING" && lot.expectedDate !== null && new Date(lot.expectedDate).getTime() < todayStart
+  }, [])
 
   const filtered = useMemo(
-    () => lots.filter((lot) => (status === "all" ? true : lot.status === status)),
-    [lots, status]
+    () =>
+      lots.filter((lot) => (status === "all" ? true : status === "LATE" ? isLate(lot) : lot.status === status)),
+    [lots, status, isLate]
   )
 
   const counts = useMemo(() => {
-    const byStatus: Record<string, number> = { all: lots.length }
+    const byStatus: Record<string, number> = { all: lots.length, LATE: 0 }
     for (const lot of lots) {
       byStatus[lot.status] = (byStatus[lot.status] ?? 0) + 1
+      if (isLate(lot)) byStatus.LATE += 1
     }
     return byStatus
-  }, [lots])
+  }, [lots, isLate])
 
   const pager = usePagedRows(filtered, status)
 
@@ -69,11 +84,12 @@ export function IncomingList({
         activeKey={status}
         onSelect={setStatus}
         steps={[
-          { key: "all", label: "All", count: counts.all },
-          { key: "COMING", label: "Coming", count: counts.COMING ?? 0 },
-          { key: "PENDING_APPROVAL", label: "Waiting for yes", count: counts.PENDING_APPROVAL ?? 0 },
-          { key: "ARRIVED", label: "In shop", count: counts.ARRIVED ?? 0 },
-          { key: "CANCELLED", label: "Cancelled", count: counts.CANCELLED ?? 0 },
+          { key: "all", label: "All", count: counts.all, hint: "Every booking" },
+          { key: "COMING", label: "Coming", count: counts.COMING ?? 0, hint: "Left the supplier" },
+          { key: "LATE", label: "Late", count: counts.LATE, hint: "Past the day it was due" },
+          { key: "PENDING_APPROVAL", label: "Waiting for yes", count: counts.PENDING_APPROVAL ?? 0, hint: "Needs approval" },
+          { key: "ARRIVED", label: "In shop", count: counts.ARRIVED ?? 0, hint: "Counted in" },
+          { key: "CANCELLED", label: "Cancelled", count: counts.CANCELLED ?? 0, hint: "Not coming" },
         ]}
       />
 

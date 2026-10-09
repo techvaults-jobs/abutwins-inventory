@@ -14,6 +14,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { formatShopWhen } from "@/lib/lagos-day"
 import { statusLabel } from "@/lib/status"
 import { formatCurrency } from "@/lib/utils"
+import { useUrlFilter } from "@/lib/use-url-filter"
 
 const stages = ["PENDING", "DIAGNOSING", "REPAIRING", "WAITING_PARTS", "COMPLETED", "DELIVERED"]
 
@@ -30,8 +31,17 @@ type RepairRow = {
   customer: { name: string } | null
 }
 
-export function RepairsList({ rows }: { rows: RepairRow[] }) {
-  const [status, setStatus] = useState("all")
+const REPAIR_FILTERS = ["all", "PENDING", "DIAGNOSING", "WAITING_PARTS", "REPAIRING", "DELIVERED"] as const
+
+export function RepairsList({
+  rows,
+  initialStatus,
+}: {
+  rows: RepairRow[]
+  /** ?status= from the address bar. */
+  initialStatus?: string
+}) {
+  const [status, setStatus] = useUrlFilter(initialStatus, REPAIR_FILTERS)
 
   const filtered = useMemo(
     () => rows.filter((row) => (status === "all" ? true : row.status === status)),
@@ -81,7 +91,6 @@ export function RepairsList({ rows }: { rows: RepairRow[] }) {
       <WorkflowSteps
         activeKey={status}
         onSelect={setStatus}
-        className="lg:grid-cols-3 xl:grid-cols-6"
         steps={[
           { key: "all", label: "All repairs", count: counts.all, hint: "Every job on the bench" },
           { key: "PENDING", label: "Take in", count: counts.PENDING ?? 0, hint: "Just opened" },

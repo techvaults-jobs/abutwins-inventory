@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button"
 import { can, isShopOwner } from "@/lib/permissions"
 import { requireUser } from "@/lib/session"
 
-export default async function IncomingPage() {
+export default async function IncomingPage({ searchParams }: { searchParams: Promise<{ status?: string }> }) {
+  const { status } = await searchParams
   const me = await requireUser()
   const lots = await getIncomingLots()
   const canBook = isShopOwner(me.role) || (await can(me.role, "action.incoming"))
@@ -27,7 +28,7 @@ export default async function IncomingPage() {
           ) : null
         }
       />
-      <IncomingList lots={lots} canBook={canBook} isAdmin={isShopOwner(me.role)} />
+      <IncomingList lots={lots} canBook={canBook} isAdmin={isShopOwner(me.role)} initialStatus={status} />
     </div>
   )
 }

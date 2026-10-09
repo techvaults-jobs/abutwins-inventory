@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button"
 import { downloadTable } from "@/lib/download-table"
 import { formatShopWhen } from "@/lib/lagos-day"
 import { formatCurrency, money } from "@/lib/utils"
+import { useUrlFilter } from "@/lib/use-url-filter"
 
 type TransferRow = {
   id: string
@@ -78,24 +79,45 @@ function transferTotals(transfer: TransferRow) {
   }
 }
 
+const TRANSFER_FILTERS = ["all", "PENDING", "RECEIVED", "CANCELLED"] as const
+
+/**
+ * Which tile a transfer counts under. On the way is from before accepting
+ * replaced sending: such a transfer still waits for the receiving shop, the
+ * same as Waiting for accept, and Home counts the two together.
+ */
+function tileOf(status: string) {
+  return status === "IN_TRANSIT" ? "PENDING" : status
+}
+
 /**
  * `atCost` for the CEO. Everyone else sees transfers valued at sell price; their
  * rows' "costPrice" fields already hold the selling price from the server.
  */
-export function TransfersList({ transfers, atCost = false }: { transfers: TransferRow[]; atCost?: boolean }) {
+export function TransfersList({
+  transfers,
+  atCost = false,
+  initialStatus,
+}: {
+  transfers: TransferRow[]
+  atCost?: boolean
+  /** ?status= from the address bar, e.g. Home's link to transfers still waiting. */
+  initialStatus?: string
+}) {
   const unitWord = atCost ? "Unit cost" : "Unit price"
   const valueWord = atCost ? "Cost value" : "Value at sell price"
-  const [status, setStatus] = useState("all")
+  const [status, setStatus] = useUrlFilter(initialStatus, TRANSFER_FILTERS)
 
   const filtered = useMemo(
-    () => transfers.filter((transfer) => (status === "all" ? true : transfer.status === status)),
+    () => transfers.filter((transfer) => (status === "all" ? true : tileOf(transfer.status) === status)),
     [transfers, status]
   )
 
   const counts = useMemo(() => {
     const byStatus: Record<string, number> = { all: transfers.length }
     for (const transfer of transfers) {
-      byStatus[transfer.status] = (byStatus[transfer.status] ?? 0) + 1
+      const tile = tileOf(transfer.status)
+      byStatus[tile] = (byStatus[tile] ?? 0) + 1
     }
     return byStatus
   }, [transfers])
@@ -236,11 +258,10 @@ export function TransfersList({ transfers, atCost = false }: { transfers: Transf
         activeKey={status}
         onSelect={setStatus}
         steps={[
-          { key: "all", label: "All", count: counts.all },
-          { key: "PENDING", label: "Waiting for accept", count: counts.PENDING ?? 0 },
-          { key: "IN_TRANSIT", label: "On the way", count: counts.IN_TRANSIT ?? 0 },
-          { key: "RECEIVED", label: "Accepted", count: counts.RECEIVED ?? 0 },
-          { key: "CANCELLED", label: "Rejected", count: counts.CANCELLED ?? 0 },
+          { key: "all", label: "All transfers", count: counts.all, hint: "Every shop to shop" },
+          { key: "PENDING", label: "Waiting for accept", count: counts.PENDING ?? 0, hint: "Receiving shop to check" },
+          { key: "RECEIVED", label: "Accepted", count: counts.RECEIVED ?? 0, hint: "On the other shelf" },
+          { key: "CANCELLED", label: "Rejected", count: counts.CANCELLED ?? 0, hint: "Stock went back" },
         ]}
       />
 

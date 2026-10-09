@@ -9,7 +9,8 @@ import { can } from "@/lib/permissions"
 import { requireUser } from "@/lib/session"
 import { RepairsList } from "./repairs-list"
 
-export default async function RepairsPage() {
+export default async function RepairsPage({ searchParams }: { searchParams: Promise<{ status?: string }> }) {
+  const { status } = await searchParams
   const user = await requireUser()
   const canOpen = await can(user.role, "action.repair")
   const rows = await getRepairs()
@@ -29,6 +30,7 @@ export default async function RepairsPage() {
           }
         />
         <RepairsList
+          initialStatus={status}
           // Only what the list shows. Passing the whole row sent the staff
           // member's login record, password hash included, to the browser.
           rows={rows.map((row) => ({

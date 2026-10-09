@@ -10,7 +10,8 @@ import { requireUser } from "@/lib/session"
 import { isShopOwner } from "@/lib/roles"
 import { ReturnsList } from "./returns-list"
 
-export default async function ReturnsPage() {
+export default async function ReturnsPage({ searchParams }: { searchParams: Promise<{ status?: string }> }) {
+  const { status } = await searchParams
   const [rows, stock, bankAccounts, me] = await Promise.all([
     getReturns(),
     getInStockForReplace(),
@@ -37,6 +38,7 @@ export default async function ReturnsPage() {
           }
         />
         <ReturnsList
+          initialStatus={status}
           // Only what the list shows. Spreading the whole row sent the staff
           // member's login record, password hash included, to the browser.
           rows={rows.map((row) => ({

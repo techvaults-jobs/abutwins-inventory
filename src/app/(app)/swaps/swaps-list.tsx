@@ -11,6 +11,7 @@ import { WorkflowSteps } from "@/components/workflow-steps"
 import { Input } from "@/components/ui/input"
 import { Select } from "@/components/ui/select"
 import { formatShopWhen } from "@/lib/lagos-day"
+import { useUrlFilter } from "@/lib/use-url-filter"
 import { formatCurrency } from "@/lib/utils"
 import { shopConditionLabel } from "@/lib/conditions"
 
@@ -59,8 +60,19 @@ function deviceLabel(row: { imei1: string; serialNumber?: string | null }) {
   return row.imei1
 }
 
-export function SwapsList({ swaps, banks = [] }: { swaps: SwapRow[]; banks?: SwapBank[] }) {
-  const [status, setStatus] = useState("all")
+const SWAP_FILTERS = ["all", "PENDING", "APPROVED", "COMPLETED"] as const
+
+export function SwapsList({
+  swaps,
+  banks = [],
+  initialStatus,
+}: {
+  swaps: SwapRow[]
+  banks?: SwapBank[]
+  /** ?status= from the address bar, e.g. Home's link to approved swaps. */
+  initialStatus?: string
+}) {
+  const [status, setStatus] = useUrlFilter(initialStatus, SWAP_FILTERS)
 
   const filtered = useMemo(
     () => swaps.filter((swap) => (status === "all" ? true : swap.status === status)),

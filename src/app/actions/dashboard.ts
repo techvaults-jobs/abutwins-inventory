@@ -537,13 +537,14 @@ export async function getDashboardData() {
         imeiGaps: imeiCheck.filter((row) => row.delta !== 0).length,
       }
     })(),
+    // Each link opens its list on the tile that holds exactly these rows.
     tasks: [
       { href: "/finance/close", label: "Days not closed yet", count: unclosedCount },
-      { href: "/swaps", label: "Swap Deals approved but not finished (phone gone, money not recorded)", count: unfinishedSwaps },
-      { href: "/returns", label: "Returns approved but not finished", count: unfinishedReturns },
+      { href: "/swaps?status=APPROVED", label: "Swap Deals approved but not finished (phone gone, money not recorded)", count: unfinishedSwaps },
+      { href: "/returns?status=APPROVED", label: "Returns approved but not finished", count: unfinishedReturns },
       { href: "/pos", label: "Parked sales sitting too long", count: parked.sitting },
       { href: "/audit?risk=HIGH", label: "Parked sales that vanished from a device", count: parked.vanished },
-      { href: "/incoming", label: "Goods on the way that are late", count: overdueIncoming },
+      { href: "/incoming?status=LATE", label: "Goods on the way that are late", count: overdueIncoming },
       {
         href: "/incoming",
         label: "Goods received short of what was expected (last 30 days)",
@@ -552,7 +553,7 @@ export async function getDashboardData() {
           return row.receivedQuantity != null && row.receivedQuantity !== expected
         }).length,
       },
-      { href: "/transfers", label: "Shop to shop waiting for the other shop to confirm", count: pendingTransfers },
+      { href: "/transfers?status=PENDING", label: "Shop to shop waiting for the other shop to confirm", count: pendingTransfers },
       { href: "/sales", label: "Sales with no customer name", count: walkIns },
       {
         href: "/inventory",
