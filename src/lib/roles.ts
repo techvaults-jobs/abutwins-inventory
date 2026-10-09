@@ -34,8 +34,8 @@ export function isShopOwner(role: UserRole) {
  * to the CEO, the main admin (who runs the system for the CEO), and to the books: the Financial Accountant keeps the accounts and
  * the Internal Auditor checks prices, below-cost sales and stock value, and
  * neither can do that without cost. These are fixed here in code rather than
- * boxes on Who can see what. Seeing is not changing: only the CEO and the main
- * admin change a cost price (canChangeCost).
+ * boxes on Who can see what. Seeing is not changing: the CEO, the main admin
+ * and the branch manager change a cost price (canChangeCost).
  */
 export function isCEO(role: UserRole) {
   return role === "CEO"
@@ -57,22 +57,33 @@ export function canSeeCost(role: UserRole) {
 }
 
 /**
- * Changing what an item cost us, and the Prices panel on Business today: the
- * CEO and the main admin. The main admin holds full control of the system for
- * the CEO; every change lands in Who did what, and the CEO is alerted to the
- * main admin's cost changes and high-risk work (see lib/prisma).
+ * Who sets an item's prices: cost, lowest and selling. The client asked for
+ * the branch manager to price alongside the CEO and the main admin, so a new
+ * item can be priced the moment it is added and sold straight away, without
+ * waiting on the CEO. Prices are on the item, so a manager's change applies
+ * in every shop. Every move lands in the price history and Who did what, and
+ * the CEO is alerted to cost changes by the main admin or a manager (see
+ * lib/prisma).
  */
+export const PRICE_SETTER_ROLES: readonly UserRole[] = ["CEO", "SUPER_ADMIN", "BRANCH_MANAGER"]
+
+/** Changing what an item cost us. See PRICE_SETTER_ROLES. */
 export function canChangeCost(role: UserRole) {
-  return isShopOwner(role)
+  return PRICE_SETTER_ROLES.includes(role)
+}
+
+/** Changing the selling or lowest price of an item. See PRICE_SETTER_ROLES. */
+export function canChangePrices(role: UserRole) {
+  return PRICE_SETTER_ROLES.includes(role)
 }
 
 /**
- * Changing the selling or lowest price of an item already on the list: the
- * CEO and the main admin, as is the cost price (canChangeCost). A new item still gets its starting
- * prices from whoever adds or loads it.
+ * Cost on the price list and the item's price boxes. Whoever sets a cost must
+ * see the one they are changing, so the price setters see it there too. Cost
+ * elsewhere (reports, stock value, margins at the till) stays with canSeeCost.
  */
-export function canChangePrices(role: UserRole) {
-  return isShopOwner(role)
+export function canSeePriceListCost(role: UserRole) {
+  return canSeeCost(role) || canChangeCost(role)
 }
 
 /**

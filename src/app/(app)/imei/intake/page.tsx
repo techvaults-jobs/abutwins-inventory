@@ -16,7 +16,7 @@ import { money } from "@/lib/utils"
  * for looking a phone up, the other is for putting one on the shelf.
  */
 export default async function ImeiIntakePage() {
-  // The form carries cost, so only whoever may change cost (CEO, main admin) types prices on it.
+  // The form carries cost, so only whoever may change cost (CEO, main admin, branch manager) types prices on it.
   const canPrice = canChangeCost((await requireUser()).role)
   const [counts, branches, suppliers, products] = await Promise.all([
     getImeiStatusCounts(),

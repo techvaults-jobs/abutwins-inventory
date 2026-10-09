@@ -35,7 +35,7 @@ export function ProductManageDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
   canRemove?: boolean
-  /** Edit lowest and selling price (main admin and CEO). The cost box also needs showCost (the CEO). */
+  /** Edit lowest and selling price (the price setters). The cost box also needs showCost. */
   canPrice?: boolean
   showCost?: boolean
   brandNames?: string[]
@@ -244,7 +244,7 @@ export function ProductManageDialog({
             ) : (
               <p className="rounded-lg bg-muted/60 px-3 py-2 text-xs text-muted-foreground">
                 Lowest {formatCurrency(product.minimumPrice)} · selling {formatCurrency(product.sellingPrice)}
-                {showCost ? ` · cost ${formatCurrency(product.costPrice)}` : ""}. Only the main admin or the CEO changes prices.
+                {showCost ? ` · cost ${formatCurrency(product.costPrice)}` : ""}. The CEO, the main admin or a branch manager changes prices.
               </p>
             )}
             <div>

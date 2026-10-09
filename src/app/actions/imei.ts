@@ -186,8 +186,8 @@ export async function intakeImei(formData: FormData) {
     }
   }
 
-  // Only the CEO or main admin types prices here. Anyone else receives at the price list's
-  // own prices, whatever the form sends.
+  // Only a price setter (CEO, main admin, branch manager) types prices here.
+  // Anyone else receives at the price list's own prices, whatever the form sends.
   const typesPrices = canChangeCost(user.role)
   const costPrice = typesPrices ? Number(formData.get("costPrice") || 0) : money(product.costPrice)
   const minimumPrice = typesPrices ? Number(formData.get("minimumPrice") || 0) : money(product.minimumPrice)

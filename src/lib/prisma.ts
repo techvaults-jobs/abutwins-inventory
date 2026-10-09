@@ -65,7 +65,8 @@ type WatchedRow = {
  * The main admin holds full control of the system, under the CEO's watch.
  * Every move is already in Who did what; the high-risk ones (removals,
  * downloads, staff, access, settings, day closes, approvals) and every cost
- * change also land on the CEO's alerts as they happen. Best effort: an alert
+ * change also land on the CEO's alerts as they happen, as does a branch
+ * manager's cost change. Best effort: an alert
  * that fails never touches the work it reports on.
  */
 async function watchMainAdmin(row: WatchedRow) {
@@ -78,6 +79,32 @@ async function watchMainAdmin(row: WatchedRow) {
     const userId = userIdFromCreate(row)
     if (!userId) return
     const actor = await base.user.findUnique({ where: { id: userId }, select: { role: true, name: true, email: true } })
+    // A branch manager also sets prices (PRICE_SETTER_ROLES). Their cost
+    // changes go to the CEO and the main admin, so a cost moved in one shop is
+    // seen by the people who answer for the whole business.
+    if (actor?.role === "BRANCH_MANAGER" && costChange) {
+      const watchers = await base.user.findMany({
+        where: { role: { in: ["CEO", "SUPER_ADMIN"] }, isActive: true },
+        select: { id: true },
+      })
+      if (watchers.length === 0) return
+      let note = ""
+      try {
+        note = String(JSON.parse(newValue)?.note ?? "")
+      } catch {}
+      await base.notification.createMany({
+        data: watchers.map((watcher) => ({
+          userId: watcher.id,
+          type: "SYSTEM" as const,
+          title: "Branch manager changed a cost price",
+          message: note
+            ? `${actor.name || actor.email} changed a cost price. ${note}`
+            : `${actor.name || actor.email} changed a cost price${row.entityId ? ` (${String(row.entityId).slice(0, 60)})` : ""}.`,
+          actionUrl: "/audit?role=BRANCH_MANAGER",
+        })),
+      })
+      return
+    }
     if (actor?.role !== "SUPER_ADMIN") return
     const ceos = await base.user.findMany({ where: { role: "CEO", isActive: true }, select: { id: true } })
     if (ceos.length === 0) return

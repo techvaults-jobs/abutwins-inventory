@@ -1,6 +1,6 @@
 import type { UserRole } from "@prisma/client"
 import { can } from "@/lib/permissions"
-import { isBooksDesk, isShopOwner } from "@/lib/roles"
+import { canChangePrices, isBooksDesk, isShopOwner } from "@/lib/roles"
 
 export {
   isSuperAdmin,
@@ -10,6 +10,8 @@ export {
   canSeeCost,
   canChangeCost,
   canChangePrices,
+  canSeePriceListCost,
+  PRICE_SETTER_ROLES,
   canHardDelete,
   isBooksDesk,
   booksDeskPartner,
@@ -29,16 +31,20 @@ export async function canManageCatalog(role: UserRole) {
 
 /**
  * Putting a new item name on the list. Full catalog staff can, and so can a
- * role given only Add new item names (shop managers): their new items carry
- * no prices until the CEO or main admin sets them (setsStartingPrices).
+ * role given only Add new item names. Whether they also type its prices is
+ * setsStartingPrices.
  */
 export async function canAddItemName(role: UserRole) {
   return (await canManageCatalog(role)) || (await can(role, "action.add_item"))
 }
 
-/** May this person type the starting prices on a brand-new item? */
+/**
+ * May this person type the starting prices on a brand-new item? The price
+ * setters (CEO, main admin, branch manager) and full catalog staff. Anyone
+ * else saves the name only and the price setters are asked to price it.
+ */
 export async function setsStartingPrices(role: UserRole) {
-  return isShopOwner(role) || (await canManageCatalog(role))
+  return canChangePrices(role) || (await canManageCatalog(role))
 }
 
 export async function canSell(role: UserRole) {

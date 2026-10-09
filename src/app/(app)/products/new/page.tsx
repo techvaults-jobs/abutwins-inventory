@@ -122,21 +122,21 @@ export default async function NewProductPage() {
         <FormSection title={canPrice ? "Prices (₦)" : "Warranty and note"}>
           {canPrice ? null : (
             <p className="mb-4 rounded-lg bg-muted/60 px-4 py-3 text-sm text-muted-foreground">
-              You add the name. The CEO or the main admin sets its cost, lowest and selling price, and they are told
-              the moment you save. Until then the item cannot be sold at the till.
+              You add the name. The CEO, the main admin or your branch manager sets its cost, lowest and selling
+              price, and they are told the moment you save. Until then the item cannot be sold at the till.
             </p>
           )}
           <div className="grid gap-4 sm:grid-cols-3">
             {canPrice ? (
               <>
-                <FormField label="Cost price">
-                  <Input name="costPrice" type="number" inputMode="decimal" min={0} />
+                <FormField label="Cost price" hint="What one unit cost us.">
+                  <Input name="costPrice" type="number" inputMode="decimal" min={0} step="0.01" />
                 </FormField>
-                <FormField label="Lowest price">
-                  <Input name="minimumPrice" type="number" inputMode="decimal" min={0} />
+                <FormField label="Lowest price" hint="Staff cannot sell below it. Empty means the selling price.">
+                  <Input name="minimumPrice" type="number" inputMode="decimal" min={0} step="0.01" />
                 </FormField>
-                <FormField label="Selling price">
-                  <Input name="sellingPrice" type="number" inputMode="decimal" min={0} />
+                <FormField label="Selling price" hint="With a selling price the item sells at once.">
+                  <Input name="sellingPrice" type="number" inputMode="decimal" min={0} step="0.01" />
                 </FormField>
               </>
             ) : null}

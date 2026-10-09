@@ -33,7 +33,7 @@ export function ImeiIntakeForm({
   products: IntakeProduct[]
   branches: Branch[]
   suppliers: Supplier[]
-  /** Type cost, lowest and selling price as the phone comes in. The CEO's only. */
+  /** Type cost, lowest and selling price as the phone comes in. The price setters only (canChangeCost). */
   canPrice?: boolean
 }) {
   const [imei1, setImei1] = useState("")
@@ -163,7 +163,7 @@ export function ImeiIntakeForm({
       </Select>
 
       <div className={`grid grid-cols-2 gap-3 ${canPrice ? "sm:grid-cols-4" : ""}`}>
-        {/* Prices are the CEO's. Anyone else receives at the price list's own prices. */}
+        {/* Prices are the price setters'. Anyone else receives at the price list's own prices. */}
         {canPrice ? (
           <>
         <div>

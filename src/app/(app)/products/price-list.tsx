@@ -12,8 +12,9 @@ import { TablePager, usePagedRows } from "@/components/table-pager"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { formatCurrency } from "@/lib/utils"
+import { PriceEditDialog } from "./price-edit-dialog"
 import { ProductManageDialog } from "./product-manage-dialog"
-import { Settings2 } from "lucide-react"
+import { Settings2, Tag } from "lucide-react"
 import { trackingLabel } from "@/lib/unit-identity"
 
 export type PriceRow = {
@@ -51,9 +52,9 @@ export function ProductPriceList({
   products: PriceRow[]
   /** Change item details (name, brand, how we count it) and reduce stock. */
   canEdit: boolean
-  /** Tick items and change their prices. The CEO's only. */
+  /** Tick items and change their prices: the CEO, the main admin and the branch manager. */
   canPrice?: boolean
-  /** Show what each item cost us. The CEO's only; others get cost 0 from the server. */
+  /** Show what each item cost us. Anyone else gets cost 0 from the server. */
   showCost?: boolean
   canRemove?: boolean
   initialQuery?: string
@@ -67,6 +68,10 @@ export function ProductPriceList({
   const [reason, setReason] = useState("")
   const [busy, setBusy] = useState(false)
   const [managingProduct, setManagingProduct] = useState<PriceRow | null>(null)
+  const [pricingProduct, setPricingProduct] = useState<PriceRow | null>(null)
+  // A price setter without Change (a branch manager) gets Prices on each line
+  // for the cost, lowest and selling price together.
+  const pricesOnly = canPrice && !canEdit
   // The same category chips as Correct and close opening stock, so staff pick
   // Phones or Laptops the same way on both screens, then one exact category.
   const [group, setGroup] = useState<string>("ALL")
@@ -319,6 +324,11 @@ export function ProductPriceList({
                       <Settings2 className="mr-1.5 h-3.5 w-3.5" /> Change
                     </Button>
                   ) : null}
+                  {pricesOnly ? (
+                    <Button type="button" size="sm" variant="outline" className="h-9 shrink-0" onClick={() => setPricingProduct(product)}>
+                      <Tag className="mr-1.5 h-3.5 w-3.5" /> Prices
+                    </Button>
+                  ) : null}
                 </div>
               </div>
             </li>
@@ -339,7 +349,7 @@ export function ProductPriceList({
               {canPrice ? <th className="px-4 py-3">New sell price</th> : null}
               <th className="px-4 py-3">Warranty</th>
               <th className="px-4 py-3">Units</th>
-              {canEdit ? <th className="px-4 py-3 text-right">Actions</th> : null}
+              {canEdit || pricesOnly ? <th className="px-4 py-3 text-right">Actions</th> : null}
             </tr>
           </thead>
           <tbody>
@@ -405,12 +415,26 @@ export function ProductPriceList({
                       </Button>
                     </td>
                   ) : null}
+                  {pricesOnly ? (
+                    <td className="px-4 py-3 text-right">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-8 gap-1.5 text-xs font-semibold hover:border-primary hover:text-primary"
+                        onClick={() => setPricingProduct(product)}
+                      >
+                        <Tag className="h-3.5 w-3.5" />
+                        <span>Prices</span>
+                      </Button>
+                    </td>
+                  ) : null}
                 </tr>
               )
             })}
             {visible.length === 0 ? (
               <tr>
-                <td className="px-4 py-8 text-sm text-muted-foreground" colSpan={5 + (canPrice ? 2 : 0) + (canEdit ? 1 : 0)}>
+                <td className="px-4 py-8 text-sm text-muted-foreground" colSpan={5 + (canPrice ? 2 : 0) + (canEdit || pricesOnly ? 1 : 0)}>
                   No items match the specified search parameters.
                 </td>
               </tr>
@@ -492,6 +516,7 @@ export function ProductPriceList({
         brandNames={brandNames}
         categoryNames={categoryNames}
       />
+      <PriceEditDialog product={pricingProduct} onOpenChange={(open) => !open && setPricingProduct(null)} />
     </div>
   )
 }

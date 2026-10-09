@@ -7,7 +7,7 @@ import { PageHeader, StatCard } from "@/components/shared"
 import { formatWatLong } from "@/lib/lagos-day"
 import { getProducts } from "@/app/actions/catalog"
 import { PricesPanel } from "./prices-panel"
-import { canChangeCost } from "@/lib/rbac"
+import { isShopOwner } from "@/lib/rbac"
 import { requireUser } from "@/lib/session"
 import { formatCurrency, money } from "@/lib/utils"
 import { UpdatedStamp } from "@/components/updated-stamp"
@@ -43,9 +43,9 @@ function Figure({
 export default async function OwnerBoardPage() {
   const board = await getOwnerBoard()
   if (!board) redirect("/dashboard")
-  // The price desk changes cost as well as prices: the CEO and the main admin, even
-  // though the books desk also sees profit on this board.
-  const priceItems = canChangeCost((await requireUser()).role)
+  // The price desk, with cost and margin on every item: the CEO and the main
+  // admin. A branch manager also changes prices, from the price list.
+  const priceItems = isShopOwner((await requireUser()).role)
     ? (await getProducts()).map((product) => ({
         id: product.id,
         name: [product.name, product.storage, product.color].filter(Boolean).join(" · "),

@@ -1,6 +1,6 @@
 import type { UserRole } from "@prisma/client"
 import { navGroups } from "@/components/layout/nav"
-import { ROLE_LABELS } from "@/lib/roles"
+import { canChangePrices, ROLE_LABELS } from "@/lib/roles"
 
 export type ManualSection = {
   id: string
@@ -30,7 +30,7 @@ const ROLE_JOB: Record<UserRole, { job: string; shops: string }> = {
     shops: "You see every shop.",
   },
   CEO: {
-    job: "You own the business with the main admin. You open every page and see profit, margins and what items cost us; the Accountant and Auditor see them too. Only you change a cost price, on the Prices panel on Business today. You can correct money, staff, shops, settings, prices and Who can see what. Nobody can secretly rewrite an old invoice.",
+    job: "You own the business with the main admin. You open every page and see profit, margins and what items cost us; the Accountant and Auditor see them too. You change prices, cost included, on the Prices panel on Business today or the price list; the main admin and branch managers can too, and you are alerted when they change a cost. You can correct money, staff, shops, settings, prices and Who can see what. Nobody can secretly rewrite an old invoice.",
     shops: "You see every shop.",
   },
   AUDITOR: {
@@ -42,7 +42,7 @@ const ROLE_JOB: Record<UserRole, { job: string; shops: string }> = {
     shops: "You see every shop.",
   },
   BRANCH_MANAGER: {
-    job: "You run one shop: sell, receive, upload stock one by one or many from Excel, transfer, approve shop work, and add staff for that shop. You do not add item names or change prices.",
+    job: "You run one shop: sell, receive, upload stock one by one or many from Excel, transfer, approve shop work, and add staff for that shop. You add new item names with their cost, lowest and selling price, so they sell at once, and you change prices on the price list. A price you set applies in every shop, and the CEO is told when you change a cost.",
     shops: "You see your shop only, unless the main admin later ticks See every shop.",
   },
   VAULT_MANAGER: {
@@ -136,7 +136,7 @@ const PAGES: Array<
     ],
     watch: [
       "One list keeps names and prices the same in every shop.",
-      "The person who loads stock adds new items. The main admin or the CEO changes prices; the CEO, the main admin, the Accountant and the Auditor see what items cost. A shop manager reads the list but cannot change it.",
+      "The person who loads stock or a branch manager adds new items. The CEO, the main admin or a branch manager changes prices, cost included; the price setters, the Accountant and the Auditor see what items cost. Anyone else reads the list but cannot change it.",
       "This is not a carton sale. You still sell by the unit. Bulk here means many prices in one save.",
       "A phone marked Damaged is not for Sell now. On All phones, use Set Good (sellable) or Set Damaged when it must change.",
     ],
@@ -826,7 +826,15 @@ export function buildRoleManual(role: UserRole, keys: Set<string>, allowedHrefs:
   const pages = sections.filter((row) => row.href).map((row) => row.title)
   const actions = [
     keys.has("action.sell") ? "Sell and collect money" : "",
-    keys.has("action.catalog") ? "Add items and change prices" : keys.has("action.add_item") ? "Add new item names (the CEO or main admin prices them)" : "",
+    keys.has("action.catalog") || keys.has("action.add_item")
+      ? canChangePrices(role)
+        ? "Add items and set their prices"
+        : keys.has("action.catalog")
+          ? "Add items and their starting prices"
+          : "Add new item names (the CEO, main admin or branch manager prices them)"
+      : canChangePrices(role)
+        ? "Change prices"
+        : "",
     keys.has("action.intake") ? "Receive phones and supplier goods" : "",
     keys.has("action.incoming") ? "Book goods before they arrive" : "",
     keys.has("action.transfer") ? "Send and receive goods between shops" : "",

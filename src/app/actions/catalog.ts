@@ -5,7 +5,7 @@ import { Prisma, ProductTracking } from "@prisma/client"
 import { prisma } from "@/lib/prisma"
 import { watDayKey } from "@/lib/lagos-day"
 import { requireUser } from "@/lib/session"
-import { canAddItemName, canChangeCost, canChangePrices, canHardDelete, canManageCatalog, canSeeCost, setsStartingPrices } from "@/lib/rbac"
+import { canAddItemName, canChangeCost, canChangePrices, canHardDelete, canManageCatalog, canSeePriceListCost, PRICE_SETTER_ROLES, setsStartingPrices } from "@/lib/rbac"
 import { can } from "@/lib/permissions"
 import { shopError } from "@/lib/shop-speak"
 import { UNSAFE_KEYS } from "@/lib/table-file"
@@ -60,13 +60,18 @@ async function shopsForScope(formData: FormData) {
 }
 
 /**
- * A new item saved without prices (a shop manager added the name) cannot be
- * sold until it is priced, so the CEO and main admin are told straight away.
+ * A new item saved without a selling price cannot be sold until it is priced,
+ * so the people who price items are told straight away: the CEO, the main
+ * admin, and the manager of the shop that added it.
  */
-async function askOwnersToPrice(names: string[], byName: string) {
+async function askOwnersToPrice(names: string[], byName: string, branchId: string | null) {
   if (names.length === 0) return
   const owners = await prisma.user.findMany({
-    where: { isActive: true, role: { in: ["CEO", "SUPER_ADMIN"] } },
+    where: {
+      isActive: true,
+      role: { in: [...PRICE_SETTER_ROLES] },
+      OR: [{ role: { not: "BRANCH_MANAGER" } }, ...(branchId ? [{ branchId }] : [])],
+    },
     select: { id: true },
   })
   if (owners.length === 0) return
@@ -126,15 +131,16 @@ export async function getProducts(search?: string) {
   })
   // A server action is a public endpoint: the price list hides cost on screen,
   // but this used to hand every cost price to anyone signed in who called it.
-  if (canSeeCost(user.role)) return rows
+  if (canSeePriceListCost(user.role)) return rows
   return rows.map((row) => ({ ...row, costPrice: new Prisma.Decimal(0) }))
 }
 
 export async function createProduct(formData: FormData) {
   const user = await requireUser()
   if (!(await canAddItemName(user.role))) return { error: "You are not allowed to add items. Ask the main admin." }
-  // A shop manager adds the name only. Prices stay with the CEO and main admin,
-  // so whatever the form sends, their new item starts with no prices.
+  // The CEO, the main admin, the branch manager and catalog staff price the
+  // item as they add it, so it can be sold at once. Anyone else adds the name
+  // only: whatever the form sends, their new item starts with no prices.
   const pricesAllowed = await setsStartingPrices(user.role)
 
   const name = String(formData.get("name") ?? "").trim()
@@ -182,8 +188,13 @@ export async function createProduct(formData: FormData) {
   const costPrice = pricesAllowed ? Number(formData.get("costPrice") || 0) : 0
   const sellingPrice = pricesAllowed ? Number(formData.get("sellingPrice") || 0) : 0
   const minimumPrice = pricesAllowed ? Number(formData.get("minimumPrice") || sellingPrice || 0) : 0
-  if (!Number.isFinite(costPrice) || !Number.isFinite(sellingPrice) || sellingPrice < 0 || costPrice < 0) {
-    return { error: "Cost and sell price must be numbers. Use 0 if you will set prices later." }
+  if (
+    ![costPrice, sellingPrice, minimumPrice].every((value) => Number.isFinite(value) && value >= 0)
+  ) {
+    return { error: "Cost, lowest and selling price must be numbers. Use 0 if you will set prices later." }
+  }
+  if (sellingPrice > 0 && minimumPrice > sellingPrice) {
+    return { error: "The lowest price cannot be above the selling price." }
   }
 
   const tracking = String(formData.get("tracking") || "IMEI")
@@ -223,12 +234,18 @@ export async function createProduct(formData: FormData) {
       action: "CREATE",
       entityType: "Product",
       entityId: product.id,
-      newValue: JSON.stringify({ sku, name, shops: shops.shops.map((shop) => shop.code), pricesSet: sellingPrice > 0 }),
+      newValue: JSON.stringify({
+        sku,
+        name,
+        shops: shops.shops.map((shop) => shop.code),
+        pricesSet: sellingPrice > 0,
+        ...(pricesAllowed ? { startingPrices: { costPrice, minimumPrice, sellingPrice } } : {}),
+      }),
       branchId: user.branchId,
     },
   })
   if (!(sellingPrice > 0)) {
-    await askOwnersToPrice([[name, storage].filter(Boolean).join(" ")], user.name || user.email)
+    await askOwnersToPrice([[name, storage].filter(Boolean).join(" ")], user.name || user.email, user.branchId)
   }
 
   revalidatePath("/products")
@@ -239,9 +256,9 @@ export async function createProduct(formData: FormData) {
 }
 
 /**
- * One item's prices from the CEO's Prices panel on Business today: cost,
- * lowest and selling, saved together. Every move lands in the price history
- * and Who did what, the same trail the price list leaves.
+ * One item's prices, cost, lowest and selling, saved together: the Prices
+ * panel on Business today, and Prices on a price list line for a branch
+ * manager. Every move lands in the price history and Who did what.
  */
 export async function setProductPrices(input: {
   id: string
@@ -249,10 +266,11 @@ export async function setProductPrices(input: {
   minimumPrice: number
   sellingPrice: number
   reason?: string
+  /** Where the change was made, for the price history when no reason is typed. */
+  from?: "owner" | "price-list"
 }) {
   const user = await requireUser()
-  // The Prices panel shows and sets cost: the CEO and the main admin.
-  if (!canChangeCost(user.role)) return { error: "Only the CEO or the main admin can change prices here." }
+  if (!canChangeCost(user.role)) return { error: "Only the CEO, the main admin or a branch manager can change prices." }
 
   const next = {
     costPrice: Number(input.costPrice),
@@ -276,7 +294,8 @@ export async function setProductPrices(input: {
   const moved = (Object.keys(next) as Array<keyof typeof next>).filter((key) => before[key] !== money(next[key]))
   if (moved.length === 0) return { success: true, message: "Those are already the prices." }
 
-  const reason = String(input.reason || "").trim() || "Changed on Business today"
+  const where = input.from === "price-list" ? "the price list" : "Business today"
+  const reason = String(input.reason || "").trim() || `Changed on ${where}`
   const TYPE = { costPrice: "COST_PRICE", minimumPrice: "MINIMUM_PRICE", sellingPrice: "SELLING_PRICE" } as const
 
   await prisma.$transaction([
@@ -310,7 +329,7 @@ export async function setProductPrices(input: {
         newValue: JSON.stringify({
           ...Object.fromEntries(moved.map((key) => [key, next[key]])),
           reason,
-          note: `Prices changed on Business today: ${product.name} (${product.sku}).`,
+          note: `Prices changed on ${where}: ${product.name} (${product.sku}).`,
         }),
         branchId: user.branchId,
         risk: moved.includes("costPrice") ? "MEDIUM" : "LOW",
@@ -327,7 +346,7 @@ export async function setProductPrices(input: {
 
 export async function updateSelectedPrices(formData: FormData) {
   const user = await requireUser()
-  if (!canChangePrices(user.role)) return { error: "Only the main admin or the CEO can change prices." }
+  if (!canChangePrices(user.role)) return { error: "Only the CEO, the main admin or a branch manager can change prices." }
 
   const reason = String(formData.get("reason") || "Several prices updated together").trim() || "Several prices updated together"
   let parsed: unknown
@@ -697,7 +716,7 @@ export async function importProducts(formData: FormData) {
     created += 1
     if (!(sellingPrice > 0)) unpriced.push(name)
   }
-  await askOwnersToPrice(unpriced, user.name || user.email)
+  await askOwnersToPrice(unpriced, user.name || user.email, user.branchId)
 
   await prisma.auditLog.create({
     data: {
@@ -982,12 +1001,10 @@ export async function updateProduct(formData: FormData) {
   if (!(trackingRaw in ProductTracking)) return { error: "Pick how we count this item: IMEI, Serial number, or No number." }
   const tracking = trackingRaw as ProductTracking
 
-  // Prices on an item already on the list are the CEO's and main admin's to change. Anyone else
-  // edits the details and the prices stay exactly as they were, whatever the
-  // form sends.
+  // Prices on an item already on the list are for the price setters (CEO,
+  // main admin, branch manager). Anyone else edits the details and the prices
+  // stay exactly as they were, whatever the form sends.
   const pricesAllowed = canChangePrices(user.role)
-  // Cost only from someone who may see it (the CEO); the main admin changes
-  // the selling and lowest prices and the cost stays as it was.
   const costPrice = canChangeCost(user.role) ? Number(formData.get("costPrice") || 0) : money(existing.costPrice)
   const sellingPrice = pricesAllowed ? Number(formData.get("sellingPrice") || 0) : money(existing.sellingPrice)
   const minimumPrice = pricesAllowed ? Number(formData.get("minimumPrice") || sellingPrice) : money(existing.minimumPrice)

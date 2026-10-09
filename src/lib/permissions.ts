@@ -39,7 +39,7 @@ export const VIEW_PERMS = [
 export const ACTION_PERMS = [
   { key: "action.sell", label: "Sell and take payment" },
   { key: "action.catalog", label: "Add items, brands and categories" },
-  { key: "action.add_item", label: "Add new item names (the CEO or main admin sets their prices)" },
+  { key: "action.add_item", label: "Add new item names (branch managers also price them; anyone else waits for a price setter)" },
   { key: "action.upload", label: "Upload stock from a sheet or supplier bill" },
   { key: "action.intake", label: "Put one phone on the shelf" },
   { key: "action.incoming", label: "Book goods on the way" },
