@@ -10,7 +10,7 @@ import { can } from "@/lib/permissions"
 import { displayPartyName } from "@/lib/party-key"
 import { findDuplicateSupplier } from "@/lib/supplier-identity"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
-import { payablePurchaseWhere } from "@/lib/purchase-money"
+import { openingStockPurchaseWhere, payablePurchaseWhere } from "@/lib/purchase-money"
 import { formatCurrency, generateDocNumber, money } from "@/lib/utils"
 import type { SupplierKind } from "@prisma/client"
 
@@ -274,10 +274,10 @@ export async function getSuppliers() {
   ).some(Boolean)
   if (!allowed) return []
   await healOpeningStockBills()
-  return prisma.supplier.findMany({
-    where: {
-      name: { not: "Opening stock" },
-    },
+  // Every house, the opening stock ones included. Their opening bills come
+  // back on their own (openingBills): the stock's starting value is shown,
+  // but it is never part of what we owe.
+  const houses = await prisma.supplier.findMany({
     include: {
       _count: { select: { purchases: true, imeiRecords: true } },
       purchases: {
@@ -297,6 +297,26 @@ export async function getSuppliers() {
     },
     orderBy: { name: "asc" },
   })
+  const openingBills = await prisma.purchase.findMany({
+    where: { ...openingStockPurchaseWhere, supplierId: { in: houses.map((house) => house.id) } },
+    select: {
+      id: true,
+      supplierId: true,
+      invoiceNumber: true,
+      totalAmount: true,
+      createdAt: true,
+      branch: { select: { name: true, code: true } },
+      _count: { select: { imeiRecords: true } },
+    },
+    orderBy: { createdAt: "desc" },
+  })
+  const openingBySupplier = new Map<string, typeof openingBills>()
+  for (const bill of openingBills) {
+    const list = openingBySupplier.get(bill.supplierId) ?? []
+    list.push(bill)
+    openingBySupplier.set(bill.supplierId, list)
+  }
+  return houses.map((house) => ({ ...house, openingBills: openingBySupplier.get(house.id) ?? [] }))
 }
 
 export async function getSupplier(id: string) {
@@ -307,7 +327,7 @@ export async function getSupplier(id: string) {
   // the included bills and IMEIs; head office (viewBranchFilter -> undefined for
   // "All shops") sees every shop.
   const branchId = await viewBranchFilter(user)
-  return prisma.supplier.findUnique({
+  const supplier = await prisma.supplier.findUnique({
     where: { id },
     include: {
       purchases: {
@@ -323,6 +343,22 @@ export async function getSupplier(id: string) {
       },
     },
   })
+  if (!supplier) return null
+  // The opening stock loaded against this house: its value, shown apart from
+  // the bills, because it is the shop's starting stock and nothing is owed.
+  const openingBills = await prisma.purchase.findMany({
+    where: { ...openingStockPurchaseWhere, supplierId: id, ...(branchId ? { branchId } : {}) },
+    select: {
+      id: true,
+      invoiceNumber: true,
+      totalAmount: true,
+      createdAt: true,
+      branch: { select: { name: true, code: true } },
+      _count: { select: { imeiRecords: true } },
+    },
+    orderBy: { createdAt: "desc" },
+  })
+  return { ...supplier, openingBills }
 }
 
 export async function createSupplier(formData: FormData) {

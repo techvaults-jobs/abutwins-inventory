@@ -25,6 +25,10 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
   net -= money(supplier.creditBalance)
   const totalOwed = Math.max(0, net)
   const totalSurplus = Math.max(0, -net)
+  // Opening stock loaded under this name: the shop's starting value. Shown in
+  // full, kept out of everything above, because nothing on it is owed.
+  const openingValue = supplier.openingBills.reduce((sum, row) => sum + money(row.totalAmount), 0)
+  const openingUnits = supplier.openingBills.reduce((sum, row) => sum + row._count.imeiRecords, 0)
 
   return (
     <div className="space-y-6">
@@ -35,6 +39,14 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
       />
 
       <StatGrid>
+        {supplier.openingBills.length ? (
+          <StatCard
+            label="Opening stock value"
+            value={formatCurrency(openingValue)}
+            hint={`Starting stock · not owed · ${supplier.openingBills.length} load${supplier.openingBills.length === 1 ? "" : "s"}`}
+            href="#opening-stock"
+          />
+        ) : null}
         <StatCard
           label="Everything they billed us"
           value={formatCurrency(totalPurchased)}
@@ -65,6 +77,58 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
           href="#supplier-bills"
         />
       </StatGrid>
+
+      {supplier.openingBills.length ? (
+        <div id="opening-stock" className="surface-card scroll-mt-4 overflow-hidden">
+          <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border px-5 py-4">
+            <h3 className="font-semibold">Opening stock loaded under this name</h3>
+            <p className="text-xs text-muted-foreground">
+              The value of stock already on the shelf when the shops started on the software. It is not a supplier
+              bill, so nothing on it is owed.
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] text-sm">
+              <thead className="bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
+                <tr className="border-b border-border">
+                  <th className="px-5 py-3">Opening record</th>
+                  <th className="px-3 py-3">Shop</th>
+                  <th className="px-3 py-3">Loaded</th>
+                  <th className="px-3 py-3 text-right">Phones</th>
+                  <th className="px-3 py-3 text-right">Stock value</th>
+                  <th className="px-5 py-3 text-right">Owed</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border/60">
+                {supplier.openingBills.map((row) => (
+                  <tr key={row.id}>
+                    <td className="px-5 py-3">
+                      <Link href={`/purchases/${row.id}`} className="whitespace-nowrap font-semibold text-primary hover:underline">
+                        {row.invoiceNumber}
+                      </Link>
+                    </td>
+                    <td className="px-3 py-3">{row.branch.name}</td>
+                    <td className="px-3 py-3 text-muted-foreground">{formatDate(row.createdAt)}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{row._count.imeiRecords}</td>
+                    <td className="px-3 py-3 text-right font-semibold tabular-nums">{formatCurrency(money(row.totalAmount))}</td>
+                    <td className="px-5 py-3 text-right text-xs font-medium text-muted-foreground">Not owed · opening stock</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-border bg-muted/30 font-semibold">
+                  <td className="px-5 py-3" colSpan={3}>
+                    Total opening stock value
+                  </td>
+                  <td className="px-3 py-3 text-right tabular-nums">{openingUnits}</td>
+                  <td className="px-3 py-3 text-right tabular-nums">{formatCurrency(openingValue)}</td>
+                  <td className="px-5 py-3 text-right text-xs text-muted-foreground">₦0 owed</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+      ) : null}
 
       <div id="supplier-bills" className="surface-card scroll-mt-4 overflow-hidden">
         <div className="flex items-center justify-between border-b border-border px-5 py-4">

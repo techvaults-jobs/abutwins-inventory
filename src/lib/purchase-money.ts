@@ -1,5 +1,5 @@
 import type { Prisma } from "@prisma/client"
-import { MARKED_PAID_ON_UPLOAD, OPENING_STOCK_METHOD } from "@/lib/upload-purchase"
+import { MARKED_PAID_ON_UPLOAD, OPENING_STOCK_METHOD, isOpeningStockSupplierName } from "@/lib/upload-purchase"
 import { displayPartyName, partyNameKey } from "@/lib/party-key"
 import { formatCurrency, money } from "@/lib/utils"
 
@@ -17,7 +17,7 @@ export function isOpeningStockPurchase(row: {
 }): boolean {
   if (row.openingStock) return true
   if (String(row.invoiceNumber || "").startsWith("OPEN-")) return true
-  if (row.supplier && /^opening stock/i.test(row.supplier.name)) return true
+  if (row.supplier && isOpeningStockSupplierName(row.supplier.name)) return true
   return isTrueOpeningStockNotes(row.notes)
 }
 
@@ -62,19 +62,47 @@ export function purchaseBalance(total: unknown, paid: unknown, returned: unknown
   }
 }
 
-/** Prisma filter: supplier bills that can still be owed. */
+/**
+ * A supplier named for opening stock ("Opening Stock", "OPENING STOCK
+ * (FAULTY)", "opening-stock" ...) is never a real house to owe. Same rule as
+ * isOpeningStockSupplierName, written for the database.
+ */
+export const openingStockSupplierWhere: Prisma.SupplierWhereInput = {
+  OR: [
+    { name: { contains: "opening stock", mode: "insensitive" } },
+    { name: { contains: "opening-stock", mode: "insensitive" } },
+    { name: { contains: "opening_stock", mode: "insensitive" } },
+  ],
+}
+
+/**
+ * The one rule for "this bill is opening stock": the shop's starting value,
+ * never money owed. An OPEN- bill, a bill with an OpeningStock record, or any
+ * bill under an opening stock supplier name, however it was loaded (Upload
+ * stock, a supplier bill or a sheet). Home, Suppliers, Reports and the
+ * healing of opening bills all use this, so they cannot disagree.
+ */
+const OPENING_STOCK_BILL: Prisma.PurchaseWhereInput[] = [
+  { invoiceNumber: { startsWith: "OPEN-" } },
+  { openingStock: { isNot: null } },
+  { supplier: openingStockSupplierWhere },
+]
+
+/** Prisma filter: supplier bills that can still be owed (everything that is not opening stock). */
 export const payablePurchaseWhere: Prisma.PurchaseWhereInput = {
   status: { not: "CANCELLED" },
-  invoiceNumber: { not: { startsWith: "OPEN-" } },
-  openingStock: { is: null },
-  // UPLOAD_STOCK bills whose supplier is named "Opening Stock" are the
-  // shop's starting stock value — never money owed to a supplier.
-  NOT: {
-    AND: [
-      { source: "UPLOAD_STOCK" },
-      { supplier: { name: { startsWith: "Opening Stock", mode: "insensitive" } } },
-    ],
-  },
+  NOT: { OR: OPENING_STOCK_BILL },
+}
+
+/**
+ * Prisma filter: opening stock bills. The shop's starting stock value, shown
+ * against its supplier ("Opening Stock", "Opening Stock (Faulty)", ...) as a
+ * value, never as money owed. Same three rules as healOpeningStockBills, and
+ * the exact opposite of what payablePurchaseWhere lets through.
+ */
+export const openingStockPurchaseWhere: Prisma.PurchaseWhereInput = {
+  status: { not: "CANCELLED" },
+  OR: OPENING_STOCK_BILL,
 }
 
 /**

@@ -3,6 +3,8 @@ import { prisma } from "@/lib/prisma"
 import { OPENING_STOCK_METHOD, UPLOAD_STOCK_SOURCE } from "@/lib/upload-purchase"
 import {
   isTrueOpeningStockNotes,
+  openingStockPurchaseWhere,
+  openingStockSupplierWhere,
   paymentFromUploadNotes,
 } from "@/lib/purchase-money"
 import { money } from "@/lib/utils"
@@ -25,22 +27,13 @@ import { money } from "@/lib/utils"
 export const healOpeningStockBills = cache(async () => {
   await restoreMisclassifiedSupplierBills()
 
+  // The one opening stock rule (see purchase-money): OPEN- bills, bills with
+  // an OpeningStock record, and every bill under an opening stock supplier
+  // name ("Opening Stock", "OPENING STOCK (FAULTY)") however it was loaded.
+  // Bills of that kind entered any other way used to stay "owed", which is
+  // how opening stock read as ₦103m owed to suppliers on Home.
   const bills = await prisma.purchase.findMany({
-    where: {
-      status: { not: "CANCELLED" },
-      OR: [
-        { invoiceNumber: { startsWith: "OPEN-" } },
-        { openingStock: { isNot: null } },
-        // UPLOAD_STOCK bills whose supplier is named "Opening Stock" or
-        // "OPENING STOCK (FAULTY)" are the shop's starting value. Older
-        // uploads created these without the OpeningStock link, so they
-        // appeared as ₦103m owed to suppliers on the dashboard.
-        {
-          source: UPLOAD_STOCK_SOURCE,
-          supplier: { name: { startsWith: "Opening Stock", mode: "insensitive" } },
-        },
-      ],
-    },
+    where: openingStockPurchaseWhere,
     select: { id: true, invoiceNumber: true, totalAmount: true, paidAmount: true, paymentMethod: true },
   })
   const refs: string[] = []
@@ -78,6 +71,10 @@ async function restoreMisclassifiedSupplierBills() {
       status: { not: "CANCELLED" },
       invoiceNumber: { not: { startsWith: "OPEN-" } },
       openingStock: { is: null },
+      // Bills under an opening stock name are opening stock whatever their
+      // notes say. Restoring them here only for the heal to undo it was a
+      // flip on every page load.
+      NOT: { supplier: openingStockSupplierWhere },
     },
     select: {
       id: true,

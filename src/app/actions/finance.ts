@@ -13,7 +13,7 @@ import { isLetterheadKey } from "@/lib/letterhead"
 import { generateDocNumber, money } from "@/lib/utils"
 import { lineValueAfterOrderDiscount, saleTenders, sumSaleTenders } from "@/lib/sale-money"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
-import { payablePurchaseWhere, groupSupplierLedgers, purchaseBalance, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
+import { openingStockSupplierWhere, payablePurchaseWhere, groupSupplierLedgers, purchaseBalance, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
 import { shopPeriodWindow, shopPreviousWindow, watDayKey, type ShopRange } from "@/lib/lagos-day"
 import { writeAudit } from "@/lib/audit"
 import {
@@ -161,7 +161,8 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
       orderBy: [{ bankName: "asc" }, { accountNumber: "asc" }],
     }),
     prisma.supplier.findMany({
-      where: { creditBalance: { gt: 0 }, name: { not: "Opening stock" } },
+      // Opening stock names are never a real house: no credit from them either.
+      where: { creditBalance: { gt: 0 }, NOT: openingStockSupplierWhere },
       select: { id: true, name: true, creditBalance: true },
     }),
   ])
@@ -1652,7 +1653,8 @@ export async function getReportData(
       select: { amount: true },
     }),
     prisma.supplier.findMany({
-      where: { creditBalance: { gt: 0 }, name: { not: "Opening stock" } },
+      // Opening stock names are never a real house: no credit from them either.
+      where: { creditBalance: { gt: 0 }, NOT: openingStockSupplierWhere },
       select: { id: true, name: true, creditBalance: true },
     }),
   ])

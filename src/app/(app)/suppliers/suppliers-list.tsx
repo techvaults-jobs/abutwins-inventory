@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react"
 import Link from "next/link"
-import { Coins, HandCoins, Undo2, Wallet } from "lucide-react"
+import { Coins, HandCoins, PackageCheck, Undo2, Wallet } from "lucide-react"
 import { DataTable, type DataColumn } from "@/components/data-table"
 import { FilterChips } from "@/components/filter-chips"
 import { StatCard, StatGrid, StatusBadge, TonePill } from "@/components/shared"
@@ -29,6 +29,17 @@ export type SupplierBillRow = {
   branchName: string
 }
 
+/** Opening stock loaded under a supplier's name: a value, never money owed. */
+export type OpeningBillRow = {
+  id: string
+  invoiceNumber: string
+  totalAmount: number
+  createdAt: string
+  branchCode: string
+  branchName: string
+  units: number
+}
+
 export type SupplierRow = {
   id: string
   name: string
@@ -37,10 +48,11 @@ export type SupplierRow = {
   city: string | null
   country: string | null
   purchases: SupplierBillRow[]
+  openingBills?: OpeningBillRow[]
   creditBalance?: number
 }
 
-type HouseFilter = "all" | "bought" | "paid" | "owing" | "credit"
+type HouseFilter = "all" | "bought" | "paid" | "owing" | "credit" | "opening"
 
 type House = {
   key: string
@@ -56,6 +68,9 @@ type House = {
   extraCredit: number
   owed: number
   surplus: number
+  /** Opening stock under this name: shown as a value, kept out of owed. */
+  openingBills: OpeningBillRow[]
+  openingValue: number
   openHref: string
 }
 
@@ -73,6 +88,10 @@ function buildHouses(suppliers: SupplierRow[]): House[] {
         .flatMap((copy) => copy.purchases)
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       const purchased = bills.reduce((sum, row) => sum + row.totalAmount, 0)
+      const openingBills = copies
+        .flatMap((copy) => copy.openingBills ?? [])
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      const openingValue = openingBills.reduce((sum, row) => sum + row.totalAmount, 0)
       const paid = bills.reduce((sum, row) => sum + row.paidAmount, 0)
       const sentBack = bills.reduce((sum, row) => sum + (row.returnedAmount ?? 0), 0)
       const extraCredit = copies.reduce((sum, copy) => sum + (copy.creditBalance ?? 0), 0)
@@ -100,6 +119,8 @@ function buildHouses(suppliers: SupplierRow[]): House[] {
         extraCredit,
         owed: Math.max(0, net),
         surplus: Math.max(0, -net),
+        openingBills,
+        openingValue,
         openHref: `/suppliers/${primary.id}`,
       }
     })
@@ -116,6 +137,8 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
   const totalOwed = houses.reduce((sum, house) => sum + house.owed, 0)
   const totalSurplus = houses.reduce((sum, house) => sum + house.surplus, 0)
   const owingCount = houses.filter((house) => house.owed > 0).length
+  const totalOpening = houses.reduce((sum, house) => sum + house.openingValue, 0)
+  const openingCount = houses.filter((house) => house.openingValue > 0).length
 
   const filtered = useMemo(() => {
     return houses.filter((house) => {
@@ -123,6 +146,7 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
       if (filter === "paid") return house.paid > 0
       if (filter === "owing") return house.owed > 0
       if (filter === "credit") return house.surplus > 0
+      if (filter === "opening") return house.openingValue > 0
       return true
     })
   }, [houses, filter])
@@ -155,8 +179,17 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
       id: "bought",
       header: "Bought",
       align: "right",
-      sortValue: (house) => house.purchased,
-      cell: (house) => <span className="font-medium">{formatCurrency(house.purchased)}</span>,
+      sortValue: (house) => house.purchased + house.openingValue,
+      cell: (house) => (
+        <div>
+          <span className="font-medium">{formatCurrency(house.purchased)}</span>
+          {house.openingValue > 0 ? (
+            <p className="whitespace-nowrap text-xs text-muted-foreground">
+              Opening stock {formatCurrency(house.openingValue)}
+            </p>
+          ) : null}
+        </div>
+      ),
     },
     {
       id: "paid",
@@ -207,6 +240,15 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
           tone={totalSurplus > 0 ? "success" : "neutral"}
           onClick={() => pickFilter("credit")}
         />
+        {totalOpening > 0 ? (
+          <StatCard
+            label="Opening stock value"
+            value={formatCurrency(totalOpening)}
+            hint="Stock on the shelf at the start · not owed"
+            icon={<PackageCheck className="h-4 w-4" />}
+            onClick={() => pickFilter("opening")}
+          />
+        ) : null}
       </StatGrid>
 
       <div id="supplier-houses" className="scroll-mt-20">
@@ -232,13 +274,16 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
                 { key: "credit", label: "They owe us", count: houses.filter((house) => house.surplus > 0).length, tone: "success" },
                 { key: "bought", label: "Bought from", count: houses.filter((house) => house.purchased > 0).length },
                 { key: "paid", label: "Paid", count: houses.filter((house) => house.paid > 0).length },
+                ...(openingCount > 0 ? [{ key: "opening", label: "Opening stock", count: openingCount }] : []),
               ]}
             />
           }
           card={(house) => ({
             title: house.name,
-            subtitle: `${house.phone} · ${house.bills.length} bill${house.bills.length === 1 ? "" : "s"}`,
-            value: formatCurrency(house.purchased),
+            subtitle: `${house.phone} · ${house.bills.length} bill${house.bills.length === 1 ? "" : "s"}${
+              house.openingValue > 0 ? ` · opening stock ${formatCurrency(house.openingValue)}` : ""
+            }`,
+            value: formatCurrency(house.bills.length || !house.openingValue ? house.purchased : house.openingValue),
             valueHint: <HouseBalance house={house} />,
           })}
           empty={houses.length === 0 ? "No suppliers on the books yet. Add one with the form." : "No supplier matches this filter."}
@@ -266,6 +311,10 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
 }
 
 function HouseBalance({ house }: { house: House }) {
+  // Opening stock only: the shop's starting value, nothing to settle.
+  if (house.openingValue > 0 && house.bills.length === 0 && house.surplus <= 0) {
+    return <TonePill tone="neutral">Opening stock · not owed</TonePill>
+  }
   if (house.surplus > 0) return <TonePill tone="success">{formatValueOwingPlus(house.surplus)}</TonePill>
   if (house.owed === 0) return <TonePill tone="success">Settled</TonePill>
   return <TonePill tone="warning">{formatValueOwingMinus(house.owed)}</TonePill>
@@ -288,6 +337,38 @@ function HouseBreakdown({ house }: { house: House }) {
           <p className="font-semibold tabular-nums">{formatPurchaseBalanceCell(house.owed, house.surplus)}</p>
         </div>
       </div>
+
+      {house.openingBills.length ? (
+        <div>
+          <div className="mb-2 flex items-baseline justify-between gap-2">
+            <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Opening stock</p>
+            <p className="text-sm font-semibold tabular-nums">{formatCurrency(house.openingValue)}</p>
+          </div>
+          <p className="mb-2 text-xs text-muted-foreground">
+            Stock already on the shelf when the shops started on the software. Its value is shown here, and it is not
+            money we owe.
+          </p>
+          <ul className="divide-y divide-border rounded-xl border border-border">
+            {house.openingBills.map((bill) => (
+              <li key={bill.id} className="flex items-start justify-between gap-3 px-3 py-2.5 text-sm">
+                <div className="min-w-0">
+                  <Link href={`/purchases/${bill.id}`} className="font-medium text-primary hover:underline">
+                    {bill.invoiceNumber}
+                  </Link>
+                  <p className="text-xs text-muted-foreground">
+                    {formatDate(bill.createdAt)} · {bill.branchName || bill.branchCode || "Shop not recorded"}
+                    {bill.units ? ` · ${bill.units} phone${bill.units === 1 ? "" : "s"}` : ""}
+                  </p>
+                </div>
+                <div className="shrink-0 text-right">
+                  <p className="font-semibold tabular-nums">{formatCurrency(bill.totalAmount)}</p>
+                  <p className="text-xs text-muted-foreground">Not owed</p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
 
       {house.copies.length > 1 ? (
         <div className="space-y-2">
@@ -343,7 +424,9 @@ function HouseBreakdown({ house }: { house: House }) {
             })}
           </ul>
         ) : (
-          <p className="text-sm text-muted-foreground">No supplier bill yet.</p>
+          <p className="text-sm text-muted-foreground">
+            {house.openingBills.length ? "No supplier bill. Only opening stock is loaded under this name." : "No supplier bill yet."}
+          </p>
         )}
       </div>
       {house.extraCredit > 0 ? (

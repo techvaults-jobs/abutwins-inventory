@@ -26,6 +26,15 @@ export default async function SuppliersPage() {
       branchCode: purchase.branch.code,
       branchName: purchase.branch.name,
     })),
+    openingBills: supplier.openingBills.map((bill) => ({
+      id: bill.id,
+      invoiceNumber: bill.invoiceNumber,
+      totalAmount: money(bill.totalAmount),
+      createdAt: bill.createdAt.toISOString(),
+      branchCode: bill.branch.code,
+      branchName: bill.branch.name,
+      units: bill._count.imeiRecords,
+    })),
     creditBalance: money(supplier.creditBalance),
   }))
 

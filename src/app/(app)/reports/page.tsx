@@ -6,14 +6,15 @@ import { shopConditionLabel } from "@/lib/conditions"
 import { getOpeningReport } from "@/app/actions/opening-stock"
 import { getBranches } from "@/app/actions/parties"
 import { PageHeader } from "@/components/shared"
-import { formatWatLong, shopPeriodWindow, watDayKey, type ShopRange } from "@/lib/lagos-day"
+import { formatWatLong, watDayKey, type ShopRange } from "@/lib/lagos-day"
 import type { ReportsPack } from "@/lib/reports-pack"
 import { getAppSettings } from "@/lib/settings"
 import { requireUser } from "@/lib/session"
 import { money } from "@/lib/utils"
 import { receiptsInWindow } from "@/lib/receipts"
 import { plainMoney } from "@/lib/plain"
-import { canSeeCost } from "@/lib/rbac"
+import { canSeeCost, scopedBranchId } from "@/lib/rbac"
+import { viewBranchFilter } from "@/lib/branch-scope"
 import { isLowStock, shelfKey } from "@/lib/stock-limits"
 import { stockedPairs } from "@/lib/stocked-pairs"
 import { ReportsClientView } from "./reports-client-view"
@@ -145,11 +146,21 @@ export default async function ReportsPage({
   for (const line of shopLines) {
     if (shopRows[line.shopId]) shopRows[line.shopId].cost += line.cost
   }
-  // Money in per shop on the same footing as the total: by the day it arrived.
-  const shopWindow = shopPeriodWindow(data.period.from, range)
+  // Money in per shop on the same footing as the report's total: by the day
+  // it arrived, over the report's own period. (This used to rebuild the
+  // window from the period's first day, so "This month" counted the 1st
+  // only.) Every shop in the report's scope is asked, not only shops that
+  // sold in the period, so a shop that only collected old debts still shows
+  // and the shop lines add up to Payments received.
+  const scopedShop =
+    (await scopedBranchId(user.role, user.branchId, selectedBranchId)) || selectedBranchId || (await viewBranchFilter(user))
+  const shopsInScope = scopedShop ? branches.filter((branch) => branch.id === scopedShop) : branches
   await Promise.all(
-    Object.entries(shopRows).map(async ([shopId, row]) => {
-      row.collected = (await receiptsInWindow({ branchId: shopId, start: shopWindow.start, end: shopWindow.end })).total
+    shopsInScope.map(async (branch) => {
+      const collected = (await receiptsInWindow({ branchId: branch.id, start: data.period.start, end: data.period.end })).total
+      if (!shopRows[branch.id] && collected <= 0) return
+      shopRows[branch.id] ??= { id: branch.id, code: branch.code, name: branch.name, revenue: 0, cost: 0, collected: 0, tickets: 0 }
+      shopRows[branch.id].collected = collected
     })
   )
   const byShop = Object.values(shopRows).sort((a, b) => b.revenue - a.revenue)
