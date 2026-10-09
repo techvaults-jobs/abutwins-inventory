@@ -3299,6 +3299,8 @@ export async function sendUnitsToSupplier(formData: FormData) {
 
   const rtv = generateDocNumber("RTV")
   const houseName = records[0]?.supplier?.name || "supplier"
+  // Why they are going back (faulty, wrong model...), from the review step.
+  const note = String(formData.get("note") || "").trim().slice(0, 300)
 
   try {
   await prisma.$transaction(async (tx) => {
@@ -3312,7 +3314,7 @@ export async function sendUnitsToSupplier(formData: FormData) {
           status: "RETURNED_TO_SUPPLIER",
           customerId: null,
           supplierId: record.supplierId,
-          notes: [record.notes, `Sent back to ${houseName} on ${rtv}`].filter(Boolean).join(" · "),
+          notes: [record.notes, `Sent back to ${houseName} on ${rtv}${note ? `: ${note}` : ""}`].filter(Boolean).join(" · "),
         },
       })
       if (record.status === "IN_STOCK") {
@@ -3368,6 +3370,7 @@ export async function sendUnitsToSupplier(formData: FormData) {
           supplierName: houseName,
           imeis,
           count: imeis.length,
+          ...(note ? { note } : {}),
         }),
         branchId: records[0]?.branchId,
       },
@@ -3378,5 +3381,5 @@ export async function sendUnitsToSupplier(formData: FormData) {
   }
 
   refreshOps()
-  return { success: true }
+  return { success: true, reference: rtv, count: records.length, supplier: houseName }
 }

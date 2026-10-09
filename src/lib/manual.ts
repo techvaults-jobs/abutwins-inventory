@@ -284,7 +284,8 @@ const PAGES: Array<
       "Search by IMEI, bill number, supplier, or product to open that carton trail.",
       "Before Close the day, read Sold today against Still in shop. If the shelf is short of Still in shop, count stock.",
       "Pay the supplier as a separate money step.",
-      "If a unit must go back, scan the IMEI only. Do not pick the supplier. The phone name, the house, and the cost fill in from that number. Scan every phone that is going back in this one send-back.",
+      "If a unit must go back, scan the IMEI only. Do not pick the supplier. The phone name, the house, and the cost fill in from that number. Scan every phone that is going back: each one goes on a list and nothing is sent yet.",
+      "Check the list and remove anything that should stay. Then tap Review and send, check the summary, add why they are going back if you like, and tap Send. Only that last button sends. The list stays on the device if you are interrupted.",
     ],
     watch: [
       "This is not Iwo Road sending a phone to Bodija or Challenge. That is Shop to shop.",

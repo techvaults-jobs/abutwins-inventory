@@ -13,7 +13,7 @@ export default async function SendBackToSupplierPage() {
   return (
     <FormScreen
       title="Send back to supplier"
-      description="Scan every phone going back in this one send-back. The supplier and cost fill in from the bill."
+      description="Scan every phone going back onto a list, check it, then review and send. Scanning never sends on its own. The supplier and cost fill in from the bill."
       backHref="/purchases"
       aside={
         <SectionCard title="Waiting to go back" description={returnUnits.length ? `${returnUnits.length} phone${returnUnits.length === 1 ? "" : "s"}` : undefined}>
