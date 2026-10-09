@@ -1,6 +1,8 @@
 import { getReportData } from "@/app/actions/finance"
 import { prisma } from "@/lib/prisma"
-import { returnedValueBySale } from "@/lib/returned-value"
+import { returnedSaleLineIds, returnedValueBySale } from "@/lib/returned-value"
+import { lineValueAfterOrderDiscount } from "@/lib/sale-money"
+import { shopConditionLabel } from "@/lib/conditions"
 import { getOpeningReport } from "@/app/actions/opening-stock"
 import { getBranches } from "@/app/actions/parties"
 import { PageHeader } from "@/components/shared"
@@ -78,16 +80,71 @@ export default async function ReportsPage({
     )
   )
 
-  const shopRows = data.sales.reduce<Record<string, { name: string; revenue: number; collected: number; tickets: number }>>(
-    (acc, sale) => {
-      const key = sale.branch.id
-      acc[key] = acc[key] ?? { name: sale.branch.name, revenue: 0, collected: 0, tickets: 0 }
-      acc[key].revenue += money(sale.totalAmount)
-      acc[key].tickets += 1
-      return acc
-    },
-    {}
-  )
+  // Every item on the period's invoices, for Total cost and for the list that
+  // opens when a shop on Sales by shop is clicked. Cost is the one copied onto
+  // the line at checkout (older lines carry 0 and fall back to today's cost,
+  // as Profit does), and only goes out to someone who may see cost.
+  const [saleLines, returnedLines] = await Promise.all([
+    data.sales.length
+      ? prisma.saleItem.findMany({
+          where: { saleId: { in: data.sales.map((sale) => sale.id) } },
+          select: {
+            id: true,
+            saleId: true,
+            imeiId: true,
+            quantity: true,
+            unitPrice: true,
+            totalPrice: true,
+            costPrice: true,
+            product: { select: { name: true, storage: true, condition: true, costPrice: true } },
+            imei: { select: { imei1: true, serialNumber: true } },
+          },
+        })
+      : Promise.resolve([]),
+    returnedSaleLineIds(prisma),
+  ])
+  const saleById = new Map(data.sales.map((sale) => [sale.id, sale]))
+  const shopLines = saleLines.flatMap((line) => {
+    const sale = saleById.get(line.saleId)
+    if (!sale) return []
+    const unitCost = showCost ? money(line.costPrice) || money(line.product.costPrice) : 0
+    return [
+      {
+        id: line.id,
+        saleId: sale.id,
+        invoice: sale.invoiceNumber,
+        date: sale.saleDate.toISOString(),
+        customer: sale.customer?.name ?? "Walk-in",
+        shopId: sale.branch.id,
+        shop: sale.branch.code,
+        item: [line.product.name, line.product.storage, shopConditionLabel(line.product.condition)].filter(Boolean).join(" · "),
+        unit: line.imei ? line.imei.imei1 || line.imei.serialNumber || "" : "",
+        quantity: line.quantity,
+        unitPrice: money(line.unitPrice),
+        // What the line fetched once the whole-order discount is shared out,
+        // so a shop's lines add up to its Total sales.
+        sold: lineValueAfterOrderDiscount(line.totalPrice, sale),
+        cost: unitCost * line.quantity,
+        returned:
+          returnedLines.saleItemIds.has(line.id) ||
+          (line.imeiId ? returnedLines.imeiOnSale.has(`${sale.id}:${line.imeiId}`) : false),
+      },
+    ]
+  })
+  shopLines.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.invoice.localeCompare(b.invoice)))
+
+  const shopRows = data.sales.reduce<
+    Record<string, { id: string; code: string; name: string; revenue: number; cost: number; collected: number; tickets: number }>
+  >((acc, sale) => {
+    const key = sale.branch.id
+    acc[key] = acc[key] ?? { id: key, code: sale.branch.code, name: sale.branch.name, revenue: 0, cost: 0, collected: 0, tickets: 0 }
+    acc[key].revenue += money(sale.totalAmount)
+    acc[key].tickets += 1
+    return acc
+  }, {})
+  for (const line of shopLines) {
+    if (shopRows[line.shopId]) shopRows[line.shopId].cost += line.cost
+  }
   // Money in per shop on the same footing as the total: by the day it arrived.
   const shopWindow = shopPeriodWindow(data.period.from, range)
   await Promise.all(
@@ -242,6 +299,7 @@ export default async function ReportsPage({
           branch: shopOf(row.branch),
           imei: row.imei ? { imei1: row.imei.imei1, product: { name: row.imei.product.name } } : null,
         }))}
+        shopLines={shopLines}
         opening={plainMoney(opening)}
         branches={branches.map(({ id, name, code }) => ({ id, name, code }))}
         selectedBranchId={selectedBranchId}

@@ -112,11 +112,18 @@ export function ReportsPdfButton({ data }: { data: ReportsPack }) {
       y += 34
 
       section("Sales by shop")
+      // Total Cost goes in for the people who see cost; the columns close up
+      // to make room.
+      const withCost = data.stockBasis === "cost"
+      const col = withCost
+        ? { sales: left + 76, revenue: left + 112, cost: left + 146 }
+        : { sales: left + 92, revenue: left + 138, cost: 0 }
       doc.setTextColor(...MUTED)
       doc.setFontSize(7)
       doc.text("Branch", left + 1, y)
-      doc.text("Sales", left + 92, y, { align: "right" })
-      doc.text("Total Sales", left + 138, y, { align: "right" })
+      doc.text("Sales", col.sales, y, { align: "right" })
+      doc.text("Total Sales", col.revenue, y, { align: "right" })
+      if (withCost) doc.text("Total Cost", col.cost, y, { align: "right" })
       doc.text("Payments Received", right - 1, y, { align: "right" })
       y += 5
       if (data.byShop.length === 0) {
@@ -132,9 +139,10 @@ export function ReportsPdfButton({ data }: { data: ReportsPack }) {
           doc.setFont("helvetica", "normal")
           doc.setFontSize(8)
           doc.text(item.name, left + 1, y)
-          doc.text(String(item.tickets), left + 92, y, { align: "right" })
+          doc.text(String(item.tickets), col.sales, y, { align: "right" })
           doc.setFont("helvetica", "bold")
-          doc.text(formatPdfMoney(item.revenue), left + 138, y, { align: "right" })
+          doc.text(formatPdfMoney(item.revenue), col.revenue, y, { align: "right" })
+          if (withCost) doc.text(formatPdfMoney(item.cost), col.cost, y, { align: "right" })
           doc.text(formatPdfMoney(item.collected), right - 1, y, { align: "right" })
           y += 5.6
         })

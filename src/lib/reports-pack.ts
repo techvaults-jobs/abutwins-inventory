@@ -43,7 +43,12 @@ export type ReportsPack = {
     swapBalance: number
     returns: number
   }
-  byShop: Array<{ name: string; tickets: number; revenue: number; collected: number }>
+  /**
+   * One row per shop. `cost` is what the items on those invoices cost us,
+   * from the cost copied onto each line at checkout; 0 for anyone who may not
+   * see cost (stockBasis "sell").
+   */
+  byShop: Array<{ id: string; code: string; name: string; tickets: number; revenue: number; cost: number; collected: number }>
   debtors: Array<{ id: string; name: string; shop: string; amount: number }>
   creditors: Array<{ id: string; invoice: string; supplier: string; shop: string; owed: number }>
   supplierCredits: Array<{ id: string; invoice: string; supplier: string; shop: string; owed: number }>

@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { Banknote, ChevronDown, Lock, Package, PackagePlus, TrendingDown, TrendingUp } from "lucide-react"
+import { Banknote, ChevronDown, ChevronRight, Lock, Package, PackagePlus, TrendingDown, TrendingUp } from "lucide-react"
 import type { OpeningReport } from "@/app/actions/opening-stock"
 import { formatCurrency, formatDate, money } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
@@ -27,6 +27,7 @@ import { TablePager, usePagedRows } from "@/components/table-pager"
 import type { ReportsPack } from "@/lib/reports-pack"
 import { formatWatLong } from "@/lib/lagos-day"
 import { groupOwedHouses, type OwedHouse } from "@/lib/purchase-money"
+import { ShopSalesDetail, type ShopSaleLine } from "./shop-sales-detail"
 
 type RawSale = {
   id: string
@@ -126,6 +127,7 @@ export function ReportsClientView({
   inventory,
   swaps = [],
   returns = [],
+  shopLines = [],
   opening,
   branches,
   selectedBranchId,
@@ -138,6 +140,8 @@ export function ReportsClientView({
   inventory: RawInventory[]
   swaps?: RawSwap[]
   returns?: RawReturn[]
+  /** Every item sold in the period, for the list behind each line of Sales by shop. */
+  shopLines?: ShopSaleLine[]
   opening: OpeningReport
   branches: BranchOption[]
   selectedBranchId?: string
@@ -147,6 +151,8 @@ export function ReportsClientView({
   const router = useRouter()
   const [drilldown, setDrilldown] = useState<Drilldown | null>(null)
   const [openHouse, setOpenHouse] = useState<string | null>(null)
+  // A shop on Sales by shop, or "ALL" for its total line, opened to every sale behind it.
+  const [openShop, setOpenShop] = useState<string | null>(null)
   const paidSales = sales.filter((sale) => money(sale.paidAmount) > 0)
   const supplierOwed = pack.creditors.reduce((sum, row) => sum + row.owed, 0)
   const supplierCredit = (pack.supplierCredits ?? []).reduce((sum, row) => sum + row.owed, 0)
@@ -185,6 +191,19 @@ export function ReportsClientView({
   const fileScope = `${pack.statementRef}`
 
   const byShopPager = usePagedRows(pack.byShop, scopeKey)
+  const byShopTotal = useMemo(
+    () =>
+      pack.byShop.reduce(
+        (sum, row) => ({
+          tickets: sum.tickets + row.tickets,
+          revenue: sum.revenue + row.revenue,
+          cost: sum.cost + row.cost,
+          collected: sum.collected + row.collected,
+        }),
+        { tickets: 0, revenue: 0, cost: 0, collected: 0 }
+      ),
+    [pack.byShop]
+  )
   const debtorsPager = usePagedRows(pack.debtors, scopeKey)
   const creditorsPager = usePagedRows(owedHouses, scopeKey)
   const creditsPager = usePagedRows(creditHouses, `${scopeKey}-credits`)
@@ -583,7 +602,10 @@ export function ReportsClientView({
           <TableShell
             caption={
               <>
-                <h2 className="text-sm font-semibold tracking-tight">Sales by shop</h2>
+                <div>
+                  <h2 className="text-sm font-semibold tracking-tight">Sales by shop</h2>
+                  <p className="text-xs text-muted-foreground">Tap a shop to see every sale behind its figures.</p>
+                </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-muted-foreground">
                     {pack.byShop.length} branch location{pack.byShop.length === 1 ? "" : "s"}
@@ -591,8 +613,22 @@ export function ReportsClientView({
                   <TableDownload
                     filename={`${fileScope}-branch-breakdown`}
                     rows={() => [
-                      ["Branch", "Sales Volume", "Total Sales", "Payments Received"],
-                      ...pack.byShop.map((row) => [row.name, row.tickets, row.revenue, row.collected]),
+                      ["Branch", "Sales Volume", "Total Sales", ...(showCost ? ["Total Cost", "Gross Profit"] : []), "Payments Received"],
+                      ...pack.byShop.map((row) => [
+                        row.name,
+                        row.tickets,
+                        row.revenue,
+                        ...(showCost ? [row.cost, row.revenue - row.cost] : []),
+                        row.collected,
+                      ]),
+                      [],
+                      [
+                        "All shops",
+                        byShopTotal.tickets,
+                        byShopTotal.revenue,
+                        ...(showCost ? [byShopTotal.cost, byShopTotal.revenue - byShopTotal.cost] : []),
+                        byShopTotal.collected,
+                      ],
                     ]}
                   />
                 </div>
@@ -602,6 +638,7 @@ export function ReportsClientView({
               { label: "Branch" },
               { label: "Sales Volume", align: "right" },
               { label: "Total Sales", align: "right" },
+              ...(showCost ? [{ label: "Total Cost", align: "right" as const }] : []),
               { label: "Payments Received", align: "right" },
             ]}
             footer={
@@ -619,15 +656,60 @@ export function ReportsClientView({
             }
           >
             {byShopPager.pageRows.map((row) => (
-              <tr key={row.name}>
-                <td className="font-medium">{row.name}</td>
+              <tr
+                key={row.id}
+                tabIndex={0}
+                role="button"
+                aria-label={`See every sale at ${row.name}`}
+                onClick={() => setOpenShop(row.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault()
+                    setOpenShop(row.id)
+                  }
+                }}
+                className="group cursor-pointer transition-colors hover:bg-primary/5 focus-visible:bg-primary/5 focus-visible:outline-none"
+              >
+                <td>
+                  <span className="inline-flex items-center gap-1 font-medium text-primary group-hover:underline">
+                    {row.name}
+                    <ChevronRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" aria-hidden />
+                  </span>
+                </td>
                 <td className="text-right num">{row.tickets}</td>
                 <td className="text-right num">{formatCurrency(row.revenue)}</td>
+                {showCost ? <td className="text-right num">{formatCurrency(row.cost)}</td> : null}
                 <td className="text-right num font-semibold text-success">{formatCurrency(row.collected)}</td>
               </tr>
             ))}
+            {pack.byShop.length > 1 ? (
+              <tr
+                tabIndex={0}
+                role="button"
+                aria-label="See every sale at every shop"
+                onClick={() => setOpenShop("ALL")}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault()
+                    setOpenShop("ALL")
+                  }
+                }}
+                className="group cursor-pointer border-t-2 border-border bg-muted/40 font-semibold transition-colors hover:bg-primary/5 focus-visible:bg-primary/5 focus-visible:outline-none"
+              >
+                <td>
+                  <span className="inline-flex items-center gap-1 text-primary group-hover:underline">
+                    All shops
+                    <ChevronRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" aria-hidden />
+                  </span>
+                </td>
+                <td className="text-right num">{byShopTotal.tickets}</td>
+                <td className="text-right num">{formatCurrency(byShopTotal.revenue)}</td>
+                {showCost ? <td className="text-right num">{formatCurrency(byShopTotal.cost)}</td> : null}
+                <td className="text-right num text-success">{formatCurrency(byShopTotal.collected)}</td>
+              </tr>
+            ) : null}
             {pack.byShop.length === 0 ? (
-              <TableEmpty colSpan={4}>This shop made no sale in this time.</TableEmpty>
+              <TableEmpty colSpan={showCost ? 5 : 4}>This shop made no sale in this time.</TableEmpty>
             ) : null}
           </TableShell>
 
@@ -835,6 +917,17 @@ export function ReportsClientView({
           </TableShell>
         </div>
       </div>
+
+      <ShopSalesDetail
+        shopId={openShop}
+        onClose={() => setOpenShop(null)}
+        byShop={pack.byShop}
+        lines={shopLines}
+        showCost={showCost}
+        scope={pack.scope}
+        periodLabel={pack.periodLabel}
+        fileScope={fileScope}
+      />
 
       <DrilldownModal
         open={drilldown !== null}

@@ -53,6 +53,7 @@ export function ReportsStatement({ data }: { data: ReportsPack }) {
               <th className="py-1.5 pr-2">Branch</th>
               <th className="py-1.5 pr-2 text-right">Sales Volume</th>
               <th className="py-1.5 pr-2 text-right">Total Sales</th>
+              {data.stockBasis === "cost" ? <th className="py-1.5 pr-2 text-right">Total Cost</th> : null}
               <th className="py-1.5 text-right">Payments Received</th>
             </tr>
           </thead>
@@ -62,11 +63,14 @@ export function ReportsStatement({ data }: { data: ReportsPack }) {
                 <td className="py-1.5 pr-2 font-medium">{row.name}</td>
                 <td className="py-1.5 pr-2 text-right tabular-nums">{row.tickets}</td>
                 <td className="py-1.5 pr-2 text-right tabular-nums">{formatCurrency(row.revenue)}</td>
+                {data.stockBasis === "cost" ? (
+                  <td className="py-1.5 pr-2 text-right tabular-nums">{formatCurrency(row.cost)}</td>
+                ) : null}
                 <td className="py-1.5 text-right tabular-nums">{formatCurrency(row.collected)}</td>
               </tr>
             ))}
             {data.byShop.length === 0 ? (
-              <tr><td colSpan={4} className="py-3 text-slate-500">No completed sales in this scope.</td></tr>
+              <tr><td colSpan={data.stockBasis === "cost" ? 5 : 4} className="py-3 text-slate-500">No completed sales in this scope.</td></tr>
             ) : null}
           </tbody>
         </table>
