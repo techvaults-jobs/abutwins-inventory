@@ -11,6 +11,7 @@ import { displayPartyName } from "@/lib/party-key"
 import { findDuplicateSupplier } from "@/lib/supplier-identity"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
 import { openingStockPurchaseWhere, payablePurchaseWhere } from "@/lib/purchase-money"
+import { isOpeningStockSupplierName } from "@/lib/upload-purchase"
 import { formatCurrency, generateDocNumber, money } from "@/lib/utils"
 import type { SupplierKind } from "@prisma/client"
 
@@ -316,7 +317,30 @@ export async function getSuppliers() {
     list.push(bill)
     openingBySupplier.set(bill.supplierId, list)
   }
-  return houses.map((house) => ({ ...house, openingBills: openingBySupplier.get(house.id) ?? [] }))
+  // Phones put on the shelf one at a time under an opening stock name carry
+  // no bill, so a name used only that way ("Opening Stock Adjustment") read
+  // as empty. Their value is counted at each item's cost.
+  const openingNames = houses.filter((house) => isOpeningStockSupplierName(house.name)).map((house) => house.id)
+  const unbilled = openingNames.length
+    ? await prisma.imeiRecord.findMany({
+        where: { supplierId: { in: openingNames }, purchaseId: null },
+        select: { supplierId: true, product: { select: { costPrice: true } } },
+      })
+    : []
+  const unbilledBySupplier = new Map<string, { units: number; value: number }>()
+  for (const unit of unbilled) {
+    if (!unit.supplierId) continue
+    const row = unbilledBySupplier.get(unit.supplierId) ?? { units: 0, value: 0 }
+    row.units += 1
+    row.value += money(unit.product.costPrice)
+    unbilledBySupplier.set(unit.supplierId, row)
+  }
+  return houses.map((house) => ({
+    ...house,
+    isOpeningStock: isOpeningStockSupplierName(house.name),
+    openingBills: openingBySupplier.get(house.id) ?? [],
+    unbilledOpening: unbilledBySupplier.get(house.id) ?? { units: 0, value: 0 },
+  }))
 }
 
 export async function getSupplier(id: string) {
@@ -358,7 +382,24 @@ export async function getSupplier(id: string) {
     },
     orderBy: { createdAt: "desc" },
   })
-  return { ...supplier, openingBills }
+  // Phones put on the shelf one at a time under an opening stock name, with
+  // no bill: part of the opening value, counted at each item's cost.
+  const isOpeningStock = isOpeningStockSupplierName(supplier.name)
+  const unbilledUnits = isOpeningStock
+    ? await prisma.imeiRecord.findMany({
+        where: { supplierId: id, purchaseId: null, ...(branchId ? { branchId } : {}) },
+        select: { product: { select: { costPrice: true } } },
+      })
+    : []
+  return {
+    ...supplier,
+    isOpeningStock,
+    openingBills,
+    unbilledOpening: {
+      units: unbilledUnits.length,
+      value: unbilledUnits.reduce((sum, unit) => sum + money(unit.product.costPrice), 0),
+    },
+  }
 }
 
 export async function createSupplier(formData: FormData) {

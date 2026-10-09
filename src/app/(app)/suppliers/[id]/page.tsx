@@ -27,8 +27,10 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
   const totalSurplus = Math.max(0, -net)
   // Opening stock loaded under this name: the shop's starting value. Shown in
   // full, kept out of everything above, because nothing on it is owed.
-  const openingValue = supplier.openingBills.reduce((sum, row) => sum + money(row.totalAmount), 0)
-  const openingUnits = supplier.openingBills.reduce((sum, row) => sum + row._count.imeiRecords, 0)
+  const unbilled = supplier.unbilledOpening
+  const openingValue = supplier.openingBills.reduce((sum, row) => sum + money(row.totalAmount), 0) + unbilled.value
+  const openingUnits = supplier.openingBills.reduce((sum, row) => sum + row._count.imeiRecords, 0) + unbilled.units
+  const hasOpening = supplier.openingBills.length > 0 || unbilled.units > 0
 
   return (
     <div className="space-y-6">
@@ -39,11 +41,11 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
       />
 
       <StatGrid>
-        {supplier.openingBills.length ? (
+        {hasOpening ? (
           <StatCard
             label="Opening stock value"
             value={formatCurrency(openingValue)}
-            hint={`Starting stock · not owed · ${supplier.openingBills.length} load${supplier.openingBills.length === 1 ? "" : "s"}`}
+            hint={`Starting stock · not owed · ${openingUnits} phone${openingUnits === 1 ? "" : "s"}`}
             href="#opening-stock"
           />
         ) : null}
@@ -78,7 +80,7 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
         />
       </StatGrid>
 
-      {supplier.openingBills.length ? (
+      {hasOpening ? (
         <div id="opening-stock" className="surface-card scroll-mt-4 overflow-hidden">
           <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border px-5 py-4">
             <h3 className="font-semibold">Opening stock loaded under this name</h3>
@@ -114,6 +116,17 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
                     <td className="px-5 py-3 text-right text-xs font-medium text-muted-foreground">Not owed · opening stock</td>
                   </tr>
                 ))}
+                {unbilled.units > 0 ? (
+                  <tr>
+                    <td className="px-5 py-3 font-medium">Phones added without a bill</td>
+                    <td className="px-3 py-3 text-muted-foreground" colSpan={2}>
+                      Put on the shelf one at a time · valued at item cost
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums">{unbilled.units}</td>
+                    <td className="px-3 py-3 text-right font-semibold tabular-nums">{formatCurrency(unbilled.value)}</td>
+                    <td className="px-5 py-3 text-right text-xs font-medium text-muted-foreground">Not owed · opening stock</td>
+                  </tr>
+                ) : null}
               </tbody>
               <tfoot>
                 <tr className="border-t-2 border-border bg-muted/30 font-semibold">

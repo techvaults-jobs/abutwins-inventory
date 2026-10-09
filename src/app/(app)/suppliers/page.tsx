@@ -35,6 +35,8 @@ export default async function SuppliersPage() {
       branchName: bill.branch.name,
       units: bill._count.imeiRecords,
     })),
+    isOpeningStock: supplier.isOpeningStock,
+    unbilledOpening: supplier.unbilledOpening,
     creditBalance: money(supplier.creditBalance),
   }))
 

@@ -49,8 +49,15 @@ export type SupplierRow = {
   country: string | null
   purchases: SupplierBillRow[]
   openingBills?: OpeningBillRow[]
+  /** Named for opening stock ("Opening Stock", "Opening Stock Adjustment"...). */
+  isOpeningStock?: boolean
+  /** Phones held under this opening stock name with no bill, at item cost. */
+  unbilledOpening?: { units: number; value: number }
   creditBalance?: number
 }
+
+/** One opening stock name inside the Opening stock row, with what sits under it. */
+type OpeningName = { id: string; name: string; loads: number; billValue: number; unbilledUnits: number; unbilledValue: number }
 
 type HouseFilter = "all" | "bought" | "paid" | "owing" | "credit" | "opening"
 
@@ -71,11 +78,18 @@ type House = {
   /** Opening stock under this name: shown as a value, kept out of owed. */
   openingBills: OpeningBillRow[]
   openingValue: number
+  /** Every opening stock name in this row, each with its own value. */
+  openingNames: OpeningName[]
   openHref: string
 }
 
 function buildHouses(suppliers: SupplierRow[]): House[] {
-  return groupByPartyIdentity(suppliers)
+  // Every opening stock name is one row, Opening stock, and is never merged
+  // with a real supplier through a shared phone number.
+  const opening = suppliers.filter((row) => row.isOpeningStock)
+  const real = suppliers.filter((row) => !row.isOpeningStock)
+  const groups = [...groupByPartyIdentity(real), ...(opening.length ? [opening] : [])]
+  return groups
     .map((copies) => {
       const ranked = [...copies].sort((a, b) => {
         const aValue = a.purchases.reduce((sum, row) => sum + row.totalAmount, 0)
@@ -91,7 +105,21 @@ function buildHouses(suppliers: SupplierRow[]): House[] {
       const openingBills = copies
         .flatMap((copy) => copy.openingBills ?? [])
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      const openingValue = openingBills.reduce((sum, row) => sum + row.totalAmount, 0)
+      const unbilledValue = copies.reduce((sum, copy) => sum + (copy.unbilledOpening?.value ?? 0), 0)
+      const openingValue = openingBills.reduce((sum, row) => sum + row.totalAmount, 0) + unbilledValue
+      const isOpeningRow = copies.every((copy) => copy.isOpeningStock)
+      const openingNames: OpeningName[] = isOpeningRow
+        ? copies
+            .map((copy) => ({
+              id: copy.id,
+              name: copy.name,
+              loads: copy.openingBills?.length ?? 0,
+              billValue: (copy.openingBills ?? []).reduce((sum, bill) => sum + bill.totalAmount, 0),
+              unbilledUnits: copy.unbilledOpening?.units ?? 0,
+              unbilledValue: copy.unbilledOpening?.value ?? 0,
+            }))
+            .sort((a, b) => b.billValue + b.unbilledValue - (a.billValue + a.unbilledValue))
+        : []
       const paid = bills.reduce((sum, row) => sum + row.paidAmount, 0)
       const sentBack = bills.reduce((sum, row) => sum + (row.returnedAmount ?? 0), 0)
       const extraCredit = copies.reduce((sum, copy) => sum + (copy.creditBalance ?? 0), 0)
@@ -107,7 +135,7 @@ function buildHouses(suppliers: SupplierRow[]): House[] {
           .find((place) => place) || "Not recorded"
       return {
         key: primary.id,
-        name: primary.name,
+        name: isOpeningRow && copies.length > 1 ? "Opening stock" : primary.name,
         kind: primary.kind,
         phone: primary.phone,
         from,
@@ -121,6 +149,7 @@ function buildHouses(suppliers: SupplierRow[]): House[] {
         surplus: Math.max(0, -net),
         openingBills,
         openingValue,
+        openingNames,
         openHref: `/suppliers/${primary.id}`,
       }
     })
@@ -167,8 +196,9 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
         <div>
           <p className="font-medium">{house.name}</p>
           <p className="text-xs text-muted-foreground">
-            {house.kind === "NEIGHBOR" ? "Neighbouring shop" : "Carton supplier"} · {house.phone}
-            {house.copies.length > 1 ? ` · ${house.copies.length} copies` : ""}
+            {house.openingNames.length
+              ? `Starting stock · ${house.openingNames.length} name${house.openingNames.length === 1 ? "" : "s"}: ${house.openingNames.map((row) => row.name).join(", ")}`
+              : `${house.kind === "NEIGHBOR" ? "Neighbouring shop" : "Carton supplier"} · ${house.phone}${house.copies.length > 1 ? ` · ${house.copies.length} copies` : ""}`}
           </p>
         </div>
       ),
@@ -280,9 +310,11 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
           }
           card={(house) => ({
             title: house.name,
-            subtitle: `${house.phone} · ${house.bills.length} bill${house.bills.length === 1 ? "" : "s"}${
-              house.openingValue > 0 ? ` · opening stock ${formatCurrency(house.openingValue)}` : ""
-            }`,
+            subtitle: house.openingNames.length
+              ? `Starting stock · ${house.openingNames.length} name${house.openingNames.length === 1 ? "" : "s"} · not owed`
+              : `${house.phone} · ${house.bills.length} bill${house.bills.length === 1 ? "" : "s"}${
+                  house.openingValue > 0 ? ` · opening stock ${formatCurrency(house.openingValue)}` : ""
+                }`,
             value: formatCurrency(house.bills.length || !house.openingValue ? house.purchased : house.openingValue),
             valueHint: <HouseBalance house={house} />,
           })}
@@ -370,7 +402,36 @@ function HouseBreakdown({ house }: { house: House }) {
         </div>
       ) : null}
 
-      {house.copies.length > 1 ? (
+      {house.openingNames.length ? (
+        <div>
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Names under opening stock
+          </p>
+          <ul className="divide-y divide-border rounded-xl border border-border">
+            {house.openingNames.map((row) => (
+              <li key={row.id} className="flex items-start justify-between gap-3 px-3 py-2.5 text-sm">
+                <div className="min-w-0">
+                  <Link href={`/suppliers/${row.id}`} className="font-medium text-primary hover:underline">
+                    {row.name}
+                  </Link>
+                  <p className="text-xs text-muted-foreground">
+                    {row.loads} load{row.loads === 1 ? "" : "s"}
+                    {row.unbilledUnits
+                      ? ` · ${row.unbilledUnits} phone${row.unbilledUnits === 1 ? "" : "s"} added without a bill`
+                      : ""}
+                  </p>
+                </div>
+                <div className="shrink-0 text-right">
+                  <p className="font-semibold tabular-nums">{formatCurrency(row.billValue + row.unbilledValue)}</p>
+                  <p className="text-xs text-muted-foreground">Not owed</p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {house.copies.length > 1 && !house.openingNames.length ? (
         <div className="space-y-2">
           <p className="text-xs text-muted-foreground">
             This supplier was saved more than once. New copies are refused. Use one name going forward.

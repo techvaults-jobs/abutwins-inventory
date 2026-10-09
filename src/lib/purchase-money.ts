@@ -72,6 +72,7 @@ export const openingStockSupplierWhere: Prisma.SupplierWhereInput = {
     { name: { contains: "opening stock", mode: "insensitive" } },
     { name: { contains: "opening-stock", mode: "insensitive" } },
     { name: { contains: "opening_stock", mode: "insensitive" } },
+    { name: { contains: "openingstock", mode: "insensitive" } },
   ],
 }
 
