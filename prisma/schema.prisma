@@ -273,6 +273,7 @@ model User {
   expenses        Expense[]
   notifications   Notification[]
   transfers       StockTransfer[]
+  transfersReceived StockTransfer[] @relation("TransferReceiver")
   swaps           Swap[]
   repairs         Repair[]
   returns         StockReturn[]
@@ -866,6 +867,10 @@ model StockTransfer {
   toBranch       Branch         @relation("TransferTo", fields: [toBranchId], references: [id])
   userId         String
   user           User           @relation(fields: [userId], references: [id])
+  /// Who decided the transfer at the receiving shop: accepted it (RECEIVED)
+  /// or rejected it (CANCELLED). Empty while it waits.
+  receivedByUserId String?
+  receivedByUser   User?        @relation("TransferReceiver", fields: [receivedByUserId], references: [id])
   notes          String?
   status         TransferStatus @default(PENDING)
   sentAt         DateTime?

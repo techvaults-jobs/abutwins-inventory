@@ -2442,10 +2442,33 @@ export async function getTransfers() {
       fromBranch: true,
       toBranch: true,
       user: { select: { id: true, name: true, email: true, role: true, branchId: true } },
+      receivedByUser: { select: { id: true, name: true, email: true } },
       items: { include: { product: true } },
     },
     orderBy: { createdAt: "desc" },
   })
+  // Who accepted or rejected each closed transfer. Saved on the transfer since
+  // the receiving shop's name went on the page; older ones are read from the
+  // accept or reject line in Who did what.
+  const undecided = rows.filter((row) => !row.receivedByUserId && (row.status === "RECEIVED" || row.status === "CANCELLED"))
+  const decidedEarlier = undecided.length
+    ? await prisma.auditLog.findMany({
+        where: {
+          entityType: "StockTransfer",
+          action: "UPDATE",
+          entityId: { in: undecided.map((row) => row.transferNumber) },
+          OR: [{ newValue: { contains: '"RECEIVED"' } }, { newValue: { contains: '"CANCELLED"' } }],
+        },
+        select: { entityId: true, createdAt: true, user: { select: { name: true, email: true } } },
+        orderBy: { createdAt: "asc" },
+      })
+    : []
+  const deciderFromTrail = new Map<string, string>()
+  for (const entry of decidedEarlier) {
+    const who = entry.user?.name || entry.user?.email
+    if (entry.entityId && who) deciderFromTrail.set(entry.entityId, who)
+  }
+
   const serials = rows.flatMap((row) => parseTransferIds(row.notes ?? ""))
   const records = serials.length
     ? await prisma.imeiRecord.findMany({
@@ -2465,7 +2488,15 @@ export async function getTransfers() {
       /** Why it was turned back, written by whoever rejected it. */
       rejectedBecause: (row.notes ?? "").split("\n").find((line) => line.startsWith("Rejected: "))?.slice("Rejected: ".length) ?? null,
       /** Who sent it. */
-      sentBy: row.user?.name ?? null,
+      sentBy: row.user?.name || row.user?.email || null,
+      /**
+       * Who decided it at the receiving shop: accepted it (RECEIVED) or turned
+       * it back (CANCELLED). Null while it waits.
+       */
+      receivedBy:
+        row.receivedByUser?.name ||
+        row.receivedByUser?.email ||
+        (row.status === "RECEIVED" || row.status === "CANCELLED" ? deciderFromTrail.get(row.transferNumber) ?? null : null),
     }
   })
 }
@@ -2896,7 +2927,7 @@ export async function receiveTransfer(formData: FormData) {
       ].filter(Boolean)
       const accepted = await tx.stockTransfer.updateMany({
         where: { id, status: { in: ["PENDING", "IN_TRANSIT"] } },
-        data: { status: "RECEIVED", receivedAt: new Date(), sentAt: transfer.sentAt ?? new Date(), notes: lines.join("\n") },
+        data: { status: "RECEIVED", receivedAt: new Date(), sentAt: transfer.sentAt ?? new Date(), notes: lines.join("\n"), receivedByUserId: user.id },
       })
       if (accepted.count !== 1) {
         throw new ConflictError(`${transfer.transferNumber} was already closed by someone else. Refresh to see it.`)
@@ -3029,7 +3060,11 @@ export async function rejectTransfer(formData: FormData) {
     await prisma.$transaction(async (tx) => {
       const closed = await tx.stockTransfer.updateMany({
         where: { id, status: { in: ["PENDING", "IN_TRANSIT"] } },
-        data: { status: "CANCELLED", notes: [transfer.notes, `Rejected: ${why.slice(0, 500)}`].filter(Boolean).join("\n") },
+        data: {
+          status: "CANCELLED",
+          notes: [transfer.notes, `Rejected: ${why.slice(0, 500)}`].filter(Boolean).join("\n"),
+          receivedByUserId: user.id,
+        },
       })
       if (closed.count !== 1) {
         throw new ConflictError(`${transfer.transferNumber} was already closed. Refresh to see it.`)

@@ -51,6 +51,7 @@ type TransferRow = {
   /** Why it was rejected, when it was. */
   rejectedBecause: string | null
   sentBy: string | null
+  receivedBy: string | null
   /** May this person accept or reject it (receiving shop's manager, CEO, main admin)? */
   canDecide: boolean
 }
@@ -136,10 +137,14 @@ export function TransfersList({
         unitWord,
         valueWord,
         "When",
+        "Sent by",
+        "Received / rejected by",
       ],
     ]
     for (const transfer of filtered) {
       const when = formatShopWhen(transfer.receivedAt ?? transfer.sentAt ?? transfer.createdAt)
+      const sentBy = transfer.sentBy ?? ""
+      const receivedBy = transfer.receivedBy ?? ""
       if (transfer.imeis.length) {
         for (const imei of transfer.imeis) {
           const unit = money(imei.costPrice)
@@ -154,6 +159,8 @@ export function TransfersList({
             unit.toFixed(2),
             unit.toFixed(2),
             when,
+            sentBy,
+            receivedBy,
           ])
         }
       }
@@ -170,6 +177,8 @@ export function TransfersList({
           unit.toFixed(2),
           (item.quantity * unit).toFixed(2),
           when,
+          sentBy,
+          receivedBy,
         ])
       }
       if (!transfer.imeis.length && !pieceLines(transfer).length) {
@@ -184,6 +193,8 @@ export function TransfersList({
           "0.00",
           "0.00",
           when,
+          sentBy,
+          receivedBy,
         ])
       }
     }
@@ -250,6 +261,12 @@ export function TransfersList({
       sortValue: (row) => new Date(whenOf(row)).getTime(),
       cell: (row) => <span className="whitespace-nowrap tabular-nums">{formatShopWhen(whenOf(row))}</span>,
     },
+    {
+      id: "people",
+      header: "Sent / received by",
+      sortValue: (row) => `${row.sentBy ?? ""} ${row.receivedBy ?? ""}`,
+      cell: (row) => <TransferPeople row={row} />,
+    },
   ]
 
   return (
@@ -279,9 +296,11 @@ export function TransfersList({
             row.toBranch.name,
             ...row.imeis.flatMap((imei) => [imei.imei1, imei.name, imei.specs]),
             ...row.items.map((item) => `${item.product.name} ${item.product.specs}`),
+            row.sentBy ?? "",
+            row.receivedBy ?? "",
           ].join(" ")
         }
-        searchPlaceholder="Search transfer number, shop, IMEI or item"
+        searchPlaceholder="Search transfer number, shop, staff name, IMEI or item"
         actions={
           <>
             <Button type="button" variant="outline" size="sm" className="h-10" disabled={!filtered.length} onClick={() => extractList("xlsx")} aria-label="Download as Excel">
@@ -301,13 +320,18 @@ export function TransfersList({
             value: `${totals.qty} item${totals.qty === 1 ? "" : "s"}`,
             valueHint: <span className="text-muted-foreground">{formatCurrency(totals.costValue)}</span>,
             badge: <StatusBadge value={row.status} />,
-            meta: isOpenWork(row) ? (
-              <span className="font-medium text-warning">{row.canDecide ? "Accept or reject" : "Waiting for the other shop"}</span>
-            ) : row.status === "CANCELLED" && row.rejectedBecause ? (
-              <span className="text-warning">Rejected: {row.rejectedBecause}</span>
-            ) : isPartial(row) ? (
-              <span className="font-medium text-warning">Part arrived</span>
-            ) : undefined,
+            meta: (
+              <span className="flex flex-col gap-0.5">
+                <TransferPeople row={row} inline />
+                {isOpenWork(row) ? (
+                  <span className="font-medium text-warning">{row.canDecide ? "Accept or reject" : "Waiting for the other shop"}</span>
+                ) : row.status === "CANCELLED" && row.rejectedBecause ? (
+                  <span className="text-warning">Rejected: {row.rejectedBecause}</span>
+                ) : isPartial(row) ? (
+                  <span className="font-medium text-warning">Part arrived</span>
+                ) : null}
+              </span>
+            ),
           }
         }}
         empty={transfers.length === 0 ? "No shop-to-shop transfers yet." : "Nothing in this stage. Tap another stage above."}
@@ -394,9 +418,26 @@ function TransferDetail({
       </ul>
       )}
 
-      {transfer.sentBy ? (
-        <p className="text-xs text-muted-foreground">Sent by {transfer.sentBy}</p>
-      ) : null}
+      <dl className="grid grid-cols-2 gap-2 rounded-xl border border-border bg-muted/30 px-3 py-2.5 text-sm">
+        <div className="min-w-0">
+          <dt className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            Sent by · {transfer.fromBranch.name}
+          </dt>
+          <dd className="truncate font-medium">{transfer.sentBy ?? "Not recorded"}</dd>
+        </div>
+        <div className="min-w-0">
+          <dt className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+            {decisionWord(transfer.status)} · {transfer.toBranch.name}
+          </dt>
+          <dd
+            className={`truncate font-medium ${
+              transfer.status === "RECEIVED" ? "text-success" : transfer.status === "CANCELLED" ? "text-danger" : "text-muted-foreground"
+            }`}
+          >
+            {transfer.receivedBy ?? (transfer.status === "RECEIVED" || transfer.status === "CANCELLED" ? "Not recorded" : "Not yet")}
+          </dd>
+        </div>
+      </dl>
       {open && !transfer.canDecide ? (
         <p className="rounded-xl border border-border bg-muted/40 px-3 py-2.5 text-sm text-muted-foreground">
           Waiting for the manager of {transfer.toBranch.name}, the CEO or the main admin to accept or reject it. Stock
@@ -518,6 +559,42 @@ function TransferDetail({
           ) : null}
         </div>
       )}
+    </div>
+  )
+}
+
+/** What the receiving shop's person did: received it, rejected it, or has not yet. */
+function decisionWord(status: string) {
+  return status === "RECEIVED" ? "Received by" : status === "CANCELLED" ? "Rejected by" : "To be received by"
+}
+
+/** Who sent a transfer and who received (or rejected) it at the other shop. */
+function TransferPeople({ row, inline = false }: { row: TransferRow; inline?: boolean }) {
+  const decided = row.status === "RECEIVED" || row.status === "CANCELLED"
+  const second = decided
+    ? `${row.status === "RECEIVED" ? "Received" : "Rejected"} by ${row.receivedBy ?? "someone not recorded"}`
+    : `Waiting at ${row.toBranch.name}`
+  if (inline) {
+    return (
+      <span className="text-muted-foreground">
+        Sent by {row.sentBy ?? "someone not recorded"} ·{" "}
+        <span className={row.status === "RECEIVED" ? "text-success" : row.status === "CANCELLED" ? "text-danger" : ""}>{second}</span>
+      </span>
+    )
+  }
+  return (
+    <div className="min-w-0 text-xs leading-snug">
+      <p className="whitespace-nowrap">
+        <span className="text-muted-foreground">Sent:</span> <span className="font-medium">{row.sentBy ?? "—"}</span>
+      </p>
+      <p className="whitespace-nowrap">
+        <span className="text-muted-foreground">{decided ? (row.status === "RECEIVED" ? "Received:" : "Rejected:") : "Received:"}</span>{" "}
+        {decided ? (
+          <span className={`font-medium ${row.status === "RECEIVED" ? "text-success" : "text-danger"}`}>{row.receivedBy ?? "—"}</span>
+        ) : (
+          <span className="text-muted-foreground">not yet</span>
+        )}
+      </p>
     </div>
   )
 }

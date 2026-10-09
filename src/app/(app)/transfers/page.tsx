@@ -42,6 +42,7 @@ export default async function TransfersPage({ searchParams }: { searchParams: Pr
     arrivedImeis: transfer.arrivedImeis,
     rejectedBecause: transfer.rejectedBecause,
     sentBy: transfer.sentBy,
+    receivedBy: transfer.receivedBy,
     // Accept and reject: the CEO and the main admin for any shop, the receiving
     // shop's manager or vault manager for their own. Everyone else looks.
     canDecide: mayDecideTransfer(me, transfer.toBranchId),
