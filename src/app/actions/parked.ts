@@ -17,31 +17,45 @@ export async function heartbeatParkedSales(input: {
   const deviceId = input.deviceId.slice(0, 80)
   if (!deviceId) return { vanished: 0, sitting: 0 }
   const now = new Date()
-  const seen = new Set(input.rows.map((row) => row.id))
+  const seen = new Set(input.rows.slice(0, 200).map((row) => String(row.id || "").slice(0, 80)))
   const fallbackShop =
     user.branchId ||
     (await prisma.branch.findFirst({ where: { isActive: true }, orderBy: { isHq: "desc" }, select: { id: true } }))?.id ||
     ""
 
-  for (const row of input.rows) {
-    const shopId = row.branchId || fallbackShop
+  // The device sends its own list, so nothing in it is trusted: a row is
+  // only ever this person's, on a shop they can reach, and a refresh can
+  // never touch another person's parked sale (turning a vanished one back to
+  // parked would hide the alert it raised).
+  const rows = input.rows.slice(0, 200)
+  for (const row of rows) {
+    const id = String(row.id || "").slice(0, 80)
+    if (!id) continue
+    const asked = row.branchId || fallbackShop
+    const shopId = asked && (await canReachBranch(user, asked)) ? asked : fallbackShop
     if (!shopId) continue
-    await prisma.parkedSale.upsert({
-      where: { id: row.id },
-      create: {
-        id: row.id,
+    const queuedAt = new Date(row.queuedAt)
+    const payload = JSON.stringify({
+      itemCount: Math.max(0, Math.floor(Number(row.itemCount) || 0)),
+      paidAmount: Math.max(0, Number(row.paidAmount) || 0),
+    })
+    const touched = await prisma.parkedSale.updateMany({
+      where: { id, userId: user.id, deviceId },
+      data: { lastSeenAt: now, status: "PARKED", payload },
+    })
+    if (touched.count > 0) continue
+    // Someone else's id, or this person's from another device: leave it alone.
+    if (await prisma.parkedSale.findUnique({ where: { id }, select: { id: true } })) continue
+    await prisma.parkedSale.create({
+      data: {
+        id,
         userId: user.id,
         branchId: shopId,
         deviceId,
-        queuedAt: new Date(row.queuedAt),
+        queuedAt: Number.isNaN(queuedAt.getTime()) ? now : queuedAt,
         lastSeenAt: now,
         status: "PARKED",
-        payload: JSON.stringify({ itemCount: row.itemCount, paidAmount: row.paidAmount }),
-      },
-      update: {
-        lastSeenAt: now,
-        status: "PARKED",
-        payload: JSON.stringify({ itemCount: row.itemCount, paidAmount: row.paidAmount }),
+        payload,
       },
     })
   }

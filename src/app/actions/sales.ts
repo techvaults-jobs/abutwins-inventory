@@ -18,6 +18,12 @@ import { shopPayChannel } from "@/lib/sale-money"
 import { belowCost, blindTillPrices, discountOff, sellFloor, type PriceBasis } from "@/lib/pricing"
 import { readPriceApproval } from "@/lib/price-approval"
 import { dueAfterReturns, returnedValueBySale } from "@/lib/returned-value"
+import { isWatDayKey, watBounds } from "@/lib/lagos-day"
+
+/** Bank tenders before cash, so trimming an over-typed payment comes off the cash (the change). */
+function bankFirst<T extends { method: string }>(tenders: T[]) {
+  return [...tenders].sort((a, b) => Number(a.method === "CASH") - Number(b.method === "CASH"))
+}
 
 export async function getSales() {
   const user = await requireUser()
@@ -732,8 +738,26 @@ export async function checkoutSale(input: {
           ? subtotal
           : input.paidAmount
 
-  const paid = Math.min(Math.max(0, Number.isFinite(Number(rawPaid)) ? Number(rawPaid) : 0), subtotal)
+  const paid = money(Math.min(Math.max(0, Number.isFinite(Number(rawPaid)) ? Number(rawPaid) : 0), subtotal))
   const due = subtotal - paid
+  // The tenders as they really landed. Cash and bank typed past the bill is
+  // change handed back, so the extra comes off cash first, then bank. Saving
+  // the typed amounts made the payment lines and the till's cash add up to
+  // more than the invoice was paid, and the drawer came up short at close.
+  const landedSplits = (() => {
+    let over = money(validSplits.reduce((sum, t) => sum + t.amount, 0) - paid)
+    const rows = validSplits.map((t) => ({ ...t, amount: money(t.amount) }))
+    for (const cashFirst of [true, false]) {
+      for (const row of rows) {
+        if (over <= 0) break
+        if ((shopPayChannel(row.method) === "CASH") !== cashFirst) continue
+        const take = Math.min(row.amount, over)
+        row.amount = money(row.amount - take)
+        over = money(over - take)
+      }
+    }
+    return rows.filter((row) => row.amount > 0)
+  })()
   // Sale label: credit when anything is still owed (even if today's money was cash + bank).
   // Fully paid with two channels stays Split payment. Fully paid with one channel is Cash or Bank.
   const method: PaymentMethod =
@@ -856,8 +880,8 @@ export async function checkoutSale(input: {
           payments:
             paid > 0
               ? {
-                  create: isSplit && validSplits.length > 0
-                    ? validSplits.map((t) => ({
+                  create: isSplit && landedSplits.length > 0
+                    ? landedSplits.map((t) => ({
                         amount: t.amount.toFixed(2),
                         method: t.method,
                         bankAccountId: shopPayChannel(t.method) === "TRANSFER" ? bankAccountId : null,
@@ -970,8 +994,8 @@ export async function checkoutSale(input: {
       }
 
       if (paid > 0) {
-        if (isSplit && validSplits.length > 0) {
-          for (const t of validSplits) {
+        if (isSplit && landedSplits.length > 0) {
+          for (const t of landedSplits) {
             await tx.financeEntry.create({
               data: {
                 branchId: saleShopId,
@@ -1010,7 +1034,7 @@ export async function checkoutSale(input: {
             ...(orderDiscount > 0
               ? { orderDiscount, discountReason: discountReason || null }
               : {}),
-            ...(isSplit ? { splitTenders: validSplits } : {}),
+            ...(isSplit ? { splitTenders: landedSplits, typedTenders: validSplits } : {}),
             ...(approvedBy ? { priceApprovedBy: approvedBy.name, priceApprovedById: approvedBy.id } : {}),
             ...(input.queuedAt
               ? { postedFromOffline: true, queuedAt: input.queuedAt, offlineId: input.offlineId ?? null }
@@ -1205,7 +1229,9 @@ export async function collectPayment(formData: FormData) {
       // Scale tenders down if they typed more than still owed.
       let leftToTake = collected
       const applied: Array<{ method: "CASH" | "TRANSFER"; amount: number }> = []
-      for (const row of tenders) {
+      // Bank first: a transfer is exactly what the statement shows, while cash
+      // typed past what is owed is change handed back.
+      for (const row of bankFirst(tenders)) {
         if (leftToTake <= 0) break
         const take = Math.min(row.amount, leftToTake)
         if (take > 0) {
@@ -1380,7 +1406,9 @@ export async function collectInvoicePayment(formData: FormData) {
       const collected = Math.min(amount, due)
       let leftToTake = collected
       const applied: Array<{ method: "CASH" | "TRANSFER"; amount: number }> = []
-      for (const row of tenders) {
+      // Bank first: a transfer is exactly what the statement shows, while cash
+      // typed past what is owed is change handed back.
+      for (const row of bankFirst(tenders)) {
         if (leftToTake <= 0) break
         const take = Math.min(row.amount, leftToTake)
         if (take > 0) {
@@ -1574,11 +1602,12 @@ export async function getReceiptsForRange(from: string, to: string) {
   if (!(await can(user.role, "view.sales"))) return { error: "You are not allowed to see sales. Ask the main admin." as const }
 
   const branchId = await viewBranchFilter(user)
-  const start = new Date(`${from}T00:00:00`)
-  const end = new Date(`${to}T23:59:59.999`)
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+  // Shop days run midnight to midnight in Lagos, not on the server's clock.
+  if (!isWatDayKey(from) || !isWatDayKey(to)) {
     return { error: "Pick the first day and the last day." as const }
   }
+  const start = watBounds(from).start
+  const end = new Date(watBounds(to).end.getTime() - 1)
   if (start > end) return { error: "The first day must come before the last day." as const }
 
   const sales = await prisma.sale.findMany({

@@ -15,7 +15,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Button } from "@/components/ui/button"
 import { downloadTable } from "@/lib/download-table"
-import { formatShopWhen } from "@/lib/lagos-day"
+import { formatShopWhen, watDayKey } from "@/lib/lagos-day"
 import { formatCurrency, money } from "@/lib/utils"
 import { useUrlFilter } from "@/lib/use-url-filter"
 
@@ -198,7 +198,7 @@ export function TransfersList({
         ])
       }
     }
-    const stamp = new Date().toISOString().slice(0, 10)
+    const stamp = watDayKey()
     const stage = status === "all" ? "all" : status.toLowerCase()
     void downloadTable(rows, `shop-to-shop-transfers-${stage}-${stamp}.${format}`, format)
     toast.success(format === "xlsx" ? "Excel extracted for this list." : "CSV extracted for this list.")

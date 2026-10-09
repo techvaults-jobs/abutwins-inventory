@@ -29,6 +29,7 @@ import {
 import { TablePager, usePagedRows } from "@/components/table-pager"
 import { OpeningMoneyPanel } from "./opening-money-panel"
 import { getFinanceLedger, type NamedBankRow, type OpeningCashShop } from "@/app/actions/finance"
+import { watDayKey } from "@/lib/lagos-day"
 
 type LedgerEntry = {
   id: string
@@ -76,7 +77,7 @@ function groupByDay(entries: LedgerEntry[]): DayGroup[] {
   const map = new Map<string, DayGroup>()
   for (const entry of entries) {
     const date = new Date(entry.date)
-    const key = date.toISOString().slice(0, 10)
+    const key = watDayKey(date)
     const group =
       map.get(key) ??
       { key, label: formatDate(date), moneyIn: 0, moneyOut: 0, net: 0, entries: [] as LedgerEntry[] }
@@ -381,11 +382,11 @@ export function FinanceClientView({ data }: { data: FinanceData }) {
         download={
           account && loaded
             ? {
-                filename: `${ledger === "CASH" ? "cash" : "bank"}-ledger-${new Date().toISOString().slice(0, 10)}`,
+                filename: `${ledger === "CASH" ? "cash" : "bank"}-ledger-${watDayKey()}`,
                 rows: () => [
                   ["Date", "Shop", "In or out", "Kind", "Note", "Amount"],
                   ...account.entries.map((entry) => [
-                    new Date(entry.date).toISOString().slice(0, 10),
+                    watDayKey(new Date(entry.date)),
                     entry.branch,
                     entry.type === "IN" ? "In" : "Out",
                     entry.category,

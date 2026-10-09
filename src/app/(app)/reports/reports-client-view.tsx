@@ -25,7 +25,7 @@ import {
 } from "@/components/shared"
 import { TablePager, usePagedRows } from "@/components/table-pager"
 import type { ReportsPack } from "@/lib/reports-pack"
-import { formatWatLong } from "@/lib/lagos-day"
+import { formatWatLong, watDayKey } from "@/lib/lagos-day"
 import { groupOwedHouses, type OwedHouse } from "@/lib/purchase-money"
 import { ShopSalesDetail, type ShopSaleLine } from "./shop-sales-detail"
 
@@ -113,7 +113,7 @@ const DRILLDOWN_TITLE: Record<Drilldown, string> = {
   RETURNS: "Returns",
 }
 
-const day = (value: Date | string) => new Date(value).toISOString().slice(0, 10)
+const day = (value: Date | string) => watDayKey(new Date(value))
 
 /** Still owed on one invoice, after what returns already cleared on it. */
 function saleStillOwed(sale: { totalAmount: unknown; paidAmount: unknown; returned?: number }) {
@@ -444,7 +444,7 @@ export function ReportsClientView({
                   String(money(sale.totalAmount)),
                   String(money(sale.paidAmount)),
                   String(saleStillOwed(sale)),
-                  new Date(sale.saleDate).toISOString().slice(0, 10),
+                  watDayKey(new Date(sale.saleDate)),
                 ]),
               ]}
             />

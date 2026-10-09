@@ -15,6 +15,7 @@ import { isLowStock } from "@/lib/stock-limits"
 import { formatCondition } from "@/lib/status"
 import { SHOP_CONDITION_OPTIONS } from "@/lib/conditions"
 import { countByStockCategory, matchesStockCategory, STOCK_CATEGORY_FILTERS } from "@/lib/stock-categories"
+import { watDayKey } from "@/lib/lagos-day"
 
 type Branch = { id: string; name: string; code: string }
 type InventoryRow = {
@@ -315,7 +316,7 @@ export function InventoryClientView({
   ]
   const columns = showCost ? allColumns : allColumns.filter((column) => !COST_COLUMNS.has(column.id))
 
-  const stamp = new Date().toISOString().slice(0, 10)
+  const stamp = watDayKey()
   const categorySlug =
     categoryFilter === "ALL"
       ? ""

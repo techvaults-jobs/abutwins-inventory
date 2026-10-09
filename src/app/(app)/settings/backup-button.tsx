@@ -3,6 +3,7 @@
 import { toast } from "sonner"
 import { exportShopBackup } from "@/app/actions/account"
 import { Button } from "@/components/ui/button"
+import { watDayKey } from "@/lib/lagos-day"
 
 export function BackupButton() {
   return (
@@ -20,7 +21,7 @@ export function BackupButton() {
         const url = URL.createObjectURL(blob)
         const link = document.createElement("a")
         link.href = url
-        link.download = `abutwins-backup-${new Date().toISOString().slice(0, 10)}.json`
+        link.download = `abutwins-backup-${watDayKey()}.json`
         link.click()
         URL.revokeObjectURL(url)
         toast.success("Backup downloaded. Keep it somewhere else, not on this computer.")

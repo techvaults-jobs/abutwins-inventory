@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input"
 import { Select } from "@/components/ui/select"
 import { downloadTable } from "@/lib/download-table"
 import { formatCurrency, money } from "@/lib/utils"
+import { watDayKey } from "@/lib/lagos-day"
 
 type Branch = { id: string; name: string; code?: string }
 type Product = {
@@ -232,7 +233,7 @@ export function TransferForm({
       ["Total qty to send", totalQty],
       [`Total ${valueWord.toLowerCase()}`, totalCost.toFixed(2)],
     ]
-    const stamp = new Date().toISOString().slice(0, 10)
+    const stamp = watDayKey()
     const base = `shop-to-shop-selection-${fromShop?.code ?? "from"}-to-${toShop?.code ?? "to"}-${stamp}`
     void downloadTable(rows, `${base}.${format}`, format)
     toast.success(format === "xlsx" ? "Excel extracted for this selection." : "CSV extracted for this selection.")
@@ -280,7 +281,7 @@ export function TransferForm({
       ["Selected qty to send", totalQty],
       [`Selected ${valueWord.toLowerCase()}`, totalCost.toFixed(2)],
     ]
-    const stamp = new Date().toISOString().slice(0, 10)
+    const stamp = watDayKey()
     const base = `shop-to-shop-stock-${fromShop?.code ?? "shop"}-${stamp}`
     void downloadTable(rows, `${base}.${format}`, format)
     toast.success(format === "xlsx" ? "Excel extracted for this shop stock." : "CSV extracted for this shop stock.")

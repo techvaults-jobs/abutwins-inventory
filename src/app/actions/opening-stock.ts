@@ -22,6 +22,7 @@ import { OPENING_STOCK_METHOD } from "@/lib/upload-purchase"
 import { payablePurchaseWhere, purchaseBalance } from "@/lib/purchase-money"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
 import { money } from "@/lib/utils"
+import { watDayKey } from "@/lib/lagos-day"
 
 /**
  * Opening stock, per shop: loaded, corrected against a physical count, then
@@ -1109,7 +1110,7 @@ export async function closeOpeningStock(formData: FormData): Promise<{ error?: s
   await prisma.purchase.update({
     where: { id: record.purchaseId },
     data: {
-      notes: [record.purchase.notes, `Opening stock closed ${closedAt.toISOString().slice(0, 10)} at ₦${sum.value.toLocaleString("en-NG")}.`]
+      notes: [record.purchase.notes, `Opening stock closed ${watDayKey(closedAt)} at ₦${sum.value.toLocaleString("en-NG")}.`]
         .filter(Boolean)
         .join(" "),
     },
@@ -1174,7 +1175,7 @@ export async function reopenOpeningStock(formData: FormData): Promise<{ error?: 
   await prisma.purchase.update({
     where: { id: record.purchaseId },
     data: {
-      notes: [record.purchase.notes, `Opening stock reopened ${reopenedAt.toISOString().slice(0, 10)}: ${reason}.`]
+      notes: [record.purchase.notes, `Opening stock reopened ${watDayKey(reopenedAt)}: ${reason}.`]
         .filter(Boolean)
         .join(" "),
     },

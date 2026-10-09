@@ -28,6 +28,7 @@ import { countByStockCategory, matchesStockCategory, STOCK_CATEGORY_FILTERS } fr
 import { formatCondition } from "@/lib/status"
 import { SHOP_CONDITION_OPTIONS } from "@/lib/conditions"
 import { formatCurrency, formatDate } from "@/lib/utils"
+import { watDayKey } from "@/lib/lagos-day"
 
 type Edit = {
   quantity?: string
@@ -71,7 +72,7 @@ export function OpeningStockBook({ branchId, book }: { branchId: string; book: O
   const pager = usePagedRows(visible, `${categoryFilter}|${query}`)
   const dirty = Object.entries(edits).filter(([, edit]) => Object.values(edit).some((v) => (Array.isArray(v) ? v.length : v !== undefined)))
   const offShelf = book.lines.filter((line) => line.shelfQty !== line.openingQty)
-  const fileBase = `opening-stock-${record.shopCode.toLowerCase()}-${new Date().toISOString().slice(0, 10)}`
+  const fileBase = `opening-stock-${record.shopCode.toLowerCase()}-${watDayKey()}`
 
   const tickedLines = book.lines.filter((line) => ticked.has(line.productId))
   const tickedUnits = tickedLines.reduce((sum, line) => sum + line.openingQty, 0)

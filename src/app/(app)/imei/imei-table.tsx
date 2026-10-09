@@ -10,7 +10,7 @@ import { downloadTable } from "@/lib/download-table"
 import { StatusBadge } from "@/components/shared"
 import { DataTable, type DataColumn } from "@/components/data-table"
 import { Button } from "@/components/ui/button"
-import { formatShopWhen } from "@/lib/lagos-day"
+import { formatShopWhen, watDayKey } from "@/lib/lagos-day"
 import { warrantyState } from "@/lib/warranty"
 import { unitIdentityKind } from "@/lib/unit-identity"
 import { ProductLabel } from "@/components/product-label"
@@ -98,7 +98,7 @@ function ExtractButtons({ filters }: { filters: ImeiFilters }) {
         toast.error("No phone matches these filters, so there is nothing to download.")
         return
       }
-      const stamp = new Date().toISOString().slice(0, 10)
+      const stamp = watDayKey()
       const scope = [filters.status ?? filters.life, filters.when, filters.q].filter(Boolean).join("-").replace(/[^a-z0-9-]+/gi, "_")
       await downloadTable(rows, `all-phones${scope ? `-${scope}` : ""}-${stamp}.${format}`, format)
       toast.success(

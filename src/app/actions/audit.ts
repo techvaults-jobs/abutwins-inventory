@@ -8,6 +8,7 @@ import { verifyAuditChain, writeAudit } from "@/lib/audit"
 import { isAfterHours } from "@/lib/audit-meta"
 import { formatRecordChange, pageNameFromPath, recordKindLabel } from "@/lib/shop-speak"
 import { statusLabel } from "@/lib/status"
+import { isWatDayKey, watBounds } from "@/lib/lagos-day"
 
 export type AuditFilters = {
   q?: string
@@ -26,8 +27,9 @@ function whereFrom(filters: AuditFilters) {
   const createdAt =
     filters.from || filters.to
       ? {
-          ...(filters.from ? { gte: new Date(filters.from) } : {}),
-          ...(filters.to ? { lte: new Date(`${filters.to}T23:59:59`) } : {}),
+          // Lagos days, not the server's: a day starts at midnight in the shop.
+          ...(filters.from && isWatDayKey(filters.from) ? { gte: watBounds(filters.from).start } : {}),
+          ...(filters.to && isWatDayKey(filters.to) ? { lt: watBounds(filters.to).end } : {}),
         }
       : undefined
   const action =

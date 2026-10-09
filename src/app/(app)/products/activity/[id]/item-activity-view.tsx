@@ -7,7 +7,7 @@ import { StatusBadge } from "@/components/shared"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { downloadTable } from "@/lib/download-table"
-import { formatShopWhen } from "@/lib/lagos-day"
+import { formatShopWhen, watDayKey } from "@/lib/lagos-day"
 import { moveWords } from "@/lib/stock-moves"
 import { formatCurrency } from "@/lib/utils"
 import { cn } from "@/lib/utils"
@@ -163,7 +163,7 @@ export function ItemActivityView({
         ...shown.prices.map((row) => [when(row.when), PRICE_WORDS[row.type] ?? row.type, row.from, row.to, row.by, row.reason ?? ""]),
       ],
     }
-    const stamp = new Date().toISOString().slice(0, 10)
+    const stamp = watDayKey()
     void downloadTable(sheets[tab], `item-activity-${sku}-${tab}-${stamp}.${format}`, format)
   }
 

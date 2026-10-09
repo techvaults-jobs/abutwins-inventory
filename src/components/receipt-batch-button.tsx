@@ -9,13 +9,14 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { drawReceipt, loadMark } from "@/lib/receipt-pdf"
 import { formatDateTime } from "@/lib/utils"
+import { watDayKey } from "@/lib/lagos-day"
 
 /**
  * Every receipt for a chosen stretch of days, in one file, one receipt to a
  * page. For filing, or for handing the day's takings to accounts.
  */
 export function ReceiptBatchButton() {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = watDayKey()
   const [from, setFrom] = useState(today)
   const [to, setTo] = useState(today)
   const [busy, setBusy] = useState(false)

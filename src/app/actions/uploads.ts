@@ -25,6 +25,7 @@ import { displayPartyName } from "@/lib/party-key"
 import { ensureOpeningStockSupplier, findDuplicateSupplier } from "@/lib/supplier-identity"
 import { resolveWritableShopId, viewBranchFilter } from "@/lib/branch-scope"
 import { canSeeAllBranches } from "@/lib/rbac"
+import { purchaseBalance } from "@/lib/purchase-money"
 
 /**
  * Loading the shop system from a sheet or by hand.
@@ -1114,6 +1115,7 @@ export async function getUploadProgress() {
           invoiceNumber: true,
           totalAmount: true,
           paidAmount: true,
+          returnedAmount: true,
           paymentMethod: true,
           branchId: true,
           supplierId: true,
@@ -1148,7 +1150,8 @@ export async function getUploadProgress() {
         supplierName: openBill.supplier.name,
         submissionValue: money(openBill.totalAmount),
         paid: isMarkedPaidOnUpload(openBill.paymentMethod),
-        owed: Math.max(0, money(openBill.totalAmount) - money(openBill.paidAmount)),
+        // Same rule as the supplier ledger: what went back to them is not owed.
+        owed: purchaseBalance(openBill.totalAmount, openBill.paidAmount, openBill.returnedAmount).owed,
         lineCount: openBill._count.items,
         unitCount: openBill._count.imeiRecords,
       }

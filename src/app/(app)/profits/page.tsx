@@ -3,6 +3,7 @@ import { PageHeader } from "@/components/shared"
 import { ExportCsv } from "@/components/export-csv"
 import { formatCurrency, formatDate } from "@/lib/utils"
 import { formatCondition } from "@/lib/status"
+import { watDayKey } from "@/lib/lagos-day"
 
 function productLine(row: {
   item: string
@@ -67,7 +68,7 @@ export default async function ProfitsPage() {
         description="Sell price minus cost, after shop bills."
         actions={
           <ExportCsv
-            filename={`profit-${new Date().toISOString().slice(0, 10)}.csv`}
+            filename={`profit-${watDayKey()}.csv`}
             label="Extract full profit list"
             rows={shopCsvRows}
           />
@@ -119,7 +120,7 @@ export default async function ProfitsPage() {
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-5 py-4">
           <h3 className="font-semibold">Sales from our own stock</h3>
           <ExportCsv
-            filename={`own-stock-margins-${new Date().toISOString().slice(0, 10)}.csv`}
+            filename={`own-stock-margins-${watDayKey()}.csv`}
             label="Extract this list"
             rows={shopCsvRows}
           />
@@ -170,7 +171,7 @@ export default async function ProfitsPage() {
           </div>
           {priceChanges.lines.length > 0 ? (
             <ExportCsv
-              filename={`price-changes-${new Date().toISOString().slice(0, 10)}.csv`}
+              filename={`price-changes-${watDayKey()}.csv`}
               label="Extract this list"
               rows={priceCsvRows}
             />

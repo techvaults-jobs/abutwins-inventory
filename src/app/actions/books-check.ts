@@ -445,7 +445,7 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
       const creditTotal = money(row.creditTotal)
       return {
         id: row.id,
-        day: row.businessDate || row.closeDate.toISOString().slice(0, 10),
+        day: row.businessDate || watDayKey(row.closeDate),
         staff: row.user.name,
         totalSales: expectedCash + transferTotal + posTotal + creditTotal,
         expected: expectedCash,
