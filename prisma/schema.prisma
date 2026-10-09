@@ -274,6 +274,7 @@ model User {
   notifications   Notification[]
   transfers       StockTransfer[]
   transfersReceived StockTransfer[] @relation("TransferReceiver")
+  paymentsReceived  Payment[]       @relation("PaymentReceiver")
   swaps           Swap[]
   repairs         Repair[]
   returns         StockReturn[]
@@ -705,6 +706,10 @@ model Payment {
   reference     String?
   notes         String?
   paidAt        DateTime      @default(now())
+  /// Who took this money: the cashier at the sale, or whoever collected a
+  /// later part payment. Empty on payments from before it was recorded.
+  receivedByUserId String?
+  receivedByUser   User?      @relation("PaymentReceiver", fields: [receivedByUserId], references: [id])
 
   @@index([saleId])
   @@index([paidAt])

@@ -2205,7 +2205,15 @@ async function finishSwap(user: Awaited<ReturnType<typeof requireUser>>, formDat
         },
         payments:
           receivable > 0 && collected > 0
-            ? { create: { amount: collected.toFixed(2), method, bankAccountId: swapBank?.id ?? null, reference: payChannel === "CASH" ? null : paymentReference } }
+            ? {
+                create: {
+                  amount: collected.toFixed(2),
+                  method,
+                  bankAccountId: swapBank?.id ?? null,
+                  reference: payChannel === "CASH" ? null : paymentReference,
+                  receivedByUserId: user.id,
+                },
+              }
             : undefined,
       },
     })

@@ -14,6 +14,8 @@ import { downloadTable } from "@/lib/download-table"
 import { formatShopWhen, matchesDayRange } from "@/lib/lagos-day"
 import { statusLabel } from "@/lib/status"
 import { cn, formatCurrency, formatCurrencyShort } from "@/lib/utils"
+import { PaymentTrail } from "@/components/payment-trail"
+import { trailText, type PaymentStep } from "@/lib/payment-trail"
 
 export type SaleRow = {
   id: string
@@ -30,8 +32,10 @@ export type SaleRow = {
   soldBy: string | null
   /** What finished refunds and credit notes took off this sale. */
   returned: number
-  /** Transfer description or POS approval code from the payment record. */
-  paymentRef: string | null
+  /** Every payment reference on the sale (transfer description, POS code), latest first. */
+  paymentRefs: string[]
+  /** Each time money was taken on the sale, in order: at the till, then each part payment. */
+  payments: PaymentStep[]
   /** Bank name and account number that received a non-cash payment. */
   paymentBank: string | null
   items: Array<{ id: string; name: string; specs: string; imei: string | null; quantity: number; unitPrice: number; totalPrice: number }>
@@ -83,7 +87,8 @@ function searchText(sale: SaleRow) {
     sale.branch.code,
     sale.soldBy,
     sale.paymentBank,
-    sale.paymentRef,
+    ...sale.paymentRefs,
+    ...sale.payments.map((step) => step.by),
     ...sale.items.flatMap((item) => [item.name, item.specs, item.imei]),
   ]
     .filter(Boolean)
@@ -92,7 +97,24 @@ function searchText(sale: SaleRow) {
 
 function exportRows(rows: SaleRow[]) {
   return [
-    ["Invoice", "Date", "Shop", "Buyer", "Sold by", "Items", "Sales", "Paid", "Returned", "Still owed", "Payment", "Bank", "Ref", "Status"],
+    [
+      "Invoice",
+      "Date",
+      "Shop",
+      "Buyer",
+      "Sold by",
+      "Items",
+      "Sales",
+      "Paid",
+      "Returned",
+      "Still owed",
+      "Payment",
+      "Bank",
+      "Refs",
+      "Payments made",
+      "Payments step by step",
+      "Status",
+    ],
     ...rows.map((sale) => [
       sale.invoiceNumber,
       formatShopWhen(sale.saleDate),
@@ -106,7 +128,9 @@ function exportRows(rows: SaleRow[]) {
       Math.max(0, -saleBalance(sale)),
       statusLabel(sale.paymentMethod),
       sale.paymentBank ?? "",
-      sale.paymentRef ?? "",
+      sale.paymentRefs.join("; "),
+      sale.payments.length,
+      trailText(sale.payments, formatShopWhen, formatCurrency),
       statusLabel(sale.status),
     ]),
   ]
@@ -251,17 +275,25 @@ export function SalesList({ sales }: { sales: SaleRow[] }) {
         <div className="min-w-0">
           <p className="whitespace-nowrap">{statusLabel(sale.paymentMethod)}</p>
           {sale.paymentBank ? <p className="text-xs text-muted-foreground">{sale.paymentBank}</p> : null}
+          {sale.payments.length > 1 ? (
+            <p className="whitespace-nowrap text-[11px] font-medium text-primary">{sale.payments.length} payments</p>
+          ) : null}
         </div>
       ),
     },
     {
       id: "ref",
       header: "Ref",
-      hideBelow: "xl",
-      sortValue: (sale) => sale.paymentRef ?? "",
+      hideBelow: "lg",
+      sortValue: (sale) => sale.paymentRefs[0] ?? "",
       cell: (sale) =>
-        sale.paymentRef ? (
-          <span className="font-mono text-xs text-foreground">{sale.paymentRef}</span>
+        sale.paymentRefs.length ? (
+          <div className="min-w-0" title={sale.paymentRefs.join("\n")}>
+            <p className="font-mono text-xs text-foreground">{sale.paymentRefs[0]}</p>
+            {sale.paymentRefs.length > 1 ? (
+              <p className="text-[11px] text-muted-foreground">+{sale.paymentRefs.length - 1} earlier</p>
+            ) : null}
+          </div>
         ) : (
           <span className="text-muted-foreground">—</span>
         ),
@@ -499,12 +531,8 @@ function SaleQuickLook({ sale }: { sale: SaleRow }) {
           {sale.paymentBank ? (
             <p className="text-xs text-muted-foreground">{sale.paymentBank}</p>
           ) : null}
-          {sale.paymentRef ? (
-            <p>
-              <span className="inline-flex items-center rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] font-medium text-foreground">
-                Ref: {sale.paymentRef}
-              </span>
-            </p>
+          {sale.payments.length > 1 ? (
+            <p className="text-xs text-muted-foreground">Paid in {sale.payments.length} steps. See How it was paid below.</p>
           ) : null}
         </dd>
         <dt className="text-muted-foreground">Status</dt>
@@ -516,6 +544,11 @@ function SaleQuickLook({ sale }: { sale: SaleRow }) {
           </>
         ) : null}
       </dl>
+
+      <div>
+        <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">How it was paid</p>
+        <PaymentTrail steps={sale.payments} total={sale.totalAmount} returned={sale.returned} />
+      </div>
 
       <div>
         <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">

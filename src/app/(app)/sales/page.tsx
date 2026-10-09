@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { money } from "@/lib/utils"
 import { prisma } from "@/lib/prisma"
 import { returnedValueBySale } from "@/lib/returned-value"
+import { buildPaymentTrails, trailReferences } from "@/lib/payment-trail"
 import { SalesList, type SaleRow } from "./sales-list"
 import { CachePageData } from "@/components/cache-page-data"
 
@@ -14,7 +15,12 @@ export default async function SalesPage() {
   const raw = await getSales()
   // Refunds and credit notes already finished against each sale, so the
   // figures show the real sales value and what is really still owed.
-  const returned = await returnedValueBySale(prisma, raw.map((sale) => sale.id))
+  const [returned, trails] = await Promise.all([
+    returnedValueBySale(prisma, raw.map((sale) => sale.id)),
+    // Every payment on each sale in order: at the till and each part payment
+    // after, with its reference and who took it.
+    buildPaymentTrails(prisma, raw),
+  ])
   // Money paid out to a customer on a Swap Deal is not a payment on the
   // invoice; it sits in the money ledger under the invoice number. Read it so
   // a swap invoice still shows which bank the money left from.
@@ -47,7 +53,8 @@ export default async function SalesPage() {
     branch: { code: sale.branch.code, name: sale.branch.name },
     soldBy: sale.user?.name ?? null,
     returned: returned.get(sale.id) ?? 0,
-    paymentRef: sale.payments.find((p) => p.reference)?.reference ?? null,
+    paymentRefs: trailReferences(trails.get(sale.id) ?? []),
+    payments: trails.get(sale.id) ?? [],
     // Every bank the money went into, so a sale split across two accounts
     // shows both on the list without opening it.
     paymentBank: (() => {

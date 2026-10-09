@@ -21,6 +21,8 @@ import { formatCondition, statusLabel } from "@/lib/status"
 import { warrantyState } from "@/lib/warranty"
 import { dueAfterReturns, returnedValueBySale } from "@/lib/returned-value"
 import { prisma } from "@/lib/prisma"
+import { buildPaymentTrails } from "@/lib/payment-trail"
+import { PaymentTrail } from "@/components/payment-trail"
 
 export default async function SaleDetailPage({
   params,
@@ -36,7 +38,12 @@ export default async function SaleDetailPage({
   const [me, sale, settings, customers] = await Promise.all([requireUser(), getSale(id), getAppSettings(), getCustomers()])
   if (!sale) notFound()
   // A finished refund or credit note has already cleared part of this sale.
-  const returned = (await returnedValueBySale(prisma, [sale.id])).get(sale.id) ?? 0
+  const [returnedBySale, trails] = await Promise.all([
+    returnedValueBySale(prisma, [sale.id]),
+    buildPaymentTrails(prisma, [sale]),
+  ])
+  const returned = returnedBySale.get(sale.id) ?? 0
+  const paymentSteps = trails.get(sale.id) ?? []
   const due = dueAfterReturns(sale, returned)
   const brand = letterheadFromSettings(settings)
   const branchCustomers = customers.filter(
@@ -202,30 +209,13 @@ export default async function SaleDetailPage({
           ))}
         </ul>
       </div>
-      {sale.payments.length ? (
-        <div className="surface-card p-5 print:hidden">
-          <h3 className="mb-3 font-semibold">Payments</h3>
-          <div className="space-y-2 text-sm">
-            {sale.payments.map((payment) => (
-              <div key={payment.id} className="flex justify-between border-b border-border/70 pb-2">
-                <span>
-                  {statusLabel(payment.method)}
-                  {payment.bankAccount
-                    ? ` · ${payment.bankAccount.bankName}${payment.bankAccount.accountName ? ` (${payment.bankAccount.accountName})` : ""}`
-                    : ""}
-                  {payment.reference ? (
-                    <span className="ml-1.5 inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 font-mono text-[11px] font-medium text-foreground">
-                      Ref: {payment.reference}
-                    </span>
-                  ) : null}
-                  {payment.notes ? ` · ${payment.notes}` : ""}
-                </span>
-                <span className="tabular-nums">{formatCurrency(money(payment.amount))}</span>
-              </div>
-            ))}
-          </div>
+      <div className="surface-card p-5 print:hidden">
+        <div className="mb-3 flex flex-wrap items-baseline justify-between gap-2">
+          <h3 className="font-semibold">How it was paid</h3>
+          <p className="text-xs text-muted-foreground">Each payment in order, with its reference and who took it</p>
         </div>
-      ) : null}
+        <PaymentTrail steps={paymentSteps} total={money(sale.totalAmount)} returned={returned} />
+      </div>
       {!sale.customerId ? (
         <div className="surface-card p-5 print:hidden">
           <h3 className="mb-2 font-semibold">Attach named buyer</h3>

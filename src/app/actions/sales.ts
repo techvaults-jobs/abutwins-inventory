@@ -24,7 +24,20 @@ export async function getSales() {
   const branchId = await viewBranchFilter(user)
   return prisma.sale.findMany({
     where: branchId ? { branchId } : undefined,
-    include: { customer: true, branch: true, user: { select: { id: true, name: true, email: true, role: true, branchId: true } }, items: { include: { product: true, imei: true } }, payments: { select: { method: true, reference: true, bankAccountId: true, bankAccount: { select: { bankName: true, accountNumber: true } } } } },
+    include: { customer: true, branch: true, user: { select: { id: true, name: true, email: true, role: true, branchId: true } }, items: { include: { product: true, imei: true } }, payments: {
+        select: {
+          id: true,
+          amount: true,
+          method: true,
+          reference: true,
+          notes: true,
+          paidAt: true,
+          bankAccountId: true,
+          bankAccount: { select: { bankName: true, accountNumber: true } },
+          receivedByUser: { select: { name: true, email: true } },
+        },
+        orderBy: { paidAt: "asc" },
+      } },
     orderBy: { saleDate: "desc" },
     take: 500,
   })
@@ -42,7 +55,13 @@ export async function getSale(id: string) {
       branch: true,
       user: { select: { id: true, name: true, email: true, role: true, branchId: true } },
       items: { include: { product: true, imei: true } },
-      payments: { include: { bankAccount: { select: { bankName: true, accountNumber: true, accountName: true } } } },
+      payments: {
+        include: {
+          bankAccount: { select: { bankName: true, accountNumber: true, accountName: true } },
+          receivedByUser: { select: { name: true, email: true } },
+        },
+        orderBy: { paidAt: "asc" },
+      },
     },
   }))
 }
@@ -843,6 +862,7 @@ export async function checkoutSale(input: {
                         method: t.method,
                         bankAccountId: shopPayChannel(t.method) === "TRANSFER" ? bankAccountId : null,
                         reference: shopPayChannel(t.method) === "TRANSFER" ? (input.paymentReference?.trim() || null) : null,
+                        receivedByUserId: user.id,
                       }))
                     : [
                         {
@@ -850,6 +870,7 @@ export async function checkoutSale(input: {
                           method: receivedChannel,
                           bankAccountId: receivedChannel === "CASH" ? null : bankAccountId,
                           reference: receivedChannel === "CASH" ? null : (input.paymentReference?.trim() || null),
+                          receivedByUserId: user.id,
                         },
                       ],
                 }
@@ -1250,6 +1271,7 @@ export async function collectPayment(formData: FormData) {
               bankAccountId: row.method === "TRANSFER" ? bankAccountId : null,
               reference: row.method === "TRANSFER" ? paymentReference : payRef,
               notes: "Taken from what the customer paid on their account. The invoice was not changed.",
+              receivedByUserId: user.id,
             },
           })
           row.amount -= take
@@ -1381,6 +1403,7 @@ export async function collectInvoicePayment(formData: FormData) {
             bankAccountId: row.method === "TRANSFER" ? bankAccountId : null,
             reference: row.method === "TRANSFER" ? paymentReference : null,
             notes: "Money collected on a finished invoice. The items and IMEIs were not changed",
+            receivedByUserId: user.id,
           },
         })
         await tx.financeEntry.create({
