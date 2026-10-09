@@ -306,6 +306,7 @@ const PAGES: Array<
     doThis: [
       "Add a person with a full name, a phone, and the shop.",
       "If they already owe Abu Twins, type Opening balance they owe us. Leave it at zero if they start clean.",
+      "For a customer already on the list, open their page and use Add or Change on Opening balance. Type the right figure and why. The difference goes on their account as its own line, so the old figure stays in the history. The CEO, the main admin, the Accountant and the Auditor can do this.",
       "Tap Still owing to see who to call for payment.",
       "Open a customer to see what they still owe and their invoices.",
       "If you can collect, post a payment on that person. Cash, bank, or both in one save.",

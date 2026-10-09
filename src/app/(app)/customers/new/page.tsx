@@ -37,7 +37,7 @@ export default async function AddCustomerPage() {
         </FormSection>
         <FormSection title="Money">
           <div className="grid gap-4 sm:grid-cols-2">
-            <FormField label="Opening balance they owe us" hint="Money this buyer already owed before this software. Leave at zero if they start clean.">
+            <FormField label="Opening balance they owe us" hint="Money this buyer already owed before this software. Leave at zero if they start clean. It can be added or corrected later on the customer's page.">
               <Input name="openingBalance" type="number" min={0} step="0.01" inputMode="decimal" placeholder="0" />
             </FormField>
             <FormField label="Credit limit" hint="The most they may owe at once. Zero means no credit.">

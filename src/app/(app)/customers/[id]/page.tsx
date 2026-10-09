@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation"
-import { getCustomer } from "@/app/actions/parties"
+import { getCustomer, getCustomerOpening } from "@/app/actions/parties"
 import { collectPayment } from "@/app/actions/sales"
 import { ActionForm } from "@/components/action-form"
 import { CollectMoneyFields } from "@/components/collect-money-fields"
@@ -10,11 +10,12 @@ import { statusLabel } from "@/lib/status"
 import { prisma } from "@/lib/prisma"
 import { dueAfterReturns, returnedValueBySale } from "@/lib/returned-value"
 import { cn } from "@/lib/utils"
+import { OpeningBalanceCard } from "./opening-balance-card"
 
 export default async function CustomerDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
-  const customer = await getCustomer(id)
-  if (!customer) notFound()
+  const [customer, opening] = await Promise.all([getCustomer(id), getCustomerOpening(id)])
+  if (!customer || !opening) notFound()
   const banks = await prisma.bankAccount.findMany({
     where: { isActive: true, branchId: customer.branchId },
     orderBy: [{ bankName: "asc" }, { accountNumber: "asc" }],
@@ -40,6 +41,9 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
     if (entry.type === "REFUND" && entry.reference?.startsWith("RTN-") && !paidBack.has(entry.reference)) {
       return { tag: "Returned · debt cleared", tone: "text-success", note: "No money was paid out on this return." }
     }
+    if (entry.type === "ADJUSTMENT" && entry.reference?.startsWith("OBAL")) {
+      return { tag: "Opening balance", tone: "text-warning", note: null as string | null }
+    }
     const tags: Record<string, { tag: string; tone: string }> = {
       SALE: { tag: "Bought on credit", tone: "text-warning" },
       PAYMENT: { tag: "Paid us", tone: "text-success" },
@@ -55,12 +59,22 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
     <div className="space-y-6">
       <PageHeader backHref="/customers" title={customer.name} description={`${customer.phone} · ${customer.branch.name}`} />
       <div className="grid gap-4 md:grid-cols-3">
-        <div className="surface-card p-5">
-          <p className="text-sm text-muted-foreground">Still owing</p>
-          <p className="text-2xl font-semibold">{formatCurrency(money(customer.currentBalance))}</p>
-          <p className="text-xs text-muted-foreground">Credit limit {formatCurrency(money(customer.creditLimit))}</p>
+        <div className="space-y-4">
+          <div className="surface-card p-5">
+            <p className="text-sm text-muted-foreground">Still owing</p>
+            <p className="text-2xl font-semibold">{formatCurrency(money(customer.currentBalance))}</p>
+            <p className="text-xs text-muted-foreground">Credit limit {formatCurrency(money(customer.creditLimit))}</p>
+          </div>
+          <OpeningBalanceCard
+            customerId={customer.id}
+            customerName={customer.name}
+            opening={opening.amount}
+            owing={money(customer.currentBalance)}
+            history={opening.history}
+            canChange={opening.canChange}
+          />
         </div>
-        <div className="surface-card p-5 md:col-span-2">
+        <div className="surface-card self-start p-5 md:col-span-2">
           <h3 className="mb-3 font-semibold">Collect money</h3>
           <ActionForm action={collectPayment} submit="Record payment" className="grid gap-3 md:grid-cols-1 md:items-end">
             <input type="hidden" name="customerId" value={customer.id} />

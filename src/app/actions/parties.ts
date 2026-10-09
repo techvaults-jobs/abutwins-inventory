@@ -2,15 +2,16 @@
 
 import { revalidatePath } from "next/cache"
 import { prisma } from "@/lib/prisma"
-import { resolveWritableShopId, scopeRecord, viewBranchFilter } from "@/lib/branch-scope"
+import { canReachBranch, resolveWritableShopId, scopeRecord, viewBranchFilter } from "@/lib/branch-scope"
 import { requireUser } from "@/lib/session"
-import { isShopOwner } from "@/lib/rbac"
+import { canSetOpeningMoney, isShopOwner } from "@/lib/rbac"
+import { ConflictError, settle, shiftCustomerBalance } from "@/lib/concurrency"
 import { can } from "@/lib/permissions"
 import { displayPartyName } from "@/lib/party-key"
 import { findDuplicateSupplier } from "@/lib/supplier-identity"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
 import { payablePurchaseWhere } from "@/lib/purchase-money"
-import { generateDocNumber, money } from "@/lib/utils"
+import { formatCurrency, generateDocNumber, money } from "@/lib/utils"
 import type { SupplierKind } from "@prisma/client"
 
 export async function getCustomers(search?: string) {
@@ -98,7 +99,7 @@ export async function createCustomer(formData: FormData) {
         type: "ADJUSTMENT",
         amount: openingBalance.toFixed(2),
         balance: openingBalance.toFixed(2),
-        reference: generateDocNumber("OBAL"),
+        reference: generateDocNumber(OPENING_REF_PREFIX),
         description:
           "Opening balance. Money this buyer already owed when the shops started on this software.",
       },
@@ -111,6 +112,155 @@ export async function createCustomer(formData: FormData) {
   revalidatePath("/finance")
   revalidatePath("/reports")
   return { success: true, id: customer.id }
+}
+
+/** Ledger lines that make up a customer's opening balance: the first one and every correction. */
+const OPENING_REF_PREFIX = "OBAL"
+
+function isOpeningLine(entry: { reference: string | null }) {
+  return Boolean(entry.reference?.startsWith(OPENING_REF_PREFIX))
+}
+
+/**
+ * What a customer owed us before this software, as it stands now: the
+ * opening line from when the account was made plus every correction since.
+ * Each correction is its own line, so the history of the figure is kept.
+ */
+export async function getCustomerOpening(customerId: string) {
+  const user = await requireUser()
+  const customer = await scopeRecord(
+    user,
+    await prisma.customer.findUnique({ where: { id: customerId }, select: { id: true, branchId: true } })
+  )
+  if (!customer) return null
+  const lines = await prisma.ledgerEntry.findMany({
+    where: { customerId, type: "ADJUSTMENT", reference: { startsWith: OPENING_REF_PREFIX } },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, amount: true, reference: true, description: true, createdAt: true },
+  })
+  return {
+    amount: lines.reduce((sum, line) => sum + money(line.amount), 0),
+    history: lines.map((line) => ({
+      id: line.id,
+      change: money(line.amount),
+      reference: line.reference ?? "",
+      description: line.description ?? "",
+      createdAt: line.createdAt,
+    })),
+    canChange: canSetOpeningMoney(user.role),
+  }
+}
+
+/**
+ * Add or correct what an existing customer already owed before this
+ * software. The new figure replaces the old one by posting the difference as
+ * one more opening line (never by rewriting the first), so the ledger, the
+ * customer's balance and Who did what all show the change and why.
+ *
+ * The same people who set opening cash and bank balances may do this (see
+ * canSetOpeningMoney): it changes what the business is owed.
+ */
+export async function setCustomerOpeningBalance(formData: FormData) {
+  const user = await requireUser()
+  if (!canSetOpeningMoney(user.role)) {
+    return { error: "Only the CEO, the main admin, the Accountant or the Auditor can set a customer's opening balance." }
+  }
+  const customerId = String(formData.get("customerId") || "")
+  const raw = String(formData.get("openingBalance") ?? "").trim()
+  const wanted = Number(raw)
+  if (!customerId) return { error: "Customer missing. Open their page again." }
+  if (raw === "" || !Number.isFinite(wanted) || wanted < 0) {
+    return { error: "Type the opening balance in naira, 0 or more." }
+  }
+  const target = Math.round(wanted * 100) / 100
+  const reason = String(formData.get("reason") || "").trim()
+  if (reason.length < 3) return { error: "Say why the opening balance is being set or changed." }
+
+  const result = await settle(() =>
+    prisma.$transaction(async (tx) => {
+      const customer = await tx.customer.findUnique({
+        where: { id: customerId },
+        select: { id: true, name: true, branchId: true, currentBalance: true },
+      })
+      if (!customer) throw new ConflictError("We could not find that customer.")
+      if (!(await canReachBranch(user, customer.branchId))) {
+        throw new ConflictError("This customer belongs to another shop.")
+      }
+      const lines = await tx.ledgerEntry.findMany({
+        where: { customerId, type: "ADJUSTMENT", reference: { startsWith: OPENING_REF_PREFIX } },
+        select: { amount: true, reference: true },
+      })
+      const before = lines.filter(isOpeningLine).reduce((sum, line) => sum + money(line.amount), 0)
+      const change = Math.round((target - before) * 100) / 100
+      if (Math.abs(change) < 0.005) throw new ConflictError(`The opening balance is already ${formatCurrency(target)}.`)
+
+      // Lowering it cannot undo money already paid: the lowest it can go is
+      // what they have paid off so far.
+      const owing = money(customer.currentBalance)
+      if (owing + change < -0.005) {
+        const lowest = Math.max(0, before - owing)
+        throw new ConflictError(
+          `${customer.name} has already paid off ${formatCurrency(before - owing)} of it, so the opening balance cannot go below ${formatCurrency(lowest)}.`
+        )
+      }
+
+      const after = await shiftCustomerBalance(tx, customerId, change)
+      const next = money(after.currentBalance)
+      if (next < -0.005) {
+        throw new ConflictError(`${customer.name} was collected from while you were typing. Open their page again.`)
+      }
+
+      const reference = generateDocNumber(OPENING_REF_PREFIX)
+      const by = user.name || user.email
+      await tx.ledgerEntry.create({
+        data: {
+          customerId,
+          type: "ADJUSTMENT",
+          amount: change.toFixed(2),
+          balance: next.toFixed(2),
+          reference,
+          description:
+            before === 0 && lines.length === 0
+              ? `Opening balance ${formatCurrency(target)}: money this buyer already owed before this software. Set by ${by}. ${reason}`
+              : `Opening balance changed from ${formatCurrency(before)} to ${formatCurrency(target)} by ${by}. ${reason}`,
+        },
+      })
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "UPDATE",
+          entityType: "Customer",
+          entityId: customerId,
+          oldValue: JSON.stringify({ openingBalance: before, currentBalance: owing }),
+          newValue: JSON.stringify({
+            openingBalance: target,
+            currentBalance: next,
+            change,
+            reference,
+            reason,
+            note: `Opening balance for ${customer.name}: ${formatCurrency(before)} to ${formatCurrency(target)}.`,
+          }),
+          branchId: customer.branchId,
+          risk: "MEDIUM",
+        },
+      })
+      return { name: customer.name, before, target, next }
+    })
+  )
+  if ("error" in result) return { error: result.error }
+
+  revalidatePath(`/customers/${customerId}`)
+  revalidatePath("/customers")
+  revalidatePath("/pos")
+  revalidatePath("/sales")
+  revalidatePath("/finance")
+  revalidatePath("/reports")
+  revalidatePath("/dashboard")
+  const { name, target: saved, next } = result.data
+  return {
+    success: true,
+    message: `${name}: opening balance is now ${formatCurrency(saved)}. Still owing ${formatCurrency(next)}.`,
+  }
 }
 
 export async function getSuppliers() {
