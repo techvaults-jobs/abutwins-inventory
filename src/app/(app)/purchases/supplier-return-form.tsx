@@ -26,9 +26,37 @@ function cleanCode(raw: string) {
   return raw.replace(/[\s-]/g, "").trim()
 }
 
+/** Every number in a box: one per line, or split by commas, semicolons or spaces. */
+function codesIn(raw: string) {
+  return [...new Set(raw.split(/[\n,;\s]+/).map(cleanCode).filter((code) => code.length >= 4))]
+}
+
+type Looked = { line: ReturnLine } | { error: string }
+
+/**
+ * Look one number up for this send-back: on the system, sendable, and from
+ * the same supplier as whatever is already on `onList`.
+ */
+async function lookUp(code: string, onList: ReturnLine[]): Promise<Looked> {
+  if (onList.some((row) => row.imei === code)) return { error: `${code} is already on this send-back.` }
+  const found = await lookupSupplierReturnImei(code)
+  if ("error" in found && found.error) return { error: `${code}: ${found.error}` }
+  if (!("imei" in found)) return { error: `${code}: we could not find that IMEI or serial on the system.` }
+  // A serial typed for a unit booked under its IMEI comes back as that IMEI.
+  if (onList.some((row) => row.imei === found.imei)) return { error: `${code} is already on this send-back.` }
+  const first = onList[0]
+  if (first && found.supplierId && first.supplierId !== found.supplierId) {
+    return {
+      error: `${code} is from ${found.supplierName || "another house"}, but this send-back is for ${first.supplierName}. Start a new send-back for that supplier.`,
+    }
+  }
+  return { line: found }
+}
+
 export function SupplierReturnForm() {
   const [items, setItems] = useState<ReturnLine[]>([])
   const [looking, setLooking] = useState(false)
+  const [scanValue, setScanValue] = useState("")
   const [pasteMode, setPasteMode] = useState(false)
   const [pasteValue, setPasteValue] = useState("")
   const [pasting, setPasting] = useState(false)
@@ -37,27 +65,15 @@ export function SupplierReturnForm() {
   async function addOne(code: string) {
     const clean = cleanCode(code)
     if (!clean) return
-    if (items.some((row) => row.imei === clean)) {
-      toast.error(`${clean} is already on this send-back.`)
-      return
-    }
     setLooking(true)
     try {
-      const found = await lookupSupplierReturnImei(clean)
-      if ("error" in found && found.error) {
-        toast.error(found.error)
+      const result = await lookUp(clean, items)
+      if ("error" in result) {
+        toast.error(result.error)
         return
       }
-      if (!("imei" in found)) return
-      const first = items[0]
-      if (first && found.supplierId && first.supplierId !== found.supplierId) {
-        toast.error(
-          `This phone is from ${found.supplierName || "another house"}. This send-back is already for ${first.supplierName}. Start a new send-back for a different supplier.`
-        )
-        return
-      }
-      setItems((current) => [...current, found])
-      toast.success(`${found.productName} added to this send-back.`)
+      setItems((current) => [...current, result.line])
+      toast.success(`${result.line.productName} added to this send-back.`)
     } finally {
       setLooking(false)
     }
@@ -65,46 +81,31 @@ export function SupplierReturnForm() {
 
   /** Paste path: parse newline/comma/space separated codes and look each one up. */
   async function addPasted() {
-    const codes = pasteValue
-      .split(/[\n,;\s]+/)
-      .map(cleanCode)
-      .filter((code) => code.length >= 4)
+    const codes = codesIn(pasteValue)
     if (!codes.length) {
       toast.error("No IMEI or serial number found in what you pasted. Each number must be at least 4 characters.")
       return
     }
-    const unique = [...new Set(codes)]
-    const dupes = unique.filter((code) => items.some((row) => row.imei === code))
-    if (dupes.length) {
-      toast.error(`${dupes[0]} is already on this send-back.`)
-      return
-    }
     setPasting(true)
-    let added = 0
+    // Checked against the list as it grows, so the first pasted phone sets
+    // the supplier for the rest.
+    let list = items
     let failed = 0
-    for (const code of unique) {
+    for (const code of codes) {
       try {
-        const found = await lookupSupplierReturnImei(code)
-        if ("error" in found && found.error) {
-          toast.error(`${code}: ${found.error}`)
+        const result = await lookUp(code, list)
+        if ("error" in result) {
+          toast.error(result.error)
           failed++
           continue
         }
-        if (!("imei" in found)) continue
-        const first = items[0]
-        if (first && found.supplierId && first.supplierId !== found.supplierId) {
-          toast.error(
-            `${code} is from ${found.supplierName || "another house"} but this send-back is for ${first.supplierName}. Remove it from the list and start a new send-back for that supplier.`
-          )
-          failed++
-          continue
-        }
-        setItems((current) => [...current, found])
-        added++
+        list = [...list, result.line]
       } catch {
         failed++
       }
     }
+    const added = list.length - items.length
+    setItems(list)
     setPasting(false)
     setPasteMode(false)
     setPasteValue("")
@@ -112,12 +113,48 @@ export function SupplierReturnForm() {
     if (failed > 0 && added === 0) toast.error(`None of those numbers could be added. Check each one and try again.`)
   }
 
+  /**
+   * Send. A number still sitting in the scan box or the paste box (typed, but
+   * Add or Enter never pressed) is looked up and sent too, rather than the
+   * send-back going out empty. If any of them cannot go back, nothing is sent
+   * and the reason is shown.
+   */
+  async function send(formData: FormData) {
+    const waiting = [...new Set([...codesIn(scanValue), ...(pasteMode ? codesIn(pasteValue) : [])])]
+    let list = items
+    if (waiting.length) {
+      setLooking(true)
+      try {
+        for (const code of waiting) {
+          if (list.some((row) => row.imei === code)) continue
+          const result = await lookUp(code, list)
+          if ("error" in result) {
+            setItems(list)
+            return { error: `${result.error} Nothing was sent. Fix or remove that number, then send again.` }
+          }
+          list = [...list, result.line]
+        }
+      } finally {
+        setLooking(false)
+      }
+      setItems(list)
+      setScanValue("")
+      setPasteValue("")
+      setPasteMode(false)
+    }
+    if (!list.length) {
+      return { error: "Type or scan at least one IMEI or serial number going back to the supplier." }
+    }
+    formData.set("imeis", list.map((row) => row.imei).join("\n"))
+    return sendUnitsToSupplier(formData)
+  }
+
   const house = items[0]
   const moneyTotal = items.filter((row) => row.moneyMoves).reduce((sum, row) => sum + row.cost, 0)
 
   return (
     <ActionForm
-      action={sendUnitsToSupplier}
+      action={send}
       submit="Send these phones back to the supplier"
       pendingLabel="Sending these phones back"
       successMessage="Those phones are on the way back to the supplier"
@@ -125,14 +162,8 @@ export function SupplierReturnForm() {
       className="space-y-4"
       onSuccess={() => setItems([])}
     >
-      {/* Hidden payload */}
-      <textarea
-        name="imeis"
-        value={items.map((row) => row.imei).join("\n")}
-        readOnly
-        required={items.length === 0}
-        className="sr-only"
-      />
+      {/* The numbers go with the form from send(), which also picks up any
+          number still typed in the boxes. */}
 
       {/* Input area */}
       <div className="space-y-3 rounded-xl border border-border bg-muted/30 p-4">
@@ -168,7 +199,7 @@ export function SupplierReturnForm() {
                 disabled={pasting || !pasteValue.trim()}
                 className="flex-1"
               >
-                {pasting ? "Looking up each number" : `Add ${pasteValue.split(/[\n,;\s]+/).filter((s) => cleanCode(s).length >= 4).length || ""} numbers`}
+                {pasting ? "Looking up each number" : `Add ${codesIn(pasteValue).length || ""} numbers`}
               </Button>
               <Button
                 type="button"
@@ -186,8 +217,10 @@ export function SupplierReturnForm() {
           <ScanField
             kind="ANY"
             onScan={(code) => void addOne(code)}
+            value={scanValue}
+            onValueChange={setScanValue}
             placeholder="Type or scan IMEI or serial, then Enter"
-            hint="Type the number by hand or use a USB / Bluetooth scanner. Press Enter to add each one. All phones in one send-back must be from the same supplier."
+            hint="Type the number by hand or use a USB / Bluetooth scanner, and press Enter or Add. A number left typed in the box is added when you send. All phones in one send-back must be from the same supplier."
           />
         )}
 

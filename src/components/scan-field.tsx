@@ -36,13 +36,27 @@ export function ScanField({
   kind = "IMEI",
   placeholder,
   hint,
+  value: controlledValue,
+  onValueChange,
 }: {
   onScan: (value: string) => void
   kind?: "IMEI" | "SERIAL" | "ANY"
   placeholder?: string
   hint?: string
+  /**
+   * What is typed in the box and not yet added. Pass it (with onValueChange)
+   * when the form must also send a number someone typed and never pressed
+   * Add or Enter for, which staff often do before pressing save.
+   */
+  value?: string
+  onValueChange?: (value: string) => void
 }) {
-  const [value, setValue] = useState("")
+  const [ownValue, setOwnValue] = useState("")
+  const value = controlledValue ?? ownValue
+  const setValue = (next: string) => {
+    if (onValueChange) onValueChange(next)
+    if (controlledValue === undefined) setOwnValue(next)
+  }
   const [scanning, setScanning] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -194,6 +208,14 @@ export function ScanList({
   required?: boolean
 }) {
   const [items, setItems] = useState<string[]>([])
+  // A number typed in the box but never added (no Add, no Enter) still goes
+  // with the form: the hidden list is read-only, so the browser cannot stop
+  // the save, and the number would otherwise be lost.
+  const [typed, setTyped] = useState("")
+  const pending = splitCodes(typed).filter(
+    (code) => !items.includes(code) && code.length >= (kind === "IMEI" ? 14 : 4)
+  )
+  const payload = [...items, ...pending]
 
   function add(code: string) {
     setItems((current) => {
@@ -207,8 +229,14 @@ export function ScanList({
 
   return (
     <div className="space-y-2">
-      <ScanField kind={kind} onScan={add} />
-      <textarea name={name} value={items.join("\n")} readOnly required={required && items.length === 0} className="sr-only" />
+      <ScanField kind={kind} onScan={add} value={typed} onValueChange={setTyped} />
+      <textarea name={name} value={payload.join("\n")} readOnly required={required && payload.length === 0} className="sr-only" />
+      {pending.length ? (
+        <p className="text-xs text-muted-foreground">
+          {pending.length === 1 ? `${pending[0]} goes` : `${pending.length} typed numbers go`} with the form when you save,
+          even without pressing Add.
+        </p>
+      ) : null}
       {items.length ? (
         <ul className="space-y-1 text-sm">
           {items.map((item) => (
