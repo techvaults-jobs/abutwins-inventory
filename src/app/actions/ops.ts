@@ -22,7 +22,7 @@ import { canReachBranch, OTHER_SHOP, resolveWritableShopId, viewBranchFilter } f
 import { ConflictError, claimImei, claimImeis, drawStock, recordMovement, returnStock, shiftCustomerBalance } from "@/lib/concurrency"
 import { warrantyState } from "@/lib/warranty"
 import { cell, readTableFile } from "@/lib/table-file"
-import { buildBillTrace, type SupplierBillTrace } from "@/lib/supplier-trace"
+import { bucketImeiStatus, buildBillTrace, type SupplierBillTrace } from "@/lib/supplier-trace"
 import { watBounds, watDayKey } from "@/lib/lagos-day"
 import { getAppSettings } from "@/lib/settings"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
@@ -221,6 +221,7 @@ const purchaseInclude = {
       branch: true,
       customer: true,
       sale: { select: { id: true, invoiceNumber: true, saleDate: true, status: true } },
+      product: { select: { id: true, name: true, storage: true, color: true, condition: true, costPrice: true } },
     },
     orderBy: { createdAt: "asc" as const },
   },
@@ -301,21 +302,72 @@ export async function getPurchase(id: string) {
   // the shop that ordered it.
   if (!(await canReachBranch(user, purchase.branchId))) return null
   const item = purchase.items[0]
-  const tracking = trackingOf(item?.product.tracking)
+  // A bill can carry several items (an Upload stock carton often does). The
+  // counts used to read the first line only, so a bill of 5 iPhones and 3
+  // other phones said "5 on the bill" beside "8 scanned".
+  const trackedLines = purchase.items.filter((line) => trackingOf(line.product.tracking) !== "NONE")
+  const onlyPieces = trackedLines.length === 0
+  const tracking = onlyPieces ? "NONE" : trackingOf(trackedLines[0].product.tracking)
   const accessory =
-    tracking === "NONE" && item
+    onlyPieces && item && purchase.items.length === 1
       ? {
           receivedQty: item.receivedQty,
           ...(await accessorySoldSince(item.productId, purchase.branchId, purchase.createdAt)),
         }
-      : undefined
+      : onlyPieces
+        ? {
+            receivedQty: purchase.items.reduce((sum, line) => sum + line.receivedQty, 0),
+            soldQty: 0,
+          }
+        : undefined
   const trace: SupplierBillTrace = buildBillTrace(
-    item?.quantity ?? 0,
+    onlyPieces
+      ? purchase.items.reduce((sum, line) => sum + line.quantity, 0)
+      : trackedLines.reduce((sum, line) => sum + line.quantity, 0),
     tracking,
     purchase.imeiRecords.map((row) => ({ status: row.status, saleDate: row.sale?.saleDate ?? null })),
     accessory
   )
-  return { ...purchase, trace }
+
+  // What is on the bill, line by line, and where each line's units are now.
+  const unitsByProduct = new Map<string, typeof purchase.imeiRecords>()
+  for (const unit of purchase.imeiRecords) {
+    const list = unitsByProduct.get(unit.productId) ?? []
+    list.push(unit)
+    unitsByProduct.set(unit.productId, list)
+  }
+  const lines = purchase.items.map((line) => {
+    const units = unitsByProduct.get(line.productId) ?? []
+    const tracked = trackingOf(line.product.tracking) !== "NONE"
+    return {
+      id: line.id,
+      productId: line.productId,
+      name: line.product.name,
+      storage: line.product.storage,
+      color: line.product.color,
+      condition: line.product.condition,
+      tracked,
+      quantity: line.quantity,
+      receivedQty: line.receivedQty,
+      unitCost: money(line.costPrice),
+      lineTotal: money(line.totalAmount) || money(line.costPrice) * line.quantity,
+      scanned: units.length,
+      inShop: units.filter((unit) => bucketImeiStatus(unit.status) === "inShop").length,
+      sold: units.filter((unit) => unit.status === "SOLD").length,
+    }
+  })
+  // Each unit's cost is its line's cost on this bill; a unit whose item has
+  // no line here falls back to the item's cost on the price list.
+  const costByProduct = new Map(lines.map((line) => [line.productId, line.unitCost]))
+  const unitCost = (unit: (typeof purchase.imeiRecords)[number]) =>
+    costByProduct.get(unit.productId) ?? money(unit.product.costPrice)
+
+  return {
+    ...purchase,
+    trace,
+    lines,
+    imeiRecords: purchase.imeiRecords.map((unit) => ({ ...unit, unitCost: unitCost(unit) })),
+  }
 }
 
 export async function createPurchase(formData: FormData) {

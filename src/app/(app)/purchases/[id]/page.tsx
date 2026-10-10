@@ -16,6 +16,7 @@ import { ScanList } from "@/components/scan-field"
 import { statusLabel } from "@/lib/status"
 import { formatCurrency, formatDate, formatDateTime, money } from "@/lib/utils"
 import { isOpeningStockPurchase, purchaseBalance } from "@/lib/purchase-money"
+import { productFullName, productSpecLine } from "@/lib/product-specs"
 
 export default async function PurchaseDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
@@ -53,18 +54,45 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
   const origin = [purchase.originCity || purchase.supplier.city, purchase.originCountry || purchase.supplier.country]
     .filter(Boolean)
     .join(", ")
-  const { trace } = purchase
-  const csvRows = [
-    ["IMEI or serial", "Status", "Shop", "Invoice", "Sold at", "Customer"],
+  const { trace, lines } = purchase
+  const linesTotal = lines.reduce((sum, line) => sum + line.lineTotal, 0)
+  const billTotal = money(purchase.totalAmount)
+  const linesUnits = lines.reduce((sum, line) => sum + line.quantity, 0)
+  /**
+   * A unit back in the shop that still carries a sale: it came back after the
+   * sale (a return), or the sale itself was cancelled. Said plainly, so "In
+   * shop" beside an invoice does not read as a mistake.
+   */
+  const backAfterSale = (row: (typeof purchase.imeiRecords)[number]) => {
+    if (!row.sale || !(row.status === "IN_STOCK" || row.status === "RECEIVED" || row.status === "RETURNED")) return null
+    return row.sale.status === "COMPLETED" ? "Came back after sale" : `Sale ${statusLabel(row.sale.status).toLowerCase()}`
+  }
+  const csvRows: string[][] = ([
+    ["Item", "IMEI or serial", "Cost", "Status", "Shop", "Invoice", "Sold at", "Customer"],
     ...purchase.imeiRecords.map((row) => [
+      productFullName(row.product),
       row.imei1,
-      statusLabel(row.status),
+      row.unitCost,
+      backAfterSale(row) ? `${statusLabel(row.status)} (${backAfterSale(row)?.toLowerCase()})` : statusLabel(row.status),
       row.branch.name,
       row.sale?.invoiceNumber ?? "",
       row.sale?.saleDate ? formatDateTime(row.sale.saleDate) : "",
       row.customer?.name ?? "",
     ]),
-  ]
+    [],
+    ["What is on this bill"],
+    ["Item", "On the bill", "Unit cost", "Line total", "Scanned in", "In shop", "Sold"],
+    ...lines.map((line) => [
+      productFullName(line),
+      line.quantity,
+      line.unitCost,
+      line.lineTotal,
+      line.tracked ? line.scanned : line.receivedQty,
+      line.tracked ? line.inShop : "",
+      line.tracked ? line.sold : "",
+    ]),
+    ["Total", linesUnits, "", linesTotal],
+  ] as Array<Array<string | number>>).map((row) => row.map((cell) => String(cell)))
 
   return (
     <div className="space-y-6">
@@ -162,8 +190,16 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
         </div>
         <div className="surface-card min-w-0 p-3 sm:p-5">
           <p className="text-sm text-muted-foreground">On the supplier bill</p>
-          <p className="text-2xl font-semibold">{trace.expected}</p>
-          <p className="text-sm text-muted-foreground">{item?.product.name}</p>
+          <p className="text-2xl font-semibold">{lines.length > 1 ? linesUnits : trace.expected}</p>
+          <p className="text-sm text-muted-foreground">
+            {lines.length > 1 ? (
+              <a href="#bill-lines" className="text-primary hover:underline">
+                {lines.length} different items · see the breakdown
+              </a>
+            ) : (
+              item?.product.name
+            )}
+          </p>
           {origin ? <p className="mt-2 text-sm text-muted-foreground">{origin}</p> : null}
           {purchase.expectedDate ? <p className="text-sm text-muted-foreground">Due {formatDate(purchase.expectedDate)}</p> : null}
         </div>
@@ -209,6 +245,73 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
           </p>
         </div>
       </div>
+      {lines.length ? (
+        <div id="bill-lines" className="surface-card scroll-mt-4 overflow-hidden">
+          <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border px-5 py-4">
+            <div>
+              <h3 className="font-semibold">What is on this bill</h3>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {lines.length} item{lines.length === 1 ? "" : "s"} · {linesUnits} unit{linesUnits === 1 ? "" : "s"} · each line&apos;s cost
+                and where its units are now
+              </p>
+            </div>
+            <p className="text-sm">
+              Invoice value <span className="font-semibold tabular-nums">{formatCurrency(billTotal)}</span>
+            </p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[720px] text-sm">
+              <thead className="bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
+                <tr>
+                  <th className="px-5 py-3 font-medium">Item</th>
+                  <th className="px-3 py-3 text-right font-medium">On the bill</th>
+                  <th className="px-3 py-3 text-right font-medium">Unit cost</th>
+                  <th className="px-3 py-3 text-right font-medium">Line total</th>
+                  <th className="px-3 py-3 text-right font-medium">Scanned in</th>
+                  <th className="px-3 py-3 text-right font-medium">In shop</th>
+                  <th className="px-5 py-3 text-right font-medium">Sold</th>
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map((line) => (
+                  <tr key={line.id} className="border-t border-border">
+                    <td className="px-5 py-3">
+                      <p className="font-medium">{line.name}</p>
+                      {productSpecLine(line) ? <p className="text-xs text-muted-foreground">{productSpecLine(line)}</p> : null}
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums">{line.quantity}</td>
+                    <td className="px-3 py-3 text-right tabular-nums">{formatCurrency(line.unitCost)}</td>
+                    <td className="px-3 py-3 text-right font-semibold tabular-nums">{formatCurrency(line.lineTotal)}</td>
+                    <td className={`px-3 py-3 text-right tabular-nums ${line.tracked && line.scanned < line.quantity ? "text-warning" : ""}`}>
+                      {line.tracked ? line.scanned : line.receivedQty}
+                      {!line.tracked ? <span className="block text-[11px] text-muted-foreground">pieces</span> : null}
+                    </td>
+                    <td className="px-3 py-3 text-right tabular-nums">{line.tracked ? line.inShop : "—"}</td>
+                    <td className="px-5 py-3 text-right tabular-nums">{line.tracked ? line.sold : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-border bg-muted/30 font-semibold">
+                  <td className="px-5 py-3">Total</td>
+                  <td className="px-3 py-3 text-right tabular-nums">{linesUnits}</td>
+                  <td className="px-3 py-3" />
+                  <td className="px-3 py-3 text-right tabular-nums">{formatCurrency(linesTotal)}</td>
+                  <td className="px-3 py-3 text-right tabular-nums">{lines.reduce((sum, line) => sum + (line.tracked ? line.scanned : line.receivedQty), 0)}</td>
+                  <td className="px-3 py-3 text-right tabular-nums">{lines.reduce((sum, line) => sum + line.inShop, 0)}</td>
+                  <td className="px-5 py-3 text-right tabular-nums">{lines.reduce((sum, line) => sum + line.sold, 0)}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+          {Math.abs(linesTotal - billTotal) > 0.5 ? (
+            <p className="border-t border-border px-5 py-3 text-xs text-warning">
+              The lines add up to {formatCurrency(linesTotal)}, but the bill says {formatCurrency(billTotal)}. Check this bill
+              with the supplier&apos;s paper.
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       {purchase.status !== "RECEIVED" ? (
         <div className="grid gap-4 xl:grid-cols-2">
           <div className="surface-card p-5">
@@ -256,7 +359,9 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
           <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border p-5">
             <div>
               <h3 className="font-semibold">Every unit from this bill</h3>
-              <p className="mt-1 text-sm text-muted-foreground">Sold rows have the invoice.</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Each phone, its item and its cost on this bill. Sold rows have the invoice.
+              </p>
             </div>
             <ExportCsv filename={`${purchase.invoiceNumber}-units.csv`} rows={csvRows} label="Download this bill as CSV" />
           </div>
@@ -264,7 +369,9 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
             <table className="w-full text-sm">
               <thead className="text-left text-muted-foreground">
                 <tr>
+                  <th className="px-5 py-3 font-medium">Item</th>
                   <th className="px-5 py-3 font-medium">IMEI or serial</th>
+                  <th className="px-5 py-3 text-right font-medium">Cost</th>
                   <th className="px-5 py-3 font-medium">Status</th>
                   <th className="px-5 py-3 font-medium">Shop</th>
                   <th className="px-5 py-3 font-medium">Invoice</th>
@@ -276,12 +383,20 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
                 {purchase.imeiRecords.map((row) => (
                   <tr key={row.id} className="border-t border-border">
                     <td className="px-5 py-3">
-                      <Link href={`/imei/${row.id}`} className="font-medium text-primary">
+                      <p className="font-medium">{row.product.name}</p>
+                      {productSpecLine(row.product) ? (
+                        <p className="text-xs text-muted-foreground">{productSpecLine(row.product)}</p>
+                      ) : null}
+                    </td>
+                    <td className="px-5 py-3">
+                      <Link href={`/imei/${row.id}`} className="font-mono text-primary">
                         {row.imei1}
                       </Link>
                     </td>
+                    <td className="px-5 py-3 text-right tabular-nums">{formatCurrency(row.unitCost)}</td>
                     <td className="px-5 py-3">
                       <StatusBadge value={row.status} />
+                      {backAfterSale(row) ? <p className="mt-1 text-[11px] text-muted-foreground">{backAfterSale(row)}</p> : null}
                     </td>
                     <td className="px-5 py-3">{row.branch.name}</td>
                     <td className="px-5 py-3">
@@ -293,7 +408,9 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
                         "No invoice"
                       )}
                     </td>
-                    <td className="px-5 py-3">{row.sale?.saleDate ? formatDateTime(row.sale.saleDate) : "Not sold on the system"}</td>
+                    <td className="px-5 py-3">
+                      {row.sale?.saleDate ? formatDateTime(row.sale.saleDate) : "Not sold on the system"}
+                    </td>
                     <td className="px-5 py-3">{row.customer?.name ?? "No named buyer"}</td>
                   </tr>
                 ))}
