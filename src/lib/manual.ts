@@ -370,6 +370,7 @@ const PAGES: Array<
     doThis: [
       "For a phone or laptop: open the Phone or laptop tab. Pick the sold device from the list, or use Find sold IMEI if it is not there. Confirm the return item value.",
       "For a cord, pouch, or accessory: open the Other item by invoice tab. Type the invoice number and press Find. Pick the item line. If more than one piece is coming back, type how many.",
+      "The return value fills in as what the item sold for on the invoice. You can lower it, but the system refuses more than it sold for, and more than is left of the invoice after earlier returns. An item already returned cannot be returned again.",
       "Pick why it is coming back: Faulty, Dissatisfaction / change of mind, or Replacement (wants another item).",
       "Pick what happens next: Replacement from our stock, or Refund. The Vault Manager, the shop Manager, the CEO and the main admin also see Repair, Credit note and Send back to the supplier.",
       "On Replace, pick the shop item going out and confirm its value. Read Receivable or Payable.",

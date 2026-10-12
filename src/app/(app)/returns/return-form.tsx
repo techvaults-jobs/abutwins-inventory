@@ -4,6 +4,7 @@ import { useMemo, useState } from "react"
 import { Package, Smartphone, Search, ReceiptText, Info, AlertCircle } from "lucide-react"
 import { toast } from "sonner"
 import { createReturn, findSoldImei, findSaleByInvoice } from "@/app/actions/ops"
+import type { SaleReturnRoom } from "@/lib/return-limits"
 import { ActionForm } from "@/components/action-form"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -260,6 +261,7 @@ function OutcomeFields({
   returnValue,
   onReturnValueChange,
   suggestedReturn,
+  maxReturn,
   shopStock,
   branchId,
   isInvoicePath,
@@ -267,6 +269,8 @@ function OutcomeFields({
   banks,
 }: {
   banks: ReturnBank[]
+  /** The most this return may be worth: what the item sold for, less earlier returns. */
+  maxReturn?: number
   outcome: string
   onOutcomeChange: (v: string) => void
   returnValue: string
@@ -380,17 +384,31 @@ function OutcomeFields({
           name="returnValue"
           type="number"
           min={0}
+          max={maxReturn != null ? maxReturn : undefined}
+          step="0.01"
           value={returnValue !== "" ? returnValue : String(suggestedReturn || "")}
           onChange={(e) => onReturnValueChange(e.target.value)}
           placeholder="Return item value"
+          aria-invalid={maxReturn != null && returnAmount > maxReturn + 0.005}
           required
         />
-        {suggestedReturn > 0 && (
+        {maxReturn != null && returnAmount > maxReturn + 0.005 ? (
+          <p className="flex items-center gap-1.5 text-xs font-medium text-danger">
+            <Info className="h-3.5 w-3.5 shrink-0" />
+            That is more than it sold for. The most that can be returned is {formatCurrency(maxReturn)}.
+          </p>
+        ) : maxReturn != null ? (
+          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Info className="h-3.5 w-3.5 shrink-0" />
+            The most that can be returned is {formatCurrency(maxReturn)}, what it sold for on the invoice. It can be
+            less, never more.
+          </p>
+        ) : suggestedReturn > 0 ? (
           <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
             <Info className="h-3.5 w-3.5 shrink-0" />
             Suggested from original sale: {formatCurrency(suggestedReturn)}
           </p>
-        )}
+        ) : null}
       </div>
 
       {/* Replacement picker */}
@@ -676,6 +694,8 @@ function ImeiReturnForm({
         returnValue={returnValue}
         onReturnValueChange={setReturnValue}
         suggestedReturn={suggestedReturn}
+        // A phone can be returned for what it sold for on its invoice, never more.
+        maxReturn={suggestedReturn > 0 ? suggestedReturn : undefined}
         shopStock={stock}
         branchId={selected?.branchId ?? null}
         isInvoicePath={false}
@@ -702,6 +722,9 @@ function InvoiceReturnForm({
   const [invoiceInput, setInvoiceInput] = useState("")
   const [finding, setFinding] = useState(false)
   const [foundSale, setFoundSale] = useState<FoundSale | null>(null)
+  // What can still come back on each line, from the server: pieces left,
+  // what each sold for after any order discount, and the value left.
+  const [room, setRoom] = useState<SaleReturnRoom | null>(null)
   const [selectedItemId, setSelectedItemId] = useState("")
   const [returnQty, setReturnQty] = useState("1")
   const [outcome, setOutcome] = useState("REFUND")
@@ -722,28 +745,53 @@ function InvoiceReturnForm({
       toast.error("That invoice has only phones or laptops. Use the Phone or laptop tab to return them by IMEI.")
       return
     }
-    setFoundSale({ ...mapped, items: nonImeiItems })
-    setSelectedItemId(nonImeiItems[0]?.id ?? "")
-    const first = nonImeiItems[0]
-    if (first) {
-      const unitPrice = first.totalPrice / Math.max(1, first.quantity)
-      setReturnValue(String(unitPrice))
+    const nextRoom = "room" in result && result.room ? result.room : null
+    const stillReturnable = nonImeiItems.filter((item) => (nextRoom?.lines[item.id]?.qtyLeft ?? item.quantity) > 0)
+    if (stillReturnable.length === 0) {
+      toast.error(`Everything on invoice ${mapped.invoiceNumber} that can be returned here has already been returned.`)
+      return
     }
+    setFoundSale({ ...mapped, items: nonImeiItems })
+    setRoom(nextRoom)
+    const first = stillReturnable[0]
+    setSelectedItemId(first.id)
+    const firstRoom = nextRoom?.lines[first.id]
+    setReturnValue(
+      String(
+        firstRoom
+          ? Math.min(firstRoom.unitSold, firstRoom.valueLeft, nextRoom!.saleLeft)
+          : first.totalPrice / Math.max(1, first.quantity)
+      )
+    )
     setReturnQty("1")
     toast.success(`Invoice ${mapped.invoiceNumber} found — ${nonImeiItems.length} item${nonImeiItems.length !== 1 ? "s" : ""} available.`)
   }
 
   const selectedItem = foundSale?.items.find((item) => item.id === selectedItemId)
-  const qty = Math.max(1, Math.min(Number(returnQty) || 1, selectedItem?.quantity ?? 1))
-  const unitPrice = selectedItem ? selectedItem.totalPrice / Math.max(1, selectedItem.quantity) : 0
-  const suggestedReturn = unitPrice * qty
+  const lineRoom = (itemId: string) => room?.lines[itemId] ?? null
+  const selectedRoom = selectedItem ? lineRoom(selectedItem.id) : null
+  // Pieces that can still come back on this line (earlier returns taken off).
+  const qtyLeft = selectedItem ? selectedRoom?.qtyLeft ?? selectedItem.quantity : 1
+  const qty = Math.max(1, Math.min(Number(returnQty) || 1, Math.max(1, qtyLeft)))
+  const unitPrice = selectedItem
+    ? selectedRoom?.unitSold ?? selectedItem.totalPrice / Math.max(1, selectedItem.quantity)
+    : 0
+  /** The most `count` pieces of a line may be returned for. */
+  const limitFor = (itemId: string, count: number) => {
+    const item = foundSale?.items.find((i) => i.id === itemId)
+    if (!item) return 0
+    const line = lineRoom(itemId)
+    const unit = line?.unitSold ?? item.totalPrice / Math.max(1, item.quantity)
+    return Math.round(Math.min(unit * count, line?.valueLeft ?? unit * count, room?.saleLeft ?? unit * count) * 100) / 100
+  }
+  const maxReturn = selectedItem ? limitFor(selectedItem.id, qty) : undefined
+  const suggestedReturn = maxReturn ?? unitPrice * qty
 
   function handleItemChange(itemId: string) {
     setSelectedItemId(itemId)
     const item = foundSale?.items.find((i) => i.id === itemId)
     if (item) {
-      const up = item.totalPrice / Math.max(1, item.quantity)
-      setReturnValue(String(up))
+      setReturnValue(String(limitFor(itemId, 1)))
       setReturnQty("1")
     }
   }
@@ -751,8 +799,8 @@ function InvoiceReturnForm({
   function handleQtyChange(v: string) {
     setReturnQty(v)
     const n = Number(v) || 1
-    const newQty = Math.max(1, Math.min(n, selectedItem?.quantity ?? 1))
-    setReturnValue(String(unitPrice * newQty))
+    const newQty = Math.max(1, Math.min(n, Math.max(1, qtyLeft)))
+    if (selectedItem) setReturnValue(String(limitFor(selectedItem.id, newQty)))
   }
 
   return (
@@ -822,11 +870,16 @@ function InvoiceReturnForm({
               required
             >
               {foundSale.items.map((item) => (
-                <option key={item.id} value={item.id}>
+                <option key={item.id} value={item.id} disabled={(lineRoom(item.id)?.qtyLeft ?? item.quantity) <= 0}>
                   {item.product.name}
                   {item.product.category ? ` (${item.product.category.name})` : ""}
                   {" · "}Qty {item.quantity}
                   {" · "}{formatCurrency(item.totalPrice)}
+                  {(lineRoom(item.id)?.qtyLeft ?? item.quantity) <= 0
+                    ? " · already returned"
+                    : (lineRoom(item.id)?.qtyLeft ?? item.quantity) < item.quantity
+                      ? ` · ${lineRoom(item.id)?.qtyLeft} left to return`
+                      : ""}
                 </option>
               ))}
             </Select>
@@ -836,13 +889,13 @@ function InvoiceReturnForm({
           {selectedItem && selectedItem.quantity > 1 && (
             <div className="space-y-1.5">
               <Label htmlFor="return-qty-input">
-                How many are coming back? (max {selectedItem.quantity})
+                How many are coming back? (max {qtyLeft})
               </Label>
               <Input
                 id="return-qty-input"
                 type="number"
                 min={1}
-                max={selectedItem.quantity}
+                max={Math.max(1, qtyLeft)}
                 value={returnQty}
                 onChange={(e) => handleQtyChange(e.target.value)}
               />
@@ -853,8 +906,14 @@ function InvoiceReturnForm({
           {selectedItem && (
             <div className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground space-y-0.5">
               <p className="font-medium text-foreground">{selectedItem.product.name}</p>
-              <p>Sold qty: {selectedItem.quantity} · Line total: {formatCurrency(selectedItem.totalPrice)}</p>
-              <p>Unit price: {formatCurrency(unitPrice)} · Returning: {qty}</p>
+              <p>
+                Sold qty: {selectedItem.quantity} · Line total: {formatCurrency(selectedItem.totalPrice)}
+                {qtyLeft < selectedItem.quantity ? ` · ${selectedItem.quantity - qtyLeft} already returned` : ""}
+              </p>
+              <p>
+                Sold for {formatCurrency(unitPrice)} each · Returning: {qty} · Most that can be returned:{" "}
+                {formatCurrency(maxReturn ?? 0)}
+              </p>
             </div>
           )}
         </div>
@@ -876,6 +935,7 @@ function InvoiceReturnForm({
           returnValue={returnValue}
           onReturnValueChange={setReturnValue}
           suggestedReturn={suggestedReturn}
+          maxReturn={maxReturn}
           shopStock={stock}
           branchId={foundSale?.branchId ?? null}
           isInvoicePath={true}

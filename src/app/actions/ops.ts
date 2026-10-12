@@ -23,6 +23,7 @@ import { ConflictError, claimImei, claimImeis, drawStock, recordMovement, return
 import { warrantyState } from "@/lib/warranty"
 import { cell, readTableFile } from "@/lib/table-file"
 import { bucketImeiStatus, buildBillTrace, type SupplierBillTrace } from "@/lib/supplier-trace"
+import { earlierReturnMoney, overLimit, refundSplit, returnedSoFar, returnQtyOf, returnValueLimit, saleReturnRoom } from "@/lib/return-limits"
 import { watBounds, watDayKey } from "@/lib/lagos-day"
 import { getAppSettings } from "@/lib/settings"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
@@ -832,14 +833,15 @@ export async function findSaleByInvoice(invoiceNumber: string) {
     if (!partial.customerId) {
       return { error: `Invoice ${partial.invoiceNumber} has no buyer name. Attach the customer on the invoice before logging a return.` }
     }
-    return { sale: partial }
+    return { sale: partial, room: await saleReturnRoom(prisma, partial) }
   }
 
   if (!sale.customerId) {
     return { error: `Invoice ${sale.invoiceNumber} has no buyer name. Attach the customer on the invoice before logging a return.` }
   }
 
-  return { sale }
+  // What can still come back on each line, so the form shows and holds the limit.
+  return { sale, room: await saleReturnRoom(prisma, sale) }
 }
 
 /** In shop units staff may give out on a Replace return. */
@@ -948,17 +950,36 @@ export async function createReturn(formData: FormData) {
       return { error: `${saleItem.product.name} from that invoice already has a return that is not finished. Open it on Returns and finish it.` }
     }
 
-    // Validate quantity
-    if (returnQty > saleItem.quantity) {
-      return { error: `You can return at most ${saleItem.quantity} ${saleItem.product.name}. The invoice only has that many.` }
+    // Quantity and value are both limited by the invoice, counting what
+    // earlier returns on it already took. Only an open return on the line was
+    // checked before, so a finished one could be returned again, and the
+    // value had no ceiling at all.
+    const already = await returnedSoFar(prisma, { saleId: saleItem.saleId, saleItemId })
+    const qtyLeft = Math.max(0, saleItem.quantity - already.lineQty)
+    if (qtyLeft <= 0) {
+      return { error: `Every ${saleItem.product.name} on ${saleItem.sale.invoiceNumber} has already been returned.` }
+    }
+    if (returnQty > qtyLeft) {
+      return {
+        error:
+          already.lineQty > 0
+            ? `Only ${qtyLeft} ${saleItem.product.name} can still be returned on ${saleItem.sale.invoiceNumber}: the invoice has ${saleItem.quantity} and ${already.lineQty} already came back.`
+            : `You can return at most ${saleItem.quantity} ${saleItem.product.name}. The invoice only has that many.`,
+      }
     }
 
-    const unitPrice = money(saleItem.totalPrice) / Math.max(1, saleItem.quantity)
-    const suggestedReturn = unitPrice * returnQty
+    const cap = returnValueLimit({ sale: saleItem.sale, line: saleItem, quantity: returnQty, already })
     const returnValue =
-      returnRaw !== null && String(returnRaw).trim() !== "" ? Number(returnRaw) : suggestedReturn
+      returnRaw !== null && String(returnRaw).trim() !== "" ? Number(returnRaw) : cap.limit
     if (!Number.isFinite(returnValue) || returnValue < 0) {
       return { error: "Enter the return item value." }
+    }
+    if (overLimit(returnValue, cap.limit)) {
+      return {
+        error: `The return value cannot be more than ${formatCurrency(cap.limit)}. ${returnQty} × ${saleItem.product.name} sold for ${formatCurrency(cap.unitSold * returnQty)} on ${saleItem.sale.invoiceNumber}${
+          already.saleValue > 0 ? `, and ${formatCurrency(already.saleValue)} has already been returned on that invoice` : ""
+        }. It can be less, never more.`,
+      }
     }
 
     let replacementImeiId: string | null = null
@@ -1004,6 +1025,7 @@ export async function createReturn(formData: FormData) {
           returnQty > 1 ? `Qty: ${returnQty}` : null,
           notesRaw || null,
         ].filter(Boolean).join(" · ") || null,
+        quantity: returnQty,
         returnValue: returnValue.toFixed(2),
         refundAmount: returnValue.toFixed(2),
         replacementImeiId,
@@ -1011,6 +1033,15 @@ export async function createReturn(formData: FormData) {
         balanceAmount: balanceAmount != null ? balanceAmount.toFixed(2) : null,
       },
     })
+
+    // Two saves of the same return landing together (a double tap, a slow
+    // connection) both pass the checks above before either is written. Count
+    // again now that this one is: if the line is over, this one loses.
+    const afterSave = await returnedSoFar(prisma, { saleId: saleItem.saleId, saleItemId })
+    if (afterSave.lineQty > saleItem.quantity || overLimit(afterSave.saleValue, money(saleItem.sale.totalAmount))) {
+      await prisma.stockReturn.deleteMany({ where: { id: record.id, status: { not: "COMPLETED" } } })
+      return { error: `${saleItem.product.name} on ${saleItem.sale.invoiceNumber} was just returned by another save. Nothing more was returned.` }
+    }
 
     return settleNewReturn(user, record.id, formData)
   }
@@ -1063,10 +1094,28 @@ export async function createReturn(formData: FormData) {
   }
 
   const line = imei.sale?.items.find((item) => item.imeiId === imei.id)
-  const suggested = money(line?.totalPrice) || money(imei.product.sellingPrice)
-  const returnValue = returnRaw !== null && String(returnRaw).trim() !== "" ? Number(returnRaw) : suggested
+  // The most this phone's return can be worth: what it sold for on its
+  // invoice, less what earlier returns already took from that invoice. A
+  // phone with no sale line on record (old data) is held to its price.
+  const soldFor =
+    imei.sale && line
+      ? returnValueLimit({
+          sale: imei.sale,
+          line: { totalPrice: line.totalPrice, quantity: 1 },
+          quantity: 1,
+          already: { saleValue: (await returnedSoFar(prisma, { saleId: imei.sale.id })).saleValue, lineValue: 0 },
+        }).limit
+      : money(imei.product.sellingPrice)
+  const returnValue = returnRaw !== null && String(returnRaw).trim() !== "" ? Number(returnRaw) : soldFor
   if (!Number.isFinite(returnValue) || returnValue < 0) {
     return { error: "Enter the return item value." }
+  }
+  if (overLimit(returnValue, soldFor)) {
+    return {
+      error: `The return value cannot be more than ${formatCurrency(soldFor)}, what ${imei.product.name} sold for${
+        imei.sale ? ` on ${imei.sale.invoiceNumber}` : ""
+      } (less anything already returned on that invoice). It can be less, never more.`,
+    }
   }
 
   let replacementImeiId: string | null = null
@@ -1271,9 +1320,8 @@ async function applyReturn(user: Awaited<ReturnType<typeof requireUser>>, formDa
     // The same sum the transaction below pays out: debt on the sale is
     // cancelled first, and only what was actually paid can come back.
     const asked = money(record.returnValue) || money(record.refundAmount) || (record.imei ? money(record.imei.product.sellingPrice) : 0)
-    const salePaid = sale ? money(sale.paidAmount) : asked
-    const saleDue = sale ? Math.max(0, money(sale.totalAmount) - salePaid) : 0
-    const refundOut = Math.min(asked - Math.min(saleDue, asked), salePaid)
+    const earlier = sale ? await earlierReturnMoney(prisma, sale.id, record.id) : { value: 0, cashOut: 0 }
+    const refundOut = refundSplit({ asked, outcome: record.outcome, sale, earlier }).cashOut
     if (refundOut > 0 && !refundBank) return { error: "Pick the bank account the refund is paid from." }
   }
   if (record.outcome === "REPLACEMENT") {
@@ -1307,18 +1355,28 @@ async function applyReturn(user: Awaited<ReturnType<typeof requireUser>>, formDa
     }
 
     if (record.outcome === "REFUND" || record.outcome === "CREDIT_NOTE") {
-      const asked = money(record.returnValue) || money(record.refundAmount) || (record.imei ? money(record.imei.product.sellingPrice) : 0)
-      const salePaid = sale ? money(sale.paidAmount) : asked
-      const saleDue = sale ? Math.max(0, money(sale.totalAmount) - salePaid) : 0
+      const typed = money(record.returnValue) || money(record.refundAmount) || (record.imei ? money(record.imei.product.sellingPrice) : 0)
       // What is returned first cancels what the customer still owes on that
       // sale; only the rest comes back as money, and never more than they paid.
       // This used to read `Math.min(asked, salePaid || asked)`: with nothing
       // paid, `0 || asked` refunded the full value in cash on top of wiping the
       // debt (a ₦520,000 credit sale at Iwo Road would have paid out ₦520,000
       // the shop never received), and on a part-paid sale it both cut the debt
-      // and paid the same value out again.
-      const debtRelief = Math.min(saleDue, asked)
-      const cashOut = record.outcome === "REFUND" ? Math.min(asked - debtRelief, salePaid) : 0
+      // and paid the same value out again. Earlier returns on the same sale
+      // count too (see refundSplit), and the value is held to what is left of
+      // the invoice.
+      const earlier = sale ? await earlierReturnMoney(tx, sale.id, record.id) : { value: 0, cashOut: 0 }
+      const split = refundSplit({ asked: typed, outcome: record.outcome, sale, earlier })
+      const asked = split.value
+      const { debtRelief, cashOut } = split
+      if (asked < typed - 0.005) {
+        // A return logged before values were limited: keep the record to what
+        // the invoice could actually give back.
+        await tx.stockReturn.update({
+          where: { id: record.id },
+          data: { returnValue: asked.toFixed(2), refundAmount: asked.toFixed(2) },
+        })
+      }
       const after = await shiftCustomerBalance(tx, record.customerId, -debtRelief)
       const next = Math.max(0, money(after.currentBalance))
       const invoiceRef = sale?.invoiceNumber ? ` on ${sale.invoiceNumber}` : ""
@@ -1555,9 +1613,8 @@ async function applyReturn(user: Awaited<ReturnType<typeof requireUser>>, formDa
     // phone only, so a returned accessory swapped for another was lost.
     if (record.saleItemId && record.saleItem && !record.imeiId) {
       if (record.faultClass === "GOOD_STOCK") {
-        // Parse quantity from notes: "Item: X · Qty: N · ..." or default 1
-        const qtyMatch = record.notes?.match(/Qty:\s*(\d+)/)
-        const returnQty = qtyMatch ? Number(qtyMatch[1]) : 1
+        // The stored quantity; older returns carry it in their notes.
+        const returnQty = returnQtyOf(record)
         await returnStock(tx, {
           productId: record.saleItem.productId,
           branchId: record.branchId,

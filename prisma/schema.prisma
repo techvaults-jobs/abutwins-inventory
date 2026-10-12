@@ -778,6 +778,10 @@ model StockReturn {
   faultClass       FaultClass    @default(FAULTY_STOCK)
   status           ReturnStatus  @default(PENDING)
   /// What the returned item is worth (from the original sale line when known).
+  /// How many pieces came back, for an item returned from an invoice line
+  /// (no IMEI). Empty on returns from before this was stored: those carry
+  /// "Qty: N" in their notes instead (see returnQtyOf).
+  quantity         Int?
   returnValue      Decimal?
   /// Kept in sync with returnValue for refund / credit paths.
   refundAmount     Decimal?
