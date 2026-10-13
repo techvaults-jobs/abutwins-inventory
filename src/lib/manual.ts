@@ -46,7 +46,7 @@ const ROLE_JOB: Record<UserRole, { job: string; shops: string }> = {
     shops: "You see your shop only, unless the main admin later ticks See every shop.",
   },
   VAULT_MANAGER: {
-    job: "You book goods before they arrive, receive phones, upload stock one by one or many from Excel, and send stock to a shop. You do not take till money.",
+    job: "You book goods before they arrive, receive phones, upload stock one by one or many from Excel, and send stock to a shop. On a supplier bill you also type what the goods cost and what they will sell for. You do not take till money.",
     shops: "You work in the shop the main admin set on your login.",
   },
   STOCK_UPLOADER: {

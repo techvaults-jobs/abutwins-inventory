@@ -6,7 +6,7 @@ import { prisma } from "@/lib/prisma"
 import { recordMovement, setStock } from "@/lib/concurrency"
 import { requireUser } from "@/lib/session"
 import { can } from "@/lib/permissions"
-import { canChangePrices } from "@/lib/roles"
+import { canSetPricesOnBill } from "@/lib/roles"
 import { readTableFile, readWorkbookGrids } from "@/lib/table-file"
 import { makeOpeningSku, openingProductKey, planOpeningStock } from "@/lib/opening-stock"
 import { planCustomers, planImeis, planStock, type CatalogItem, type ShopRef } from "@/lib/upload-plan"
@@ -1580,11 +1580,11 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
       }
     }
   }
-  const maySetPrices = canChangePrices(user.role)
+  const maySetPrices = canSetPricesOnBill(user.role)
   if (priceMoves.length && !maySetPrices) {
     const names = [...new Set(priceMoves.map((row) => row.name))]
     softNotes.push(
-      `The selling prices typed for ${names.slice(0, 4).join(", ")}${names.length > 4 ? ` and ${names.length - 4} more` : ""} were not changed, because ${names.length === 1 ? "it is" : "they are"} already on the price list. Only the CEO, the main admin or a branch manager changes a price there. Everything else on the bill was saved.`
+      `The selling prices typed for ${names.slice(0, 4).join(", ")}${names.length > 4 ? ` and ${names.length - 4} more` : ""} were not changed, because ${names.length === 1 ? "it is" : "they are"} already on the price list. Only the CEO, the main admin, a branch manager or the Vault Manager sets a price on a bill. Everything else on the bill was saved.`
     )
   }
 
@@ -1722,6 +1722,22 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
             priceType: move.key === "minimumPrice" ? "MINIMUM_PRICE" : "SELLING_PRICE",
             reason: `Set on supplier bill ${invoiceNumber}`,
             changedBy: user.id,
+          },
+        })
+        // The same line a price change on the price list leaves in Who did what.
+        await tx.auditLog.create({
+          data: {
+            userId: user.id,
+            action: "UPDATE",
+            entityType: "Product",
+            entityId: move.productId,
+            oldValue: JSON.stringify({ [move.key]: move.from }),
+            newValue: JSON.stringify({
+              [move.key]: move.to,
+              reason: `Set on supplier bill ${invoiceNumber}`,
+              note: `Prices changed on supplier bill ${invoiceNumber}: ${move.name}.`,
+            }),
+            branchId: shop.id,
           },
         })
       }

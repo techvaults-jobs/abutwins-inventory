@@ -78,6 +78,16 @@ export function canChangePrices(role: UserRole) {
 }
 
 /**
+ * Typing the selling prices of the goods on a supplier bill as it is loaded.
+ * The client asked for the Vault Manager to have this: whoever loads the bill
+ * knows what the goods will sell for. It reaches only the items on that bill;
+ * the price list itself stays with the price setters.
+ */
+export function canSetPricesOnBill(role: UserRole) {
+  return canChangePrices(role) || role === "VAULT_MANAGER"
+}
+
+/**
  * Cost on the price list and the item's price boxes. Whoever sets a cost must
  * see the one they are changing, so the price setters see it there too. Cost
  * elsewhere (reports, stock value, margins at the till) stays with canSeeCost.

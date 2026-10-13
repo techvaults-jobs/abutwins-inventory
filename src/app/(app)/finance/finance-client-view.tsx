@@ -60,6 +60,7 @@ type FinanceData = {
   canDeposit: boolean
   cashToBank: number
   supplierPaidNoBank?: number
+  canNameSupplierBanks?: boolean
   shops: OpeningCashShop[]
   bankAccounts: NamedBankRow[]
 }
@@ -230,6 +231,7 @@ export function FinanceClientView({ data }: { data: FinanceData }) {
         openingCash={data.openingCash}
         openingBank={data.openingBank}
         supplierPaidNoBank={data.supplierPaidNoBank}
+        canNameSupplierBanks={data.canNameSupplierBanks}
       />
 
       <div className="grid gap-4 xl:grid-cols-2">

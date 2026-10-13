@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { useState } from "react"
 import { ArrowDownLeft, ArrowUpRight, ChevronRight } from "lucide-react"
 import { ActionForm } from "@/components/action-form"
@@ -28,6 +29,7 @@ export function OpeningMoneyPanel({
   openingCash,
   openingBank,
   supplierPaidNoBank = 0,
+  canNameSupplierBanks = false,
 }: {
   shops: OpeningCashShop[]
   bankAccounts: NamedBankRow[]
@@ -37,6 +39,8 @@ export function OpeningMoneyPanel({
   openingBank: number
   /** Supplier money that left by bank before payments named an account. */
   supplierPaidNoBank?: number
+  /** Whoever pays suppliers can go and name the bank for those payments. */
+  canNameSupplierBanks?: boolean
 }) {
   const [drillAccount, setDrillAccount] = useState<NamedBankRow | null>(null)
   const [drillLines, setDrillLines] = useState<Awaited<ReturnType<typeof getBankAccountLedger>>>([])
@@ -244,6 +248,14 @@ export function OpeningMoneyPanel({
               These payments were recorded before a transfer had to say which bank it left from, so they come off Bank as a
               whole and off none of the accounts above. Every new
               supplier payment names its bank and shows under Paid to suppliers on that account.
+              {canNameSupplierBanks ? (
+                <>
+                  {" "}
+                  <Link href="/finance/supplier-banks" className="font-semibold text-primary hover:underline">
+                    Name the bank for these payments
+                  </Link>
+                </>
+              ) : null}
             </p>
           ) : null}
         </div>

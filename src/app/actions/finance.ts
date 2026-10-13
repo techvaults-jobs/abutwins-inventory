@@ -14,7 +14,7 @@ import { generateDocNumber, money } from "@/lib/utils"
 import { lineValueAfterOrderDiscount, saleTenders, sumSaleTenders } from "@/lib/sale-money"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
 import { openingStockSupplierWhere, payablePurchaseWhere, groupSupplierLedgers, purchaseBalance, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
-import { SUPPLIER_PAYMENT_UNDO_NOTE } from "@/lib/supplier-pay"
+import { listPayingBanks, resolveSupplierPayChannel, SUPPLIER_PAYMENT_UNDO_NOTE } from "@/lib/supplier-pay"
 import { shopPeriodWindow, shopPreviousWindow, watDayKey, type ShopRange } from "@/lib/lagos-day"
 import { writeAudit } from "@/lib/audit"
 import {
@@ -49,6 +49,7 @@ function emptyFinance() {
     canDeposit: false,
     cashToBank: 0,
     supplierPaidNoBank: 0,
+    canNameSupplierBanks: false,
     shops: [] as OpeningCashShop[],
     bankAccounts: [] as NamedBankRow[],
   }
@@ -561,6 +562,7 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
     canDeposit: await can(user.role, "action.deposit"),
     cashToBank,
     supplierPaidNoBank,
+    canNameSupplierBanks: await canManageFinance(user.role),
     shops: openingCashShops,
     bankAccounts: namedBanks,
   }
@@ -586,6 +588,214 @@ export async function getExpenses() {
 export async function getFinanceLedger(account: "CASH" | "BANK") {
   const data = await getFinance({ withLedger: true })
   return account === "CASH" ? data.cashAccount.entries : data.bankAccount.entries
+}
+
+export type UnnamedSupplierPayment = {
+  /** "entry:<id>" for a recorded payment, "gap:<bill id>" for money paid on a bill with no payment record. */
+  key: string
+  kind: "entry" | "gap"
+  billId: string
+  invoiceNumber: string
+  supplier: string
+  shop: string
+  date: string
+  amount: number
+  what: string
+}
+
+/**
+ * Supplier money that left by bank with no bank account named on it, one line
+ * for each payment. Read the same way Money in and out works out the figure,
+ * so the lines add up to it.
+ *
+ * A payment made on Pay supplier or on upload has a line in the money ledger;
+ * naming its bank fills that line in. Some older bills only say how much was
+ * paid, with no line behind it: that part shows as one line for the bill.
+ */
+async function unnamedSupplierPayments(branchId: string | null): Promise<UnnamedSupplierPayment[]> {
+  const where = branchId ? { branchId } : {}
+  const [bills, moves] = await Promise.all([
+    prisma.purchase.findMany({
+      where: { ...where, ...payablePurchaseWhere, paidAmount: { gt: 0 } },
+      select: {
+        id: true,
+        invoiceNumber: true,
+        paidAmount: true,
+        receivedDate: true,
+        createdAt: true,
+        supplier: { select: { name: true } },
+        branch: { select: { name: true } },
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.financeEntry.findMany({
+      where: {
+        ...where,
+        OR: [
+          { type: "EXPENSE", account: { in: ["CASH", "BANK"] }, description: { startsWith: SUPPLIER_PAYMENT_NOTE } },
+          { type: "EXPENSE", account: "SUPPLIER_PAYMENTS" },
+          { type: "INCOME", account: "BANK", description: { startsWith: SUPPLIER_PAYMENT_UNDO_NOTE } },
+        ],
+      },
+      select: { id: true, account: true, type: true, amount: true, reference: true, description: true, bankAccountId: true, createdAt: true },
+      orderBy: { createdAt: "desc" },
+    }),
+  ])
+
+  // Which bill a ledger line belongs to: Pay supplier writes the bill number
+  // first in the description; an upload payment and an undo carry it as the reference.
+  const billOf = (row: (typeof moves)[number]) =>
+    row.type === "EXPENSE" && row.account !== "SUPPLIER_PAYMENTS"
+      ? (row.description ?? "").slice(SUPPLIER_PAYMENT_NOTE.length).split(" ")[0]
+      : row.reference ?? ""
+  const byBill = new Map<string, typeof moves>()
+  for (const row of moves) {
+    const invoice = billOf(row)
+    if (!invoice) continue
+    const list = byBill.get(invoice) ?? []
+    list.push(row)
+    byBill.set(invoice, list)
+  }
+
+  const rows: UnnamedSupplierPayment[] = []
+  for (const bill of bills) {
+    const lines = byBill.get(bill.invoiceNumber) ?? []
+    const cash = lines.filter((row) => row.type === "EXPENSE" && row.account === "CASH").reduce((sum, row) => sum + money(row.amount), 0)
+    const byBank = Math.max(0, money(bill.paidAmount) - cash)
+    const payments = lines.filter((row) => row.type === "EXPENSE" && row.account !== "CASH")
+    const undos = lines.filter((row) => row.type === "INCOME")
+    const named = Math.max(
+      0,
+      payments.filter((row) => row.bankAccountId).reduce((sum, row) => sum + money(row.amount), 0) -
+        undos.filter((row) => row.bankAccountId).reduce((sum, row) => sum + money(row.amount), 0)
+    )
+    let left = byBank - named
+    if (left <= 0.005) continue
+    const undone = undos.map((row) => row.description ?? "").join(" ")
+    const base = {
+      billId: bill.id,
+      invoiceNumber: bill.invoiceNumber,
+      supplier: bill.supplier.name,
+      shop: bill.branch.name,
+    }
+    for (const row of payments) {
+      if (row.bankAccountId || undone.includes(`payment ${row.id}`)) continue
+      const amount = money(row.amount)
+      if (amount <= 0 || amount > left + 0.005) continue
+      left -= amount
+      rows.push({
+        ...base,
+        key: `entry:${row.id}`,
+        kind: "entry",
+        date: row.createdAt.toISOString(),
+        amount,
+        what: row.account === "SUPPLIER_PAYMENTS" ? "Paid when the bill was uploaded" : "Paid on Pay supplier",
+      })
+    }
+    if (left > 0.005) {
+      rows.push({
+        ...base,
+        key: `gap:${bill.id}`,
+        kind: "gap",
+        date: (bill.receivedDate ?? bill.createdAt).toISOString(),
+        amount: money(left),
+        what: "Marked paid on the bill, with no payment line",
+      })
+    }
+  }
+  return rows.sort((a, b) => b.date.localeCompare(a.date))
+}
+
+/** The screen where the accountant names the bank for past supplier payments. */
+export async function getUnnamedSupplierPayments() {
+  const user = await requireUser()
+  if (!(await canManageFinance(user.role))) return null
+  await healOpeningStockBills()
+  const branchId = (await viewBranchFilter(user)) ?? null
+  const [rows, banks] = await Promise.all([unnamedSupplierPayments(branchId), listPayingBanks(user)])
+  return { rows, banks, total: rows.reduce((sum, row) => sum + row.amount, 0) }
+}
+
+/**
+ * Name the bank account past supplier payments left from.
+ *
+ * Nothing about what was paid changes: not the bill, not the supplier's
+ * balance, not the Bank total. The payment only moves from "no bank named"
+ * onto the account it really left, so that account's balance is true.
+ * `amounts` may give part of a bill's unrecorded payment, for a bill that was
+ * paid from two banks.
+ */
+export async function nameSupplierPaymentBank(payload: { keys: string[]; bankAccountId: string; amounts?: Record<string, number> }) {
+  const user = await requireUser()
+  if (!(await canManageFinance(user.role))) return { error: "You are not allowed to change supplier payments. Ask accounts." }
+  const keys = [...new Set((payload.keys ?? []).map(String))].slice(0, 2000)
+  if (!keys.length) return { error: "Tick the payments first." }
+  const channel = await resolveSupplierPayChannel(user, "TRANSFER", String(payload.bankAccountId || ""))
+  if ("error" in channel) return { error: channel.error }
+
+  // Worked out again here, never taken from the screen, so a payment named a
+  // moment ago by someone else, or undone since, cannot be named twice.
+  const branchId = (await viewBranchFilter(user)) ?? null
+  const open = new Map((await unnamedSupplierPayments(branchId)).map((row) => [row.key, row]))
+  const picked = keys.map((key) => open.get(key)).filter((row): row is UnnamedSupplierPayment => Boolean(row))
+  if (!picked.length) return { error: "Those payments already have a bank. Refresh the page." }
+
+  let total = 0
+  try {
+    await prisma.$transaction(async (tx) => {
+      for (const row of picked) {
+        if (row.kind === "entry") {
+          const { count } = await tx.financeEntry.updateMany({
+            where: { id: row.key.slice("entry:".length), bankAccountId: null },
+            data: { bankAccountId: channel.bankAccountId },
+          })
+          if (count) total += row.amount
+          continue
+        }
+        const asked = Number(payload.amounts?.[row.key])
+        const amount = Number.isFinite(asked) && asked > 0 ? Math.min(money(asked), row.amount) : row.amount
+        const bill = await tx.purchase.findUnique({ where: { id: row.billId }, select: { branchId: true } })
+        if (!bill) continue
+        // Not written as a payment (it starts with other words), so the month's
+        // "sent to suppliers" on Home does not count the same money again.
+        await tx.financeEntry.create({
+          data: {
+            branchId: bill.branchId,
+            account: "SUPPLIER_PAYMENTS",
+            type: "EXPENSE",
+            amount: amount.toFixed(2),
+            reference: row.invoiceNumber,
+            bankAccountId: channel.bankAccountId,
+            description: `Bank named for money already paid on ${row.invoiceNumber} (${row.supplier}) · from ${channel.from}`,
+            createdAt: new Date(row.date),
+          },
+        })
+        total += amount
+      }
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "UPDATE",
+          entityType: "SupplierPaymentBank",
+          entityId: picked.length === 1 ? picked[0].invoiceNumber : `${picked.length} payments`,
+          newValue: JSON.stringify({
+            bank: channel.from,
+            payments: picked.length,
+            total,
+            bills: [...new Set(picked.map((row) => row.invoiceNumber))].slice(0, 60),
+            note: `Named ${channel.from} as the bank ${picked.length} supplier payment${picked.length === 1 ? "" : "s"} left from. Nothing paid or owed changed.`,
+          }),
+          branchId: user.branchId,
+        },
+      })
+    })
+  } catch (error) {
+    return { error: error instanceof Error && error.message ? "Could not save the bank for these payments. Nothing was changed." : "Could not save." }
+  }
+
+  revalidateMoneyViews()
+  revalidatePath("/finance/supplier-banks")
+  return { success: true, named: picked.length, total, bank: channel.from }
 }
 
 /**
