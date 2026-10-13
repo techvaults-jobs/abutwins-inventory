@@ -1,6 +1,7 @@
 "use server"
 
 import { UserRole } from "@prisma/client"
+import { SUPPLIER_PAYMENT_UNDO_NOTE } from "@/lib/supplier-pay"
 import { revalidatePath } from "next/cache"
 import { prisma } from "@/lib/prisma"
 import { shiftCustomerBalance } from "@/lib/concurrency"
@@ -176,10 +177,18 @@ export async function reverseSupplierPayment(formData: FormData) {
   const paid = Number(purchase.paidAmount)
   if (paid <= 0) return { error: "Nothing has been paid on this supplier bill yet." }
 
-  const last = await prisma.financeEntry.findFirst({
+  // The newest payment on this bill that has not been undone already. Each
+  // undo names the payment it reversed, so undoing twice walks back through
+  // the payments instead of reversing the same one again.
+  const moves = await prisma.financeEntry.findMany({
     where: { description: { contains: purchase.invoiceNumber } },
     orderBy: { createdAt: "desc" },
   })
+  const undone = moves.filter((row) => row.type === "INCOME").map((row) => row.description ?? "").join(" ")
+  const last =
+    moves.find((row) => row.type === "EXPENSE" && !undone.includes(`payment ${row.id}`)) ??
+    moves[0] ??
+    null
   const amount = last ? Number(last.amount) : paid
   const undo = Math.min(amount, paid)
 
@@ -192,10 +201,12 @@ export async function reverseSupplierPayment(formData: FormData) {
       data: {
         branchId: purchase.branchId,
         account: "BANK",
+        // Back onto the same bank account the payment left, when it named one.
+        bankAccountId: last?.type === "EXPENSE" ? last.bankAccountId : null,
         type: "INCOME",
         amount: undo.toFixed(2),
         reference: purchase.invoiceNumber,
-        description: `Undid a payment to the supplier on ${purchase.invoiceNumber}`,
+        description: `${SUPPLIER_PAYMENT_UNDO_NOTE} on ${purchase.invoiceNumber}${last?.type === "EXPENSE" ? ` · payment ${last.id}` : ""}`,
       },
     })
     await tx.auditLog.create({

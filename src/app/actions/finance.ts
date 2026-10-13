@@ -14,6 +14,7 @@ import { generateDocNumber, money } from "@/lib/utils"
 import { lineValueAfterOrderDiscount, saleTenders, sumSaleTenders } from "@/lib/sale-money"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
 import { openingStockSupplierWhere, payablePurchaseWhere, groupSupplierLedgers, purchaseBalance, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
+import { SUPPLIER_PAYMENT_UNDO_NOTE } from "@/lib/supplier-pay"
 import { shopPeriodWindow, shopPreviousWindow, watDayKey, type ShopRange } from "@/lib/lagos-day"
 import { writeAudit } from "@/lib/audit"
 import {
@@ -47,6 +48,7 @@ function emptyFinance() {
     canRemoveBank: false,
     canDeposit: false,
     cashToBank: 0,
+    supplierPaidNoBank: 0,
     shops: [] as OpeningCashShop[],
     bankAccounts: [] as NamedBankRow[],
   }
@@ -81,6 +83,8 @@ export type NamedBankRow = {
   depositsReceived: number
   /** Refunds on returns paid out of this account. */
   refundsPaid: number
+  /** Supplier payments sent by transfer from this account. */
+  supplierPaid: number
   branchId: string
   branchName: string
   branchCode: string
@@ -193,6 +197,26 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
     Math.max(0, money(po.paidAmount) - (cashToSupplierByBill.get(po.invoiceNumber) ?? 0))
   const supplierPaymentsByBank = purchases.reduce((sum, p) => sum + bankToSupplier(p), 0)
   const netCashFlow = revenue - expenditure - supplierPayments
+
+  // Which named bank each supplier transfer left from. A payment says so from
+  // the day Pay supplier started asking; older ones name no bank, and stay as
+  // one figure beside the accounts so the accounts still add up to Bank.
+  const supplierBankRows = await prisma.financeEntry.findMany({
+    where: {
+      bankAccountId: { not: null },
+      OR: [
+        { type: "EXPENSE", account: "BANK", description: { startsWith: SUPPLIER_PAYMENT_NOTE } },
+        { type: "EXPENSE", account: "SUPPLIER_PAYMENTS" },
+        { type: "INCOME", account: "BANK", description: { startsWith: SUPPLIER_PAYMENT_UNDO_NOTE } },
+      ],
+    },
+    select: { bankAccountId: true, type: true, amount: true },
+  })
+  const supplierPaidByBank = new Map<string, number>()
+  for (const row of supplierBankRows) {
+    const signed = row.type === "INCOME" ? -money(row.amount) : money(row.amount)
+    supplierPaidByBank.set(row.bankAccountId!, (supplierPaidByBank.get(row.bankAccountId!) ?? 0) + signed)
+  }
 
   // 2. Account Ledgers
   const cashEntries: Array<{
@@ -439,6 +463,7 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
     salesReceived: salesByBank.get(row.id) ?? 0,
     depositsReceived: depositsByBank.get(row.id) ?? 0,
     refundsPaid: refundsByBank.get(row.id) ?? 0,
+    supplierPaid: Math.max(0, supplierPaidByBank.get(row.id) ?? 0),
     branchId: row.branchId,
     branchName: row.branch.name,
     branchCode: row.branch.code,
@@ -446,6 +471,8 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
   }))
   const openingCash = openingCashShops.reduce((sum, shop) => sum + shop.openingCash, 0)
   const openingBank = namedBanks.reduce((sum, row) => sum + row.openingBalance, 0)
+  // Supplier money that left by bank with no account named on it.
+  const supplierPaidNoBank = Math.max(0, supplierPaymentsByBank - namedBanks.reduce((sum, row) => sum + row.supplierPaid, 0))
 
   for (const shop of openingCashShops) {
     if (shop.openingCash <= 0) continue
@@ -533,6 +560,7 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
     canRemoveBank: canHardDelete(user.role),
     canDeposit: await can(user.role, "action.deposit"),
     cashToBank,
+    supplierPaidNoBank,
     shops: openingCashShops,
     bankAccounts: namedBanks,
   }
@@ -664,6 +692,30 @@ export async function getBankAccountLedger(bankAccountId: string) {
       type: "OUT",
       category: entry.description?.startsWith("Swap payable") ? "Swap Deal pay-out" : "Refund on a return",
       description: entry.description || entry.reference || "Payment out",
+      amount: money(entry.amount),
+      reference: entry.reference,
+    })
+  }
+
+  // Supplier payments sent from this account, and any that were undone
+  const supplierMoves = await prisma.financeEntry.findMany({
+    where: {
+      bankAccountId,
+      OR: [
+        { type: "EXPENSE", account: "BANK", description: { startsWith: SUPPLIER_PAYMENT_NOTE } },
+        { type: "EXPENSE", account: "SUPPLIER_PAYMENTS" },
+        { type: "INCOME", account: "BANK", description: { startsWith: SUPPLIER_PAYMENT_UNDO_NOTE } },
+      ],
+    },
+    orderBy: { createdAt: "desc" },
+  })
+  for (const entry of supplierMoves) {
+    entries.push({
+      id: `supplier-${entry.id}`,
+      date: entry.createdAt,
+      type: entry.type === "INCOME" ? "IN" : "OUT",
+      category: entry.type === "INCOME" ? "Supplier payment undone" : "Paid to supplier",
+      description: entry.description || entry.reference || "Supplier payment",
       amount: money(entry.amount),
       reference: entry.reference,
     })

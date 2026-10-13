@@ -25,7 +25,8 @@ import { displayPartyName } from "@/lib/party-key"
 import { ensureOpeningStockSupplier, findDuplicateSupplier } from "@/lib/supplier-identity"
 import { resolveWritableShopId, viewBranchFilter } from "@/lib/branch-scope"
 import { canSeeAllBranches } from "@/lib/rbac"
-import { purchaseBalance } from "@/lib/purchase-money"
+import { purchaseBalance, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
+import { listPayingBanks, resolveSupplierPayChannel } from "@/lib/supplier-pay"
 
 /**
  * Loading the shop system from a sheet or by hand.
@@ -111,6 +112,10 @@ export type BatchUploadPayload = {
   invoiceNumber?: string
   uploadDate?: string
   amountPaid: number
+  /** How what is paid now left us: TRANSFER or CASH. Needed when anything is paid. */
+  paymentMethod?: string
+  /** The bank account a transfer was sent from. */
+  bankAccountId?: string
   /**
    * The part of the uploaded value that is shipping. It stays in the value of
    * the goods and comes off what is payable to the supplier.
@@ -1194,6 +1199,7 @@ export async function getUploadProgress() {
       sellingPrice: money(row.sellingPrice),
     })),
     suppliers: suppliersForForm,
+    payingBanks: await listPayingBanks(user),
     openUploadBill,
   }
 }
@@ -1580,6 +1586,18 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
         : `You are paying ₦${amountPaid.toLocaleString("en-NG")}, but this bill is only ₦${payable.toLocaleString("en-NG")}. Lower what you are paying now.`,
     }
   }
+  // Money paid now leaves by transfer from a named bank, or in cash from the
+  // till, so Money in and out can show where it went from.
+  const payChannel = amountPaid > 0
+    ? await resolveSupplierPayChannel(user, payload.paymentMethod || "", payload.bankAccountId || "")
+    : null
+  if (payChannel && "error" in payChannel) {
+    return {
+      error: payload.paymentMethod
+        ? payChannel.error
+        : "Say how you paid the supplier: by transfer (and from which bank) or in cash.",
+    }
+  }
   const balanceOwed = Math.max(0, payable - amountPaid)
   const fullyPaid = payable > 0 && amountPaid >= payable - 0.005
   const uploadDate = payload.uploadDate ? new Date(payload.uploadDate) : new Date()
@@ -1626,15 +1644,21 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
     })
 
     // Record Finance Entry if initial payment made
-    if (amountPaid > 0) {
+    if (amountPaid > 0 && payChannel && !("error" in payChannel)) {
       await tx.financeEntry.create({
         data: {
           branchId: shop.id,
-          account: "SUPPLIER_PAYMENTS",
+          // Cash is written the way Pay supplier writes it, so it leaves the
+          // till. A transfer carries the bank account it was sent from.
+          account: payChannel.account === "CASH" ? "CASH" : "SUPPLIER_PAYMENTS",
+          bankAccountId: payChannel.bankAccountId,
           type: "EXPENSE",
           amount: amountPaid.toFixed(2),
           reference: invoiceNumber,
-          description: `Supplier payment on upload for ${invoiceNumber} (${supplierName})`,
+          description:
+            payChannel.account === "CASH"
+              ? `${SUPPLIER_PAYMENT_NOTE}${invoiceNumber} · ${supplierName} · paid in cash on upload`
+              : `Supplier payment on upload for ${invoiceNumber} (${supplierName}) · from ${payChannel.from}`,
         },
       })
     }
@@ -1744,6 +1768,7 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
       payable,
       amountPaid,
       balanceOwed,
+      paidFrom: payChannel && !("error" in payChannel) ? payChannel.from : null,
       onTheWay,
       lotNumber,
       itemsCount: billLines.length,

@@ -27,6 +27,7 @@ export function OpeningMoneyPanel({
   canRemoveBank = false,
   openingCash,
   openingBank,
+  supplierPaidNoBank = 0,
 }: {
   shops: OpeningCashShop[]
   bankAccounts: NamedBankRow[]
@@ -34,6 +35,8 @@ export function OpeningMoneyPanel({
   canRemoveBank?: boolean
   openingCash: number
   openingBank: number
+  /** Supplier money that left by bank before payments named an account. */
+  supplierPaidNoBank?: number
 }) {
   const [drillAccount, setDrillAccount] = useState<NamedBankRow | null>(null)
   const [drillLines, setDrillLines] = useState<Awaited<ReturnType<typeof getBankAccountLedger>>>([])
@@ -52,7 +55,7 @@ export function OpeningMoneyPanel({
   }
 
   const drillBalance = drillAccount
-    ? drillAccount.openingBalance + drillAccount.salesReceived + drillAccount.depositsReceived - drillAccount.refundsPaid
+    ? drillAccount.openingBalance + drillAccount.salesReceived + drillAccount.depositsReceived - drillAccount.refundsPaid - drillAccount.supplierPaid
     : 0
   return (
     <>
@@ -143,6 +146,7 @@ export function OpeningMoneyPanel({
                   <th className="px-3 py-2 text-right font-medium">Sales into this account</th>
                   <th className="px-3 py-2 text-right font-medium">Cash from the till</th>
                   <th className="px-3 py-2 text-right font-medium">Refunds out</th>
+                  <th className="px-3 py-2 text-right font-medium">Paid to suppliers</th>
                   <th className="px-3 py-2 text-right font-medium">Balance</th>
                   {canSet ? <th className="px-3 py-2 font-medium">Change</th> : null}
                 </tr>
@@ -169,8 +173,9 @@ export function OpeningMoneyPanel({
                     <td className="px-3 py-2 text-right num">{formatCurrency(row.salesReceived)}</td>
                     <td className="px-3 py-2 text-right num">{formatCurrency(row.depositsReceived)}</td>
                     <td className="px-3 py-2 text-right num">{formatCurrency(row.refundsPaid)}</td>
+                    <td className="px-3 py-2 text-right num">{formatCurrency(row.supplierPaid)}</td>
                     <td className="px-3 py-2 text-right num font-semibold text-primary">
-                      {formatCurrency(row.openingBalance + row.salesReceived + row.depositsReceived - row.refundsPaid)}
+                      {formatCurrency(row.openingBalance + row.salesReceived + row.depositsReceived - row.refundsPaid - row.supplierPaid)}
                     </td>
                     {canSet ? (
                       <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
@@ -233,6 +238,14 @@ export function OpeningMoneyPanel({
               </tbody>
             </table>
           </div>
+          {supplierPaidNoBank > 0 ? (
+            <p className="rounded-lg border border-warning/30 bg-warning-soft px-3 py-2 text-xs text-foreground">
+              <span className="font-semibold">{formatCurrency(supplierPaidNoBank)} paid to suppliers names no bank account.</span>{" "}
+              These payments were recorded before a transfer had to say which bank it left from, so they come off Bank as a
+              whole and off none of the accounts above. Every new
+              supplier payment names its bank and shows under Paid to suppliers on that account.
+            </p>
+          ) : null}
         </div>
 
         {canSet && shops.length > 0 ? (
@@ -304,12 +317,13 @@ export function OpeningMoneyPanel({
         eyebrow={`${drillAccount.bankName} · ${drillAccount.accountNumber}${drillAccount.accountName ? ` · ${drillAccount.accountName}` : ""} · ${drillAccount.branchName}`}
         title="All transactions on this account"
         summary={
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-5">
             {[
               { label: "Opening balance", value: drillAccount.openingBalance, tone: "" },
               { label: "Sales received", value: drillAccount.salesReceived, tone: "text-success" },
               { label: "Cash from till", value: drillAccount.depositsReceived, tone: "text-success" },
               { label: "Refunds out", value: drillAccount.refundsPaid, tone: "text-warning" },
+              { label: "Paid to suppliers", value: drillAccount.supplierPaid, tone: "text-warning" },
             ].map((item) => (
               <div key={item.label} className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-center">
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{item.label}</p>

@@ -66,6 +66,7 @@ export default async function UploadsPage() {
       <UploadStockWizard
         shops={progress.branches}
         suppliers={progress.suppliers}
+        payingBanks={progress.payingBanks}
         brands={progress.brands}
         categories={progress.categories}
         products={progress.products}

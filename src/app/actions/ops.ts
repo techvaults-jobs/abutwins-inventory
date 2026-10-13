@@ -31,6 +31,7 @@ import { isOpeningStockPurchase, purchaseBalance, SUPPLIER_PAYMENT_NOTE } from "
 import { isSupplierReturnableStatus, supplierReturnMoneyPlan } from "@/lib/vendor-return"
 import { recordSupplierReturnLine } from "@/lib/supplier-returns"
 import { assertCashAvailable } from "@/lib/shop-cash"
+import { resolveSupplierPayChannel } from "@/lib/supplier-pay"
 import { shopPayChannel } from "@/lib/sale-money"
 import { parseShopCondition, shopConditionLabel } from "@/lib/conditions"
 import { normalizeStorage } from "@/lib/item-specs"
@@ -624,8 +625,11 @@ export async function payPurchase(formData: FormData) {
   if (!(await canManageFinance(user.role))) return { error: "You are not allowed to pay suppliers. Ask accounts." }
   const id = String(formData.get("id") || "")
   const amount = Number(formData.get("amount") || 0)
-  const method = String(formData.get("method") || "TRANSFER")
   if (!id || amount <= 0) return { error: "Enter the amount sent to the supplier." }
+  // Transfer or cash only, and a transfer names the bank it left from.
+  const channel = await resolveSupplierPayChannel(user, String(formData.get("method") || ""), String(formData.get("bankAccountId") || ""))
+  if ("error" in channel) return { error: channel.error }
+  const method = channel.method
 
   await healOpeningStockBills()
   const purchase = await prisma.purchase.findUnique({
@@ -667,7 +671,8 @@ export async function payPurchase(formData: FormData) {
     await tx.financeEntry.create({
       data: {
         branchId: purchase.branchId,
-        account: method === "CASH" ? "CASH" : "BANK",
+        account: channel.account,
+        bankAccountId: channel.bankAccountId,
         type: "EXPENSE",
         amount: sent.toFixed(2),
         reference: payRef,
@@ -680,7 +685,7 @@ export async function payPurchase(formData: FormData) {
         action: "CREATE",
         entityType: "Purchase",
         entityId: purchase.invoiceNumber,
-        newValue: JSON.stringify({ payRef, sent, method, goodsUnchanged: true }),
+        newValue: JSON.stringify({ payRef, sent, method, paidFrom: channel.from, goodsUnchanged: true }),
         branchId: purchase.branchId,
       },
     })

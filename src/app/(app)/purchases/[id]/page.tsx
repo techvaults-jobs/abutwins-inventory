@@ -2,7 +2,9 @@ import Link from "next/link"
 import { notFound } from "next/navigation"
 import { reverseSupplierPayment } from "@/app/actions/access"
 import { bookPurchaseAsComing } from "@/app/actions/incoming"
-import { getPurchase, payPurchase, receivePurchaseImeis, setPurchaseShippingFee } from "@/app/actions/ops"
+import { getPurchase, receivePurchaseImeis, setPurchaseShippingFee } from "@/app/actions/ops"
+import { listPayingBanks } from "@/lib/supplier-pay"
+import { PaySupplierForm } from "../pay-supplier-form"
 import { ExportCsv } from "@/components/export-csv"
 import { prisma } from "@/lib/prisma"
 import { can } from "@/lib/permissions"
@@ -12,7 +14,6 @@ import { ActionForm } from "@/components/action-form"
 import { PageHeader, StatusBadge } from "@/components/shared"
 import { WorkflowSteps } from "@/components/workflow-steps"
 import { Input } from "@/components/ui/input"
-import { Select } from "@/components/ui/select"
 import { ScanList } from "@/components/scan-field"
 import { statusLabel } from "@/lib/status"
 import { formatCurrency, formatDate, formatDateTime, money } from "@/lib/utils"
@@ -48,6 +49,7 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
   const waitingLot = purchase.incomingLots.find((lot) => lot.status === "COMING" || lot.status === "PENDING_APPROVAL")
   const receivedOnGoodsOnTheWay = purchase.source === "UPLOAD_STOCK" && Boolean(waitingLot)
   const due = isOpening ? 0 : billMoney.owed
+  const payingBanks = due > 0 ? await listPayingBanks(me) : []
   const surplus = isOpening ? 0 : billMoney.surplus
   const step = isOpening
     ? (opening?.status === "CLOSED" ? 2 : 1)
@@ -481,16 +483,10 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
       {isOpening ? null : due > 0 ? (
         <div className="surface-card p-5">
           <h3 className="mb-2 font-semibold">Pay supplier</h3>
-          <p className="mb-4 text-sm text-muted-foreground">This records money leaving. Goods stay as received.</p>
-          <ActionForm action={payPurchase} submit="Send payment" className="grid gap-3 md:grid-cols-[1fr_160px_auto] md:items-end">
-            <input type="hidden" name="id" value={purchase.id} />
-            <Input name="amount" type="number" defaultValue={due} required />
-            <Select name="method" defaultValue="TRANSFER">
-              <option value="TRANSFER">Transfer</option>
-              <option value="CASH">Cash</option>
-              <option value="POS">POS</option>
-            </Select>
-          </ActionForm>
+          <p className="mb-4 text-sm text-muted-foreground">
+            This records money leaving. Goods stay as received. Pay by transfer from one of our bank accounts, or in cash.
+          </p>
+          <PaySupplierForm purchaseId={purchase.id} due={due} banks={payingBanks} />
         </div>
       ) : surplus > 0 ? (
         <p className="text-sm text-muted-foreground">

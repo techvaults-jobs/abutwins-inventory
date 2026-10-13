@@ -59,6 +59,7 @@ const ON_THE_WAY_PHASES = [
 export function UploadStockWizard({
   shops,
   suppliers,
+  payingBanks,
   brands,
   categories,
   products,
@@ -67,6 +68,8 @@ export function UploadStockWizard({
 }: {
   shops: Shop[]
   suppliers: Supplier[]
+  /** Our bank accounts a transfer to the supplier can leave from. */
+  payingBanks: Array<{ id: string; label: string }>
   brands: Brand[]
   categories: Category[]
   products: Product[]
@@ -131,6 +134,9 @@ export function UploadStockWizard({
   // Payment state
   const [amountPaid, setAmountPaid] = useState<number>(0)
   const [shippingFee, setShippingFee] = useState<number>(0)
+  // How what is paid now left us: a transfer from a named bank, or cash.
+  const [payMethod, setPayMethod] = useState<"TRANSFER" | "CASH">("TRANSFER")
+  const [payBankId, setPayBankId] = useState("")
 
   // Arrival state: in the shop now, or still on the way
   const [onTheWay, setOnTheWay] = useState(false)
@@ -266,6 +272,10 @@ export function UploadStockWizard({
       toast.error(`The shipping fee is more than everything on this bill (${formatCurrency(totalInvoiceValue)}). Check the figure.`)
       return
     }
+    if (amountPaid > 0 && payMethod === "TRANSFER" && !payBankId) {
+      toast.error("Pick the bank account the transfer to the supplier was sent from.")
+      return
+    }
     if (payingTooMuch) {
       toast.error(`You are paying more than is payable to the supplier (${formatCurrency(payable)}). Lower what you are paying now.`)
       return
@@ -283,6 +293,8 @@ export function UploadStockWizard({
       invoiceNumber,
       uploadDate,
       amountPaid,
+      paymentMethod: amountPaid > 0 ? payMethod : undefined,
+      bankAccountId: amountPaid > 0 && payMethod === "TRANSFER" ? payBankId : undefined,
       shippingFee,
       onTheWay,
       expectedDate: onTheWay && expectedDate ? expectedDate : undefined,
@@ -342,6 +354,7 @@ export function UploadStockWizard({
     setInvoiceNumber(generateDocNumber("PO"))
     setAmountPaid(0)
     setShippingFee(0)
+    setPayBankId("")
     setOnTheWay(false)
     setExpectedDate("")
     setNotes("")
@@ -721,6 +734,43 @@ export function UploadStockWizard({
                 </button>
                 {payingTooMuch ? <span className="text-danger">More than is payable to the supplier.</span> : null}
               </div>
+              {/* Asked only when money is paid now: transfer from which bank, or cash. */}
+              {amountPaid > 0 ? (
+                <div className="mt-3 grid gap-2 border-t border-border pt-3 sm:grid-cols-[140px_1fr]">
+                  <label className="block text-sm">
+                    <span className="eyebrow mb-1 block">Paid by</span>
+                    <Select value={payMethod} onChange={(e) => setPayMethod(e.target.value === "CASH" ? "CASH" : "TRANSFER")} disabled={busy}>
+                      <option value="TRANSFER">Transfer</option>
+                      <option value="CASH">Cash</option>
+                    </Select>
+                  </label>
+                  {payMethod === "TRANSFER" ? (
+                    <label className="block text-sm">
+                      <span className="eyebrow mb-1 block">From which bank account</span>
+                      <Select
+                        value={payBankId}
+                        onChange={(e) => setPayBankId(e.target.value)}
+                        disabled={busy}
+                        required
+                        emptyLabel="No bank account is set up. Add one on Money in and out first."
+                      >
+                        {payingBanks.length ? (
+                          <option value="" disabled>
+                            Pick the bank the transfer left from
+                          </option>
+                        ) : null}
+                        {payingBanks.map((bank) => (
+                          <option key={bank.id} value={bank.id}>
+                            {bank.label}
+                          </option>
+                        ))}
+                      </Select>
+                    </label>
+                  ) : (
+                    <p className="self-end pb-2 text-xs text-muted-foreground">Cash leaves the till of the shop receiving the goods.</p>
+                  )}
+                </div>
+              ) : null}
             </div>
 
             <div className={`rounded-lg border p-4 ${isFullyPaid ? "border-success/30 bg-success-soft" : "border-border"}`}>

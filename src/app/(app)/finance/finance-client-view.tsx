@@ -59,6 +59,7 @@ type FinanceData = {
   canRemoveBank: boolean
   canDeposit: boolean
   cashToBank: number
+  supplierPaidNoBank?: number
   shops: OpeningCashShop[]
   bankAccounts: NamedBankRow[]
 }
@@ -207,7 +208,7 @@ export function FinanceClientView({ data }: { data: FinanceData }) {
                 <p className="text-sm font-semibold">Bank</p>
                 <p className="text-xs text-muted-foreground">
                   Started with {formatCurrency(data.openingBank)} across {data.bankAccounts.length} bank
-                  {data.bankAccounts.length === 1 ? "" : "s"}. Bank sales land on the named account.
+                  {data.bankAccounts.length === 1 ? "" : "s"}. Sales in and supplier transfers out sit on the named account.
                 </p>
               </div>
             </div>
@@ -228,6 +229,7 @@ export function FinanceClientView({ data }: { data: FinanceData }) {
         canRemoveBank={data.canRemoveBank}
         openingCash={data.openingCash}
         openingBank={data.openingBank}
+        supplierPaidNoBank={data.supplierPaidNoBank}
       />
 
       <div className="grid gap-4 xl:grid-cols-2">
