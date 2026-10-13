@@ -1,42 +1,29 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useCallback, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
-import { PlusCircle, Trash2, CheckCircle2, PackagePlus } from "lucide-react"
+import { PlusCircle, CheckCircle2, PackagePlus } from "lucide-react"
 import { toast } from "sonner"
-import { batchUploadStock, type BatchUploadItem, type BatchUploadPayload, type UploadResult } from "@/app/actions/uploads"
+import { batchUploadStock, type BatchUploadPayload, type UploadResult } from "@/app/actions/uploads"
 import { BrandBusyOverlay } from "@/components/brand-busy-overlay"
-import { ItemNameSearch } from "@/components/item-name-search"
 import { preventEnterFromSubmitting } from "@/components/scan-field"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select } from "@/components/ui/select"
-import { BILL_CONDITION_OPTIONS, STORAGE_OPTIONS, mapBillCondition, normalizeStorage } from "@/lib/item-specs"
 import { listedSupplierClash } from "@/lib/party-key"
 import { isOpeningStockSupplierName } from "@/lib/upload-purchase"
 import { formatCurrency, generateDocNumber } from "@/lib/utils"
+import { BillLine, fitIdentities, type BillLineItem, type BillProduct } from "./bill-line"
 
 type Shop = { id: string; name: string; code: string }
 type Supplier = { id: string; name: string; phone?: string | null; city: string | null; country: string | null }
 type Brand = { id: string; name: string }
 type Category = { id: string; name: string }
-type Product = {
-  id: string
-  name: string
-  sku: string
-  tracking: "IMEI" | "SERIAL" | "NONE"
-  costPrice: number
-  minimumPrice: number
-  sellingPrice: number
-  condition: string
-  storage: string | null
-  brandId: string
-  categoryId: string
-  brand: { name: string }
-}
+type Product = BillProduct
 
-function blankLine(defaults?: { brandId?: string; categoryId?: string }): BatchUploadItem {
+function blankLine(key: string, defaults?: { brandId?: string; categoryId?: string }): BillLineItem {
   return {
+    key,
     productMode: "existing",
     productId: "",
     productName: "",
@@ -111,8 +98,16 @@ export function UploadStockWizard({
   const [invoiceNumber, setInvoiceNumber] = useState(defaultInvoiceNumber)
   const [uploadDate, setUploadDate] = useState(defaultUploadDate)
   const [branchId, setBranchId] = useState(shops[0]?.id || "")
-  const [supplierMode, setSupplierMode] = useState<"existing" | "new">(suppliers.length ? "existing" : "new")
-  const [supplierId, setSupplierId] = useState(suppliers[0]?.id || "")
+  // Opening stock is never a supplier on a bill, so it is not on the list and
+  // must not be the one picked to begin with. When it sat first, the list
+  // showed the next supplier while the bill was sent under Opening stock, and
+  // the upload was refused.
+  const listedSuppliers = useMemo(
+    () => suppliers.filter((supplier) => !isOpeningStockSupplierName(supplier.name)),
+    [suppliers]
+  )
+  const [supplierMode, setSupplierMode] = useState<"existing" | "new">(listedSuppliers.length ? "existing" : "new")
+  const [supplierId, setSupplierId] = useState(listedSuppliers[0]?.id || "")
   const [newSupplierName, setNewSupplierName] = useState("")
   const [newSupplierPhone, setNewSupplierPhone] = useState("")
   const [newSupplierCountry, setNewSupplierCountry] = useState("")
@@ -120,8 +115,9 @@ export function UploadStockWizard({
   const [notes, setNotes] = useState("")
 
   // Item Lines state
-  const [items, setItems] = useState<BatchUploadItem[]>([
-    blankLine({ brandId: defaultBrandId, categoryId: defaultCategoryId }),
+  const lineSeq = useRef(1)
+  const [items, setItems] = useState<BillLineItem[]>([
+    blankLine("line-0", { brandId: defaultBrandId, categoryId: defaultCategoryId }),
   ])
 
   // Payment state
@@ -132,160 +128,21 @@ export function UploadStockWizard({
   const balanceOwed = Math.max(0, totalInvoiceValue - amountPaid)
   const isFullyPaid = totalInvoiceValue > 0 && amountPaid >= totalInvoiceValue
 
-  function findNamedProducts(name: string) {
-    const key = name.trim().toLowerCase()
-    return products.filter((row) => row.name.trim().toLowerCase() === key)
-  }
+  // Both stay the same from one draw to the next, so a line that did not
+  // change is not drawn again when another line is typed in.
+  const changeLine = useCallback((key: string, change: (line: BillLineItem) => BillLineItem) => {
+    setItems((prev) => prev.map((line) => (line.key === key ? fitIdentities(change(line)) : line)))
+  }, [])
 
-  function findVariant(name: string, condition: string, storage: string) {
-    const key = name.trim().toLowerCase()
-    const size = normalizeStorage(storage)
-    const look = mapBillCondition(condition)
-    return products.find(
-      (row) =>
-        row.name.trim().toLowerCase() === key &&
-        (!look || row.condition === look) &&
-        normalizeStorage(row.storage || "") === size
-    )
-  }
-
-  function patchLine(index: number, patch: Partial<BatchUploadItem>) {
-    setItems((prev) => {
-      const copy = [...prev]
-      const current = { ...copy[index], ...patch }
-      const qty = current.quantity || 1
-      current.identities =
-        current.tracking === "NONE" ? [] : Array.from({ length: qty }, (_, i) => current.identities?.[i] || "")
-      copy[index] = current
-      return copy
-    })
-  }
-
-  function applyName(index: number, name: string) {
-    if (!name.trim()) {
-      patchLine(index, {
-        productName: "",
-        productId: "",
-        productMode: "existing",
-      })
-      return
-    }
-    const named = findNamedProducts(name)
-    const sample = named[0]
-    const current = items[index]
-    const variant = findVariant(name, current.condition || "", current.storage || "")
-    patchLine(index, {
-      productName: name,
-      productId: variant?.id || "",
-      productMode: variant ? "existing" : "new",
-      brandId: sample?.brandId || current.brandId || defaultBrandId,
-      categoryId: sample?.categoryId || current.categoryId || defaultCategoryId,
-      tracking: sample?.tracking || current.tracking || "IMEI",
-      costPrice: variant?.costPrice ?? sample?.costPrice ?? current.costPrice,
-      minimumPrice: variant?.minimumPrice ?? sample?.minimumPrice ?? current.minimumPrice,
-      sellingPrice: variant?.sellingPrice ?? sample?.sellingPrice ?? current.sellingPrice,
-    })
-  }
-
-  function applyCondition(index: number, condition: string) {
-    const current = items[index]
-    const variant = findVariant(current.productName || "", condition, current.storage || "")
-    patchLine(index, {
-      condition,
-      productId: variant?.id || "",
-      productMode: variant ? "existing" : "new",
-      costPrice: variant?.costPrice ?? current.costPrice,
-      minimumPrice: variant?.minimumPrice ?? current.minimumPrice,
-      sellingPrice: variant?.sellingPrice ?? current.sellingPrice,
-      tracking: variant?.tracking || current.tracking,
-    })
-  }
-
-  function applyStorage(index: number, storage: string) {
-    const current = items[index]
-    const size = normalizeStorage(storage)
-    const variant = findVariant(current.productName || "", current.condition || "", size)
-    patchLine(index, {
-      storage: size,
-      productId: variant?.id || "",
-      productMode: variant ? "existing" : "new",
-      costPrice: variant?.costPrice ?? current.costPrice,
-      minimumPrice: variant?.minimumPrice ?? current.minimumPrice,
-      sellingPrice: variant?.sellingPrice ?? current.sellingPrice,
-      tracking: variant?.tracking || current.tracking,
-    })
-  }
-
-  function handleQuantityChange(index: number, qty: number) {
-    const safeQty = Math.max(1, Math.floor(qty) || 1)
-    setItems((prev) => {
-      const copy = [...prev]
-      const item = copy[index]
-      const prevIds = item.identities || []
-      const newIds =
-        item.tracking === "NONE"
-          ? []
-          : Array.from({ length: safeQty }, (_, i) => prevIds[i] || "")
-      copy[index] = {
-        ...item,
-        quantity: safeQty,
-        identities: newIds,
-      }
-      return copy
-    })
-  }
-
-  /**
-   * Per-item string display value for the "How many" field.
-   * Kept separate from items[].quantity so the user can clear the box
-   * and type a new number without React snapping it back to 1 mid-keystroke.
-   */
-  const [qtyDisplay, setQtyDisplay] = useState<Record<number, string>>({})
-
-  function getQtyDisplay(index: number) {
-    return qtyDisplay[index] ?? String(items[index]?.quantity ?? 1)
-  }
-
-  /** Called every keystroke — only updates the display string, no IMEI rebuild. */
-  function handleQtyInput(index: number, raw: string) {
-    const cleaned = raw.replace(/[^0-9]/g, "")
-    setQtyDisplay((prev) => ({ ...prev, [index]: cleaned }))
-  }
-
-  /** Called on blur — commits the integer and rebuilds IMEI boxes. */
-  function commitQty(index: number, raw: string) {
-    const n = parseInt(raw, 10)
-    const safe = isNaN(n) || n < 1 ? 1 : n
-    setQtyDisplay((prev) => ({ ...prev, [index]: String(safe) }))
-    handleQuantityChange(index, safe)
-  }
-
-  /** Called by the − and + buttons. */
-  function stepQty(index: number, delta: 1 | -1) {
-    const next = Math.max(1, (items[index]?.quantity ?? 1) + delta)
-    setQtyDisplay((prev) => ({ ...prev, [index]: String(next) }))
-    handleQuantityChange(index, next)
-  }
-
-  function handleIdentityChange(itemIndex: number, idIndex: number, value: string) {
-    setItems((prev) => {
-      const copy = [...prev]
-      const item = { ...copy[itemIndex] }
-      const ids = [...(item.identities || [])]
-      ids[idIndex] = value.replace(/[\s-]/g, "")
-      item.identities = ids
-      copy[itemIndex] = item
-      return copy
-    })
-  }
+  const removeLine = useCallback((key: string) => {
+    setItems((prev) => (prev.length <= 1 ? prev : prev.filter((line) => line.key !== key)))
+  }, [])
 
   function addItemLine() {
-    setItems((prev) => [...prev, blankLine({ brandId: defaultBrandId, categoryId: defaultCategoryId })])
-  }
-
-  function removeItemLine(index: number) {
-    if (items.length <= 1) return
-    setItems((prev) => prev.filter((_, i) => i !== index))
+    const key = `line-${lineSeq.current++}`
+    setItems((prev) => [...prev, blankLine(key, { brandId: defaultBrandId, categoryId: defaultCategoryId })])
+    // On a long bill the new line is far below the button at the top.
+    requestAnimationFrame(() => document.getElementById(`bill-line-${key}`)?.scrollIntoView({ block: "center", behavior: "smooth" }))
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -355,7 +212,11 @@ export function UploadStockWizard({
       uploadDate,
       amountPaid,
       notes: notes.trim() || undefined,
-      items,
+      items: items.map((line) => {
+        const item: BatchUploadPayload["items"][number] & { key?: string } = { ...line }
+        delete item.key
+        return item
+      }),
     }
 
     let result: UploadResult
@@ -403,7 +264,7 @@ export function UploadStockWizard({
     setInvoiceNumber(generateDocNumber("PO"))
     setAmountPaid(0)
     setNotes("")
-    setItems([blankLine({ brandId: defaultBrandId, categoryId: defaultCategoryId })])
+    setItems([blankLine(`line-${lineSeq.current++}`, { brandId: defaultBrandId, categoryId: defaultCategoryId })])
     router.refresh()
   }
 
@@ -475,7 +336,7 @@ export function UploadStockWizard({
                 <button
                   type="button"
                   onClick={() => setSupplierMode("existing")}
-                  disabled={busy || suppliers.length === 0}
+                  disabled={busy || listedSuppliers.length === 0}
                   className={`flex-1 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors ${
                     supplierMode === "existing" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"
                   }`}
@@ -503,10 +364,10 @@ export function UploadStockWizard({
                 value={supplierId}
                 onChange={(e) => setSupplierId(e.target.value)}
                 required
-                disabled={busy || suppliers.length === 0}
+                disabled={busy || listedSuppliers.length === 0}
                 emptyLabel="No supplier is on the list yet. Choose New supplier."
               >
-                {suppliers.filter((supplier) => !isOpeningStockSupplierName(supplier.name)).map((supplier) => (
+                {listedSuppliers.map((supplier) => (
                   <option key={supplier.id} value={supplier.id}>
                     {supplier.name}
                     {supplier.city || supplier.country
@@ -575,223 +436,31 @@ export function UploadStockWizard({
 
           <div className="space-y-3">
             {items.map((item, itemIdx) => (
-              <div key={itemIdx} className="space-y-3 rounded-lg border border-border p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm font-medium">
-                    Item {itemIdx + 1}
-                    <span className="ml-2 text-xs font-normal text-muted-foreground">
-                      {item.tracking === "IMEI"
-                        ? "tracked by IMEI"
-                        : item.tracking === "SERIAL"
-                          ? "tracked by serial"
-                          : "counted in pieces"}
-                    </span>
-                  </p>
-                  {items.length > 1 ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      className="text-danger hover:bg-danger-soft"
-                      onClick={() => removeItemLine(itemIdx)}
-                      disabled={busy}
-                    >
-                      <Trash2 className="mr-1 h-3.5 w-3.5" /> Remove
-                    </Button>
-                  ) : null}
-                </div>
-
-                <div className="grid gap-3 sm:grid-cols-12">
-                  <label className="block text-sm sm:col-span-8">
-                    <span className="eyebrow mb-1 block">Item name</span>
-                    <ItemNameSearch
-                      names={catalogNames}
-                      value={item.productName || ""}
-                      onPick={(name) => applyName(itemIdx, name)}
-                      disabled={busy}
-                    />
-                    <span className="mt-1 block text-xs text-muted-foreground">
-                      Only the product name. Condition, storage, cost, and how many sit beside it.
-                    </span>
-                  </label>
-
-                  <label className="block text-sm sm:col-span-4">
-                    <span className="eyebrow mb-1 block">Brand</span>
-                    <Select
-                      value={item.brandId || ""}
-                      onChange={(e) => patchLine(itemIdx, { brandId: e.target.value, productMode: "new", productId: "" })}
-                      disabled={busy}
-                      emptyLabel="Add brands on Phones and items first."
-                      required
-                    >
-                      {brands.map((brand) => (
-                        <option key={brand.id} value={brand.id}>
-                          {brand.name}
-                        </option>
-                      ))}
-                    </Select>
-                  </label>
-
-                  <label className="block text-sm sm:col-span-3">
-                    <span className="eyebrow mb-1 block">Condition</span>
-                    <Select
-                      value={item.condition || ""}
-                      onChange={(e) => applyCondition(itemIdx, e.target.value)}
-                      disabled={busy}
-                      required
-                    >
-                      <option value="" disabled>
-                        Pick Brand New, Brand New (Locked), Brand New (N/A), UK, UK (Locked), Open Box, Standard, or Faulty
-                      </option>
-                      {BILL_CONDITION_OPTIONS.map((row) => (
-                        <option key={row.value} value={row.value}>
-                          {row.label}
-                        </option>
-                      ))}
-                    </Select>
-                  </label>
-
-                  <label className="block text-sm sm:col-span-3">
-                    <span className="eyebrow mb-1 block">Storage</span>
-                    <Select
-                      value={item.storage || ""}
-                      onChange={(e) => applyStorage(itemIdx, e.target.value)}
-                      disabled={busy}
-                      required={item.tracking !== "NONE"}
-                    >
-                      <option value="">{item.tracking === "NONE" ? "No storage for this item" : "Pick storage"}</option>
-                      {STORAGE_OPTIONS.map((size) => (
-                        <option key={size} value={size}>
-                          {size}
-                        </option>
-                      ))}
-                      {item.storage &&
-                      !(STORAGE_OPTIONS as readonly string[]).includes(item.storage) ? (
-                        <option value={item.storage}>{item.storage}</option>
-                      ) : null}
-                    </Select>
-                  </label>
-
-                  <label className="block text-sm sm:col-span-3">
-                    <span className="eyebrow mb-1 block">Cost price each (₦)</span>
-                    <Input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={item.costPrice || ""}
-                      onChange={(e) => patchLine(itemIdx, { costPrice: Number(e.target.value) || 0 })}
-                      required
-                      disabled={busy}
-                      className="num"
-                    />
-                  </label>
-
-                  <div className="block text-sm sm:col-span-3">
-                    <span className="eyebrow mb-1 block">How many</span>
-                    {/* Stepper: − | typed number | + */}
-                    <div className="flex h-10 items-stretch overflow-hidden rounded-md border border-input bg-card shadow-sm focus-within:ring-1 focus-within:ring-ring">
-                      <button
-                        type="button"
-                        aria-label="Remove one"
-                        disabled={busy || (items[itemIdx]?.quantity ?? 1) <= 1}
-                        onClick={() => stepQty(itemIdx, -1)}
-                        className="flex w-10 shrink-0 items-center justify-center text-lg font-semibold text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        −
-                      </button>
-                      <input
-                        inputMode="numeric"
-                        pattern="[0-9]*"
-                        value={getQtyDisplay(itemIdx)}
-                        onChange={(e) => handleQtyInput(itemIdx, e.target.value)}
-                        onBlur={(e) => commitQty(itemIdx, e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") { e.preventDefault(); commitQty(itemIdx, (e.target as HTMLInputElement).value) }
-                          if (e.key === "ArrowUp") { e.preventDefault(); stepQty(itemIdx, 1) }
-                          if (e.key === "ArrowDown") { e.preventDefault(); stepQty(itemIdx, -1) }
-                        }}
-                        disabled={busy}
-                        required
-                        aria-label="How many"
-                        className="min-w-0 flex-1 bg-transparent text-center text-sm font-semibold tabular-nums focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
-                        style={{ MozAppearance: "textfield" } as React.CSSProperties}
-                      />
-                      <button
-                        type="button"
-                        aria-label="Add one"
-                        disabled={busy}
-                        onClick={() => stepQty(itemIdx, 1)}
-                        className="flex w-10 shrink-0 items-center justify-center text-lg font-semibold text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-
-                  <label className="block text-sm sm:col-span-3">
-                    <span className="eyebrow mb-1 block">Lowest selling price (₦)</span>
-                    <Input
-                      type="number"
-                      min={0}
-                      step="0.01"
-                      value={item.minimumPrice || ""}
-                      onChange={(e) => patchLine(itemIdx, { minimumPrice: Number(e.target.value) || 0 })}
-                      disabled={busy}
-                      className="num"
-                    />
-                  </label>
-                </div>
-
-                <p className="flex flex-wrap justify-between gap-2 rounded-md bg-muted/60 px-3 py-1.5 text-xs text-muted-foreground">
-                  <span>
-                    {item.quantity} × {formatCurrency(item.costPrice || 0)}
-                  </span>
-                  <span>
-                    Line total{" "}
-                    <strong className="num text-foreground">
-                      {formatCurrency((item.quantity || 0) * (item.costPrice || 0))}
-                    </strong>
-                  </span>
-                </p>
-
-                {/* One box per unit, opened by the quantity above. */}
-                {item.tracking !== "NONE" ? (
-                  <div className="space-y-2 rounded-md border border-border bg-muted/30 p-3">
-                    <p className="eyebrow">
-                      Scan or type the {item.quantity} {item.tracking === "IMEI" ? "IMEI numbers" : "serial numbers"}
-                    </p>
-                    <div className="grid gap-2 sm:grid-cols-2">
-                      {Array.from({ length: item.quantity }).map((_, idIdx) => (
-                        <div key={idIdx} className="flex items-center gap-2">
-                          <span className="w-6 shrink-0 font-mono text-[11px] text-muted-foreground">{idIdx + 1}.</span>
-                          <Input
-                            placeholder={item.tracking === "IMEI" ? "15-digit IMEI" : "Serial number"}
-                            value={item.identities?.[idIdx] || ""}
-                            onChange={(e) => handleIdentityChange(itemIdx, idIdx, e.target.value)}
-                            onKeyDown={(event) => {
-                              if (event.key !== "Enter") return
-                              event.preventDefault()
-                              const form = event.currentTarget.form
-                              if (!form) return
-                              const boxes = Array.from(form.querySelectorAll<HTMLInputElement>("input[data-scan-box='true']"))
-                              const index = boxes.indexOf(event.currentTarget)
-                              const next = boxes[index + 1]
-                              if (next) next.focus()
-                              else event.currentTarget.blur()
-                            }}
-                            data-scan-box="true"
-                            required
-                            disabled={busy}
-                            autoComplete="off"
-                            className="h-9 font-mono text-xs"
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-              </div>
+              <BillLine
+                key={item.key}
+                line={item}
+                number={itemIdx + 1}
+                canRemove={items.length > 1}
+                busy={busy}
+                brands={brands}
+                catalogNames={catalogNames}
+                products={products}
+                defaultBrandId={defaultBrandId}
+                defaultCategoryId={defaultCategoryId}
+                onChange={changeLine}
+                onRemove={removeLine}
+              />
             ))}
+          </div>
+
+          {/* The same button again under the last line, so a long bill is not scrolled back to the top for every item. */}
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-dashed border-input px-4 py-3">
+            <p className="text-sm text-muted-foreground">
+              {items.length} item{items.length === 1 ? "" : "s"} and {unitCount} unit{unitCount === 1 ? "" : "s"} on this bill so far. Add as many as the bill has.
+            </p>
+            <Button type="button" size="sm" variant="outline" onClick={addItemLine} disabled={busy}>
+              <PlusCircle className="mr-1.5 h-4 w-4" /> Add another item
+            </Button>
           </div>
         </section>
 
