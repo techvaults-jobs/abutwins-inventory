@@ -23,6 +23,8 @@ export type PurchaseRow = {
   when: string
   received: boolean
   total: number
+  /** Shipping fee inside the value, not owed to the supplier. */
+  shipping: number
   /** Value sent back to the supplier on this bill. */
   sentBack: number
   paid: number
@@ -123,6 +125,19 @@ export function PurchasesList({ purchases, search }: { purchases: PurchaseRow[];
       align: "right",
       sortValue: (row) => row.total,
       cell: (row) => <span className="font-medium">{formatCurrency(row.total)}</span>,
+    },
+    {
+      id: "shipping",
+      header: "Shipping fee",
+      align: "right",
+      hideBelow: "lg",
+      sortValue: (row) => row.shipping,
+      cell: (row) =>
+        row.shipping > 0 ? (
+          <span className="font-medium">−{formatCurrency(row.shipping)}</span>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
     },
     {
       id: "sentBack",

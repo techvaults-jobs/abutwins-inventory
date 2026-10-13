@@ -12,6 +12,7 @@ export default async function IncomingPage({ searchParams }: { searchParams: Pro
   const me = await requireUser()
   const lots = await getIncomingLots()
   const canBook = isShopOwner(me.role) || (await can(me.role, "action.incoming"))
+  const canUpload = await can(me.role, "action.upload")
 
   return (
     <div className="space-y-5">
@@ -20,11 +21,18 @@ export default async function IncomingPage({ searchParams }: { searchParams: Pro
         description="Left the supplier. Not counted into this shop yet."
         actions={
           canBook ? (
-            <Button asChild>
-              <Link href="/incoming/new">
-                <Plus className="mr-1.5 h-4 w-4" /> Book goods coming
-              </Link>
-            </Button>
+            <>
+              {canUpload ? (
+                <Button asChild variant="outline">
+                  <Link href="/uploads">Upload a supplier bill still on the way</Link>
+                </Button>
+              ) : null}
+              <Button asChild>
+                <Link href="/incoming/new">
+                  <Plus className="mr-1.5 h-4 w-4" /> Book goods coming
+                </Link>
+              </Button>
+            </>
           ) : null
         }
       />

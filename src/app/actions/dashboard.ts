@@ -137,6 +137,7 @@ export async function getDashboardData() {
         totalAmount: true,
         paidAmount: true,
         returnedAmount: true,
+        shippingFee: true,
         supplierId: true,
         supplier: { select: { name: true, creditBalance: true } },
       },
@@ -527,6 +528,7 @@ export async function getDashboardData() {
           totalAmount: row.totalAmount,
           paidAmount: row.paidAmount,
           returnedAmount: row.returnedAmount,
+          shippingFee: row.shippingFee,
         }))
       )
       return {

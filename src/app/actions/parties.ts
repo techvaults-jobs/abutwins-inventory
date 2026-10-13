@@ -289,6 +289,7 @@ export async function getSuppliers() {
           totalAmount: true,
           paidAmount: true,
           returnedAmount: true,
+          shippingFee: true,
           status: true,
           createdAt: true,
           branch: { select: { name: true, code: true } },

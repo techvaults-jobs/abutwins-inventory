@@ -45,15 +45,37 @@ export function formatPurchaseBalanceCell(owed: number, surplus: number) {
   return formatCurrency(0)
 }
 
-/** What is still owed, or surplus the supplier owes us, after send-backs. */
-export function purchaseBalance(total: unknown, paid: unknown, returned: unknown = 0) {
-  const billed = money(total)
-  const paidVal = money(paid)
-  const sentBack = money(returned)
-  const remaining = Math.max(0, billed - sentBack)
+/** The money fields of a supplier bill that decide what is owed on it. */
+export type BillMoney = {
+  totalAmount: unknown
+  paidAmount: unknown
+  returnedAmount?: unknown
+  /** Asked for by name so no screen can work out a balance without it. */
+  shippingFee: unknown
+}
+
+/**
+ * What is still owed on a supplier bill, or the surplus the supplier owes us.
+ *
+ * The uploaded value is what the goods are worth on the shelf. A shipping fee
+ * is the part of that value that is not the supplier's money, so it comes off
+ * first; what is left is payable to the supplier. Units sent back and
+ * payments then come off that.
+ */
+export function purchaseBalance(bill: BillMoney) {
+  const billed = money(bill.totalAmount)
+  const paidVal = money(bill.paidAmount)
+  const sentBack = money(bill.returnedAmount)
+  const shipping = Math.min(billed, Math.max(0, money(bill.shippingFee)))
+  const payable = Math.max(0, billed - shipping)
+  const remaining = Math.max(0, payable - sentBack)
   const net = remaining - paidVal
   return {
+    /** Total uploaded value: what the goods cost landed. */
     billed,
+    shipping,
+    /** Uploaded value less shipping: what the supplier is due for the goods. */
+    payable,
     paid: paidVal,
     sentBack,
     remaining,
@@ -183,12 +205,14 @@ export type SupplierLedgerBill = {
   totalAmount: unknown
   paidAmount: unknown
   returnedAmount?: unknown
+  shippingFee: unknown
 }
 
 export type SupplierLedger = {
   id: string
   name: string
   billed: number
+  shipping: number
   paid: number
   sentBack: number
   extraCredit: number
@@ -226,12 +250,14 @@ export function groupSupplierLedgers(bills: SupplierLedgerBill[]): SupplierLedge
   return [...houses.values()]
     .map((house) => {
       let billed = 0
+      let shipping = 0
       let paid = 0
       let sentBack = 0
       let net = 0
       for (const bill of house.bills) {
-        const bal = purchaseBalance(bill.totalAmount, bill.paidAmount, bill.returnedAmount)
+        const bal = purchaseBalance(bill)
         billed += bal.billed
+        shipping += bal.shipping
         paid += bal.paid
         sentBack += bal.sentBack
         net += bal.remaining - bal.paid
@@ -242,6 +268,7 @@ export function groupSupplierLedgers(bills: SupplierLedgerBill[]): SupplierLedge
         id: house.id,
         name: house.name,
         billed,
+        shipping,
         paid,
         sentBack,
         extraCredit,

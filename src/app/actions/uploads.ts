@@ -7,7 +7,7 @@ import { recordMovement, setStock } from "@/lib/concurrency"
 import { requireUser } from "@/lib/session"
 import { can } from "@/lib/permissions"
 import { readTableFile, readWorkbookGrids } from "@/lib/table-file"
-import { makeOpeningSku, planOpeningStock } from "@/lib/opening-stock"
+import { makeOpeningSku, openingProductKey, planOpeningStock } from "@/lib/opening-stock"
 import { planCustomers, planImeis, planStock, type CatalogItem, type ShopRef } from "@/lib/upload-plan"
 import {
   OPENING_STOCK_ALL_SHOPS,
@@ -62,6 +62,13 @@ export type UploadResult = {
   paid?: boolean
   paidAmount?: number
   balanceOwed?: number
+  /** Shipping fee taken off the uploaded value to get what the supplier is due. */
+  shippingFee?: number
+  /** Uploaded value less the shipping fee. */
+  payable?: number
+  /** Set when the goods were booked as still on the way, not onto the shelf. */
+  onTheWay?: boolean
+  lotNumber?: string
   shops?: number
   shopNames?: string
 }
@@ -104,6 +111,19 @@ export type BatchUploadPayload = {
   invoiceNumber?: string
   uploadDate?: string
   amountPaid: number
+  /**
+   * The part of the uploaded value that is shipping. It stays in the value of
+   * the goods and comes off what is payable to the supplier.
+   */
+  shippingFee?: number
+  /**
+   * True when the goods have not reached the shop yet. The bill and its value
+   * are recorded and the units wait on Goods on the way; nothing can be sold
+   * until someone marks them received there.
+   */
+  onTheWay?: boolean
+  /** When the goods are expected, for a bill that is still on the way. */
+  expectedDate?: string
   notes?: string
   items: BatchUploadItem[]
 }
@@ -1045,6 +1065,7 @@ async function resolveBillProduct(
 
 function revalidateStockViews() {
   revalidatePath("/uploads")
+  revalidatePath("/incoming")
   revalidatePath("/products")
   revalidatePath("/imei")
   revalidatePath("/inventory")
@@ -1116,6 +1137,7 @@ export async function getUploadProgress() {
           totalAmount: true,
           paidAmount: true,
           returnedAmount: true,
+          shippingFee: true,
           paymentMethod: true,
           branchId: true,
           supplierId: true,
@@ -1151,7 +1173,7 @@ export async function getUploadProgress() {
         submissionValue: money(openBill.totalAmount),
         paid: isMarkedPaidOnUpload(openBill.paymentMethod),
         // Same rule as the supplier ledger: what went back to them is not owed.
-        owed: purchaseBalance(openBill.totalAmount, openBill.paidAmount, openBill.returnedAmount).owed,
+        owed: purchaseBalance(openBill).owed,
         lineCount: openBill._count.items,
         unitCount: openBill._count.imeiRecords,
       }
@@ -1173,6 +1195,131 @@ export async function getUploadProgress() {
     })),
     suppliers: suppliersForForm,
     openUploadBill,
+  }
+}
+
+export type BillSheetResult = {
+  error?: string
+  /** Lines the sheet could not give; nothing is filled in while any remain. */
+  problems?: string[]
+  /** Rows left out without stopping the rest, each saying why. */
+  notes?: string[]
+  fileName?: string
+  lines?: BatchUploadItem[]
+}
+
+/**
+ * Read a supplier's sheet into bill lines, without saving anything.
+ *
+ * The same workbook the shop already fills for opening stock: PRODUCT NAME,
+ * BRAND, QTY/IMEI/SERIAL NO, CONDITION, SPECIFICATION, UNIT COST PRICE, on
+ * the PHONES, ACCESSORIES, SCREEN and LAPTOPS tabs. The lines come back to the
+ * bill form, where staff check them, add the shipping fee and what was paid,
+ * and say whether the goods are in the shop or still on the way.
+ */
+export async function readBillWorkbook(formData: FormData): Promise<BillSheetResult> {
+  const gate = await requireUploader()
+  if ("error" in gate) return { error: gate.error }
+
+  const file = formData.get("file")
+  if (!(file instanceof File) || file.size === 0) return { error: "Choose the Excel or CSV file first." }
+  if (file.size > MAX_BYTES) return { error: "That file is too big. Use a file under 25 MB." }
+
+  let grids: Awaited<ReturnType<typeof readWorkbookGrids>>
+  try {
+    grids = await readWorkbookGrids(file)
+  } catch {
+    return { error: "We could not read that file. Save it as Excel or CSV and try again." }
+  }
+  if (grids.reduce((sum, tab) => sum + tab.grid.length, 0) > MAX_ROWS) {
+    return { error: `Use a sheet of up to ${MAX_ROWS.toLocaleString("en-NG")} rows.` }
+  }
+
+  // Read leniently so one bad row is named instead of the whole sheet being
+  // refused without saying where; a bill still needs a cost on every item,
+  // which is checked just below.
+  const plan = planOpeningStock(grids, { allowMissingPrices: true })
+  // A number written twice is counted once and said so; any other row the
+  // reader set aside would leave the bill short, so it stops the fill.
+  const repeats = plan.skipped.filter((row) => row.includes("on this workbook twice"))
+  const problems = [...plan.problems, ...plan.skipped.filter((row) => !repeats.includes(row))]
+  if (!plan.products.length && !problems.length) {
+    return {
+      error:
+        "We found no items in that sheet. Put PRODUCT NAME on the header row, with BRAND, QTY/IMEI/SERIAL NO, CONDITION, SPECIFICATION and UNIT COST PRICE beside it.",
+    }
+  }
+
+  const [brands, categories] = await Promise.all([
+    prisma.brand.findMany({ select: { id: true, name: true } }),
+    prisma.category.findMany({ select: { id: true, name: true } }),
+  ])
+  const brandIds = new Map(brands.map((row) => [row.name.trim().toLowerCase(), row.id]))
+  const categoryIds = new Map(categories.map((row) => [row.name.trim().toLowerCase(), row.id]))
+
+  const unitsByKey = new Map<string, string[]>()
+  for (const unit of plan.units) {
+    const list = unitsByKey.get(unit.productKey) ?? []
+    list.push(unit.identity.value)
+    unitsByKey.set(unit.productKey, list)
+  }
+  const qtyByKey = new Map(plan.quantities.map((row) => [row.productKey, row.quantity]))
+
+  const lines: BatchUploadItem[] = []
+  const unknownBrands = new Set<string>()
+  for (const draft of plan.products) {
+    const key = openingProductKey(draft)
+    const tracked = draft.tracking === "IMEI" || draft.tracking === "SERIAL"
+    const identities = tracked ? unitsByKey.get(key) ?? [] : []
+    const quantity = tracked ? identities.length : qtyByKey.get(key) ?? 0
+    if (quantity < 1) {
+      problems.push(
+        tracked
+          ? `${draft.name}: no ${draft.tracking === "IMEI" ? "IMEI" : "serial number"} was given for it. A bill needs the number of every unit.`
+          : `${draft.name}: how many pieces is missing.`
+      )
+      continue
+    }
+    if (!(draft.costPrice > 0)) {
+      problems.push(`${draft.name}: the unit cost price is missing. A supplier bill needs what each one cost.`)
+      continue
+    }
+    const brandId = brandIds.get(draft.brand.trim().toLowerCase())
+    if (!brandId) {
+      unknownBrands.add(draft.brand)
+      continue
+    }
+    lines.push({
+      productMode: "new",
+      productId: "",
+      productName: draft.name,
+      brandId,
+      categoryId: categoryIds.get(draft.category.trim().toLowerCase()) || "",
+      condition: draft.condition,
+      storage: normalizeStorage(draft.storage || ""),
+      costPrice: draft.costPrice,
+      minimumPrice: draft.minimumPrice,
+      sellingPrice: draft.sellingPrice,
+      quantity,
+      tracking: draft.tracking,
+      identities,
+    })
+  }
+  for (const brand of unknownBrands) {
+    problems.push(`Brand "${brand}" is not on the brand list. Add it on Phones and items, or correct the spelling on the sheet.`)
+  }
+
+  if (problems.length) {
+    return {
+      error: `${problems.length} line${problems.length === 1 ? "" : "s"} on the sheet need${problems.length === 1 ? "s" : ""} fixing. Nothing was filled in.`,
+      problems: problems.slice(0, 60),
+    }
+  }
+  if (!lines.length) return { error: "There is nothing to put on a bill in that sheet." }
+  return {
+    lines,
+    notes: repeats.slice(0, 40).map((row) => row.replace(/, so it is counted once\..*$/, ", so it is counted once.")),
+    fileName: file.name,
   }
 }
 
@@ -1388,16 +1535,60 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
     })
   }
 
+  // A bill still on the way is received one item at a time against its bill
+  // line, so each item sits on one line there. The same item typed twice is
+  // folded into one line; two costs for one item cannot be told apart later.
+  const onTheWay = payload.onTheWay === true
+  let billLines = resolvedItems
+  if (onTheWay) {
+    const merged = new Map<string, (typeof resolvedItems)[number]>()
+    for (const item of resolvedItems) {
+      const existing = merged.get(item.productId)
+      if (!existing) {
+        merged.set(item.productId, { ...item, identities: [...item.identities] })
+        continue
+      }
+      if (Math.abs(existing.costPrice - item.costPrice) > 0.005) {
+        return {
+          error: `${item.productName} is on this bill twice with two different cost prices. Goods on the way need one cost for each item. Use one cost, or put the second lot on its own bill.`,
+        }
+      }
+      existing.quantity += item.quantity
+      existing.identities.push(...item.identities)
+      existing.createdProduct = existing.createdProduct || item.createdProduct
+    }
+    billLines = [...merged.values()]
+  }
+
   // 4. Calculate Financials
   const invoiceNumber = payload.invoiceNumber || generateDocNumber("PO")
-  const totalAmount = resolvedItems.reduce((sum, item) => sum + item.quantity * item.costPrice, 0)
+  const totalAmount = billLines.reduce((sum, item) => sum + item.quantity * item.costPrice, 0)
+  const shippingFee = Math.max(0, money(payload.shippingFee))
+  if (shippingFee > totalAmount + 0.005) {
+    return {
+      error: `The shipping fee (₦${shippingFee.toLocaleString("en-NG")}) is more than everything uploaded on this bill (₦${totalAmount.toLocaleString("en-NG")}). Check the figure.`,
+    }
+  }
+  // The shipping fee is inside the uploaded value but is not the supplier's
+  // money, so the supplier is due the value less the fee.
+  const payable = Math.max(0, totalAmount - shippingFee)
   const amountPaid = Math.max(0, Number(payload.amountPaid) || 0)
-  const balanceOwed = Math.max(0, totalAmount - amountPaid)
+  if (amountPaid > payable + 0.005) {
+    return {
+      error: shippingFee > 0
+        ? `You are paying ₦${amountPaid.toLocaleString("en-NG")}, but only ₦${payable.toLocaleString("en-NG")} is payable to the supplier after the shipping fee. Lower what you are paying now.`
+        : `You are paying ₦${amountPaid.toLocaleString("en-NG")}, but this bill is only ₦${payable.toLocaleString("en-NG")}. Lower what you are paying now.`,
+    }
+  }
+  const balanceOwed = Math.max(0, payable - amountPaid)
+  const fullyPaid = payable > 0 && amountPaid >= payable - 0.005
   const uploadDate = payload.uploadDate ? new Date(payload.uploadDate) : new Date()
+  const expectedDate = onTheWay && payload.expectedDate ? new Date(payload.expectedDate) : null
+  const lotNumber = onTheWay ? generateDocNumber("IN") : null
 
   let totalPhones = 0
   let totalPieces = 0
-  const totalProductsAdded = resolvedItems.filter((i) => i.createdProduct).length
+  const totalProductsAdded = billLines.filter((i) => i.createdProduct).length
 
   const purchase = await prisma.$transaction(async (tx) => {
     // Create Purchase (PO)
@@ -1407,21 +1598,26 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
         supplierId,
         branchId: shop.id,
         userId: user.id,
-        status: "RECEIVED",
+        status: onTheWay ? "ORDERED" : "RECEIVED",
         totalAmount: totalAmount.toFixed(2),
         paidAmount: amountPaid.toFixed(2),
-        paymentMethod: amountPaid >= totalAmount ? "PAID_ON_UPLOAD" : amountPaid > 0 ? "PARTIAL_PAYMENT" : "UNPAID",
+        shippingFee: shippingFee.toFixed(2),
+        paymentMethod: fullyPaid ? "PAID_ON_UPLOAD" : amountPaid > 0 ? "PARTIAL_PAYMENT" : "UNPAID",
         source: UPLOAD_STOCK_SOURCE,
         sessionOpen: false,
-        receivedDate: uploadDate,
+        receivedDate: onTheWay ? null : uploadDate,
+        expectedDate,
         createdAt: uploadDate,
         notes: [
-          `Uploaded on Stock Upload.`,
-          amountPaid >= totalAmount
+          onTheWay ? `Uploaded on Stock Upload as goods still on the way (${lotNumber}).` : `Uploaded on Stock Upload.`,
+          fullyPaid
             ? "This bill was paid in full when the stock was loaded."
             : amountPaid > 0
               ? `Partial payment of ₦${amountPaid.toLocaleString("en-NG")} on upload. Balance: ₦${balanceOwed.toLocaleString("en-NG")}.`
               : `Unpaid invoice. Balance: ₦${balanceOwed.toLocaleString("en-NG")}.`,
+          shippingFee > 0
+            ? `Shipping fee of ₦${shippingFee.toLocaleString("en-NG")} is inside the uploaded value and was taken off what the supplier is due.`
+            : null,
           payload.notes || null,
         ]
           .filter(Boolean)
@@ -1443,35 +1639,71 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
       })
     }
 
+    // Goods still on the way wait on one carton until someone receives them.
+    const lot = onTheWay
+      ? await tx.incomingLot.create({
+          data: {
+            lotNumber: lotNumber!,
+            branchId: shop.id,
+            supplierId,
+            purchaseId: po.id,
+            userId: user.id,
+            expectedDate,
+            visible: false,
+            notes: `Uploaded on supplier bill ${invoiceNumber}`,
+          },
+        })
+      : null
+
     // Process each item
-    for (const item of resolvedItems) {
+    for (const item of billLines) {
+      const tracked = item.tracking === "IMEI" || item.tracking === "SERIAL"
       // Purchase Item
       await tx.purchaseItem.create({
         data: {
           purchaseId: po.id,
           productId: item.productId,
           quantity: item.quantity,
-          receivedQty: item.quantity,
+          receivedQty: onTheWay ? 0 : item.quantity,
           costPrice: item.costPrice.toFixed(2),
           totalAmount: (item.quantity * item.costPrice).toFixed(2),
         },
       })
 
-      // Increase Shop Inventory
-      await tx.inventory.upsert({
-        where: { productId_branchId: { productId: item.productId, branchId: shop.id } },
-        update: { quantity: { increment: item.quantity }, lastStockCheck: new Date() },
-        create: { productId: item.productId, branchId: shop.id, quantity: item.quantity, lastStockCheck: new Date() },
-      })
-      await recordMovement(tx, {
-        productId: item.productId,
-        branchId: shop.id,
-        quantity: item.quantity,
-        move: { kind: "RECEIVED", reference: invoiceNumber, userId: user.id },
-      })
+      if (lot) {
+        // Counted as coming, not as stock: the shelf and the till do not see it.
+        await tx.incomingItem.create({
+          data: {
+            lotId: lot.id,
+            productId: item.productId,
+            quantity: item.quantity,
+            expectedQuantity: item.quantity,
+            identity: tracked ? item.tracking : "NONE",
+            identifiers: tracked ? item.identities.join("\n") : null,
+          },
+        })
+        await tx.inventory.upsert({
+          where: { productId_branchId: { productId: item.productId, branchId: shop.id } },
+          update: { incomingQty: { increment: item.quantity } },
+          create: { productId: item.productId, branchId: shop.id, quantity: 0, incomingQty: item.quantity },
+        })
+      } else {
+        // Increase Shop Inventory
+        await tx.inventory.upsert({
+          where: { productId_branchId: { productId: item.productId, branchId: shop.id } },
+          update: { quantity: { increment: item.quantity }, lastStockCheck: new Date() },
+          create: { productId: item.productId, branchId: shop.id, quantity: item.quantity, lastStockCheck: new Date() },
+        })
+        await recordMovement(tx, {
+          productId: item.productId,
+          branchId: shop.id,
+          quantity: item.quantity,
+          move: { kind: "RECEIVED", reference: invoiceNumber, userId: user.id },
+        })
+      }
 
       // If IMEI / SERIAL, insert individual records
-      if (item.tracking === "IMEI" || item.tracking === "SERIAL") {
+      if (tracked) {
         totalPhones += item.identities.length
         const unitRows = item.identities.map((id) => {
           const isImei = item.tracking === "IMEI"
@@ -1483,8 +1715,9 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
             branchId: shop.id,
             supplierId,
             purchaseId: po.id,
-            status: "IN_STOCK" as const,
-            notes: `Uploaded via Stock Upload · ${invoiceNumber}`,
+            status: lot ? ("INCOMING" as const) : ("IN_STOCK" as const),
+            // Receiving finds a carton's units by its number in this note.
+            notes: lot ? `Coming on ${lot.lotNumber} · ${invoiceNumber}` : `Uploaded via Stock Upload · ${invoiceNumber}`,
           }
         })
         for (const batch of chunks(unitRows, WRITE_CHUNK)) {
@@ -1507,9 +1740,13 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
       supplier: supplierName,
       shop: shop.name,
       totalAmount,
+      shippingFee,
+      payable,
       amountPaid,
       balanceOwed,
-      itemsCount: resolvedItems.length,
+      onTheWay,
+      lotNumber,
+      itemsCount: billLines.length,
       phonesAdded: totalPhones,
       piecesAdded: totalPieces,
       action: "batch-stock-upload",
@@ -1526,7 +1763,11 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
     submissionValue: totalAmount,
     paidAmount: amountPaid,
     balanceOwed,
-    paid: amountPaid >= totalAmount,
+    shippingFee,
+    payable,
+    onTheWay,
+    lotNumber: lotNumber ?? undefined,
+    paid: fullyPaid,
     phones: totalPhones,
     pieces: totalPieces,
     products: totalProductsAdded,

@@ -81,13 +81,15 @@ async function restoreMisclassifiedSupplierBills() {
       invoiceNumber: true,
       notes: true,
       totalAmount: true,
+      shippingFee: true,
       branchId: true,
     },
   })
 
   for (const row of rows) {
     if (isTrueOpeningStockNotes(row.notes)) continue
-    const restored = paymentFromUploadNotes(row.notes, money(row.totalAmount))
+    // "Paid in full" means what was payable to the supplier, after shipping.
+    const restored = paymentFromUploadNotes(row.notes, Math.max(0, money(row.totalAmount) - money(row.shippingFee)))
     if (restored.method === OPENING_STOCK_METHOD) continue
     await prisma.purchase.update({
       where: { id: row.id },

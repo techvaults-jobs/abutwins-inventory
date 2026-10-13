@@ -637,9 +637,9 @@ export async function payPurchase(formData: FormData) {
   if (isOpeningStockPurchase(purchase)) {
     return { error: "Opening stock is the value the shop started with. It is not a bill to pay." }
   }
-  const due = purchaseBalance(purchase.totalAmount, purchase.paidAmount, purchase.returnedAmount).owed
+  const due = purchaseBalance(purchase).owed
   if (due <= 0) {
-    const surplus = purchaseBalance(purchase.totalAmount, purchase.paidAmount, purchase.returnedAmount).surplus
+    const surplus = purchaseBalance(purchase).surplus
     if (surplus > 0) {
       return { error: "This house already owes us after phones were sent back. Do not pay more on this bill." }
     }
@@ -658,9 +658,9 @@ export async function payPurchase(formData: FormData) {
         paidAmount: { increment: sent },
         paymentMethod: method,
       },
-      select: { paidAmount: true, totalAmount: true, returnedAmount: true, invoiceNumber: true },
+      select: { paidAmount: true, totalAmount: true, returnedAmount: true, shippingFee: true, invoiceNumber: true },
     })
-    const remaining = Math.max(0, money(paid.totalAmount) - money(paid.returnedAmount))
+    const remaining = purchaseBalance(paid).remaining
     if (money(paid.paidAmount) > remaining + 0.005) {
       throw new ConflictError(`${paid.invoiceNumber} was already paid while you were typing. Open it again to see what is still owed.`)
     }
@@ -691,6 +691,81 @@ export async function payPurchase(formData: FormData) {
 
   refreshOps()
   revalidatePath(`/purchases/${id}`)
+  return { success: true }
+}
+
+/**
+ * Set the shipping fee on a supplier bill already on the system.
+ *
+ * The fee is the part of the uploaded value that is not the supplier's money.
+ * It comes off what is payable to them; the goods keep their full value.
+ * Whoever loads the bill or pays suppliers may set it.
+ */
+export async function setPurchaseShippingFee(formData: FormData) {
+  const user = await requireUser()
+  if (!(await canManageFinance(user.role)) && !(await can(user.role, "action.upload"))) {
+    return { error: "You are not allowed to change the shipping fee on a supplier bill. Ask accounts." }
+  }
+  const id = String(formData.get("id") || "")
+  const raw = String(formData.get("shippingFee") ?? "").trim()
+  const fee = raw === "" ? 0 : Number(raw)
+  if (!id) return { error: "We could not find that supplier bill." }
+  if (!Number.isFinite(fee) || fee < 0) return { error: "Type the shipping fee as an amount, or leave it empty for none." }
+
+  await healOpeningStockBills()
+  const purchase = await prisma.purchase.findUnique({
+    where: { id },
+    include: { supplier: true, openingStock: true },
+  })
+  if (!purchase) return { error: "We could not find that supplier bill." }
+  if (!(await canReachBranch(user, purchase.branchId))) return { error: OTHER_SHOP }
+  if (isOpeningStockPurchase(purchase)) {
+    return { error: "Opening stock is the value the shop started with. Nothing on it is owed, so it has no shipping fee." }
+  }
+  if (purchase.status === "CANCELLED") return { error: "This bill was cancelled. It cannot be changed." }
+
+  const before = purchaseBalance(purchase)
+  const next = money(fee)
+  if (Math.abs(next - before.shipping) < 0.005) return { error: "That is already the shipping fee on this bill." }
+  if (next > before.billed + 0.005) {
+    return { error: `The shipping fee cannot be more than the uploaded value of this bill (${formatCurrency(before.billed)}).` }
+  }
+  // Never let the fee push what is payable below what has already been paid
+  // and sent back: that would turn a settled bill into money the supplier owes.
+  const most = Math.max(0, before.billed - before.sentBack - before.paid)
+  if (next > most + 0.005) {
+    return {
+      error: `${formatCurrency(before.paid)} is already paid on this bill${before.sentBack > 0 ? ` and ${formatCurrency(before.sentBack)} was sent back` : ""}. The shipping fee can be at most ${formatCurrency(most)}.`,
+    }
+  }
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.purchase.update({ where: { id }, data: { shippingFee: next.toFixed(2) } })
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "UPDATE",
+          entityType: "Purchase",
+          entityId: purchase.invoiceNumber,
+          oldValue: JSON.stringify({ shippingFee: before.shipping, payable: before.payable, owed: before.owed }),
+          newValue: JSON.stringify({
+            shippingFee: next,
+            payable: Math.max(0, before.billed - next),
+            note: `Shipping fee on ${purchase.invoiceNumber} (${purchase.supplier.name}) changed from ${formatCurrency(before.shipping)} to ${formatCurrency(next)}. The value of the goods is unchanged.`,
+          }),
+          branchId: purchase.branchId,
+        },
+      })
+    })
+  } catch (error) {
+    return { error: shopError(error, "Could not save the shipping fee.") }
+  }
+
+  refreshOps()
+  revalidatePath(`/purchases/${id}`)
+  revalidatePath("/suppliers")
+  revalidatePath(`/suppliers/${purchase.supplierId}`)
   return { success: true }
 }
 

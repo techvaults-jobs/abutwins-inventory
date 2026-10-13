@@ -2,9 +2,9 @@
 
 import { useCallback, useMemo, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
-import { PlusCircle, CheckCircle2, PackagePlus } from "lucide-react"
+import { PlusCircle, CheckCircle2, FileSpreadsheet, PackageCheck, PackagePlus, Truck } from "lucide-react"
 import { toast } from "sonner"
-import { batchUploadStock, type BatchUploadPayload, type UploadResult } from "@/app/actions/uploads"
+import { batchUploadStock, readBillWorkbook, type BatchUploadPayload, type UploadResult } from "@/app/actions/uploads"
 import { BrandBusyOverlay } from "@/components/brand-busy-overlay"
 import { preventEnterFromSubmitting } from "@/components/scan-field"
 import { Button } from "@/components/ui/button"
@@ -45,6 +45,14 @@ const SUPPLIER_BILL_PHASES = [
   "Folding any duplicate numbers into one entry",
   "Booking phones onto the shelf",
   "Adding piece counts where there is no IMEI",
+  "Saving the supplier bill and what is still owed",
+]
+
+const ON_THE_WAY_PHASES = [
+  "Checking each IMEI and serial on this bill",
+  "Folding any duplicate numbers into one entry",
+  "Recording the goods as still on the way",
+  "Keeping them off the shelf until they are received",
   "Saving the supplier bill and what is still owed",
 ]
 
@@ -122,11 +130,20 @@ export function UploadStockWizard({
 
   // Payment state
   const [amountPaid, setAmountPaid] = useState<number>(0)
+  const [shippingFee, setShippingFee] = useState<number>(0)
 
-  // Calculations
+  // Arrival state: in the shop now, or still on the way
+  const [onTheWay, setOnTheWay] = useState(false)
+  const [expectedDate, setExpectedDate] = useState("")
+
+  // Calculations. The shipping fee is inside the uploaded value but is not the
+  // supplier's money, so it comes off before working out what the supplier is due.
   const totalInvoiceValue = items.reduce((sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.costPrice) || 0), 0)
-  const balanceOwed = Math.max(0, totalInvoiceValue - amountPaid)
-  const isFullyPaid = totalInvoiceValue > 0 && amountPaid >= totalInvoiceValue
+  const shippingTooHigh = shippingFee > totalInvoiceValue + 0.005
+  const payable = Math.max(0, totalInvoiceValue - shippingFee)
+  const balanceOwed = Math.max(0, payable - amountPaid)
+  const payingTooMuch = amountPaid > payable + 0.005
+  const isFullyPaid = payable > 0 && amountPaid >= payable - 0.005
 
   // Both stay the same from one draw to the next, so a line that did not
   // change is not drawn again when another line is typed in.
@@ -137,6 +154,52 @@ export function UploadStockWizard({
   const removeLine = useCallback((key: string) => {
     setItems((prev) => (prev.length <= 1 ? prev : prev.filter((line) => line.key !== key)))
   }, [])
+
+  // Fill the bill from a supplier's Excel sheet
+  const sheetInput = useRef<HTMLInputElement>(null)
+  const [readingSheet, setReadingSheet] = useState(false)
+  const [sheetProblems, setSheetProblems] = useState<string[]>([])
+  const [sheetNotes, setSheetNotes] = useState<string[]>([])
+
+  /**
+   * Read a sheet into lines on this bill. Nothing is saved: the lines land on
+   * the form to be checked, and the bill is uploaded the usual way after.
+   */
+  async function fillFromSheet(file: File) {
+    setReadingSheet(true)
+    setSheetProblems([])
+    setSheetNotes([])
+    const data = new FormData()
+    data.set("file", file)
+    let result: Awaited<ReturnType<typeof readBillWorkbook>>
+    try {
+      result = await readBillWorkbook(data)
+    } catch {
+      setReadingSheet(false)
+      toast.error("That sheet did not reach the shop system. Check your network and try again.")
+      return
+    }
+    setReadingSheet(false)
+    if (result.error || !result.lines) {
+      setSheetProblems(result.problems ?? [])
+      toast.error(result.error ?? "We could not read that sheet.")
+      return
+    }
+    const fromSheet = result.lines.map((line) =>
+      fitIdentities({
+        ...blankLine(`line-${lineSeq.current++}`, { brandId: defaultBrandId, categoryId: defaultCategoryId }),
+        ...line,
+        categoryId: line.categoryId || defaultCategoryId,
+      })
+    )
+    // Lines already typed stay; an untouched empty line makes way for the sheet.
+    setItems((prev) => [...prev.filter((line) => line.productName?.trim()), ...fromSheet])
+    setSheetNotes(result.notes ?? [])
+    const units = fromSheet.reduce((sum, line) => sum + line.quantity, 0)
+    toast.success(
+      `${fromSheet.length} item${fromSheet.length === 1 ? "" : "s"} and ${units} unit${units === 1 ? "" : "s"} filled in from ${result.fileName}. Check them, then upload.`
+    )
+  }
 
   function addItemLine() {
     const key = `line-${lineSeq.current++}`
@@ -199,6 +262,15 @@ export function UploadStockWizard({
       }
     }
 
+    if (shippingTooHigh) {
+      toast.error(`The shipping fee is more than everything on this bill (${formatCurrency(totalInvoiceValue)}). Check the figure.`)
+      return
+    }
+    if (payingTooMuch) {
+      toast.error(`You are paying more than is payable to the supplier (${formatCurrency(payable)}). Lower what you are paying now.`)
+      return
+    }
+
     setBusy(true)
     setSoftNotes([])
     const payload: BatchUploadPayload = {
@@ -211,6 +283,9 @@ export function UploadStockWizard({
       invoiceNumber,
       uploadDate,
       amountPaid,
+      shippingFee,
+      onTheWay,
+      expectedDate: onTheWay && expectedDate ? expectedDate : undefined,
       notes: notes.trim() || undefined,
       items: items.map((line) => {
         const item: BatchUploadPayload["items"][number] & { key?: string } = { ...line }
@@ -249,9 +324,12 @@ export function UploadStockWizard({
     ].filter(Boolean)
     toast.success(
       [
-        `Stock uploaded on ${result.invoiceNumber}`,
-        result.phones ? `${result.phones} phones booked` : null,
-        result.pieces ? `${result.pieces} pieces added` : null,
+        result.onTheWay
+          ? `Booked as goods on the way on ${result.invoiceNumber}. Nothing can be sold until it is received on Goods on the way`
+          : `Stock uploaded on ${result.invoiceNumber}`,
+        result.phones ? `${result.phones} phones ${result.onTheWay ? "expected" : "booked"}` : null,
+        result.pieces ? `${result.pieces} pieces ${result.onTheWay ? "expected" : "added"}` : null,
+        result.shippingFee ? `Shipping fee ${formatCurrency(result.shippingFee)} taken off, so ${formatCurrency(result.payable ?? 0)} is payable to the supplier` : null,
         result.paid ? "Fully settled" : `Owed ${formatCurrency(result.balanceOwed ?? 0)}`,
         ...soft,
       ]
@@ -263,8 +341,13 @@ export function UploadStockWizard({
     // Reset form with new PO
     setInvoiceNumber(generateDocNumber("PO"))
     setAmountPaid(0)
+    setShippingFee(0)
+    setOnTheWay(false)
+    setExpectedDate("")
     setNotes("")
     setItems([blankLine(`line-${lineSeq.current++}`, { brandId: defaultBrandId, categoryId: defaultCategoryId })])
+    setSheetProblems([])
+    setSheetNotes([])
     router.refresh()
   }
 
@@ -280,9 +363,9 @@ export function UploadStockWizard({
     >
       <BrandBusyOverlay
         open={busy}
-        title={`Uploading new stock to ${shopLabel}`}
+        title={onTheWay ? `Booking goods on the way to ${shopLabel}` : `Uploading new stock to ${shopLabel}`}
         detail={`Booking ${unitCount} unit${unitCount === 1 ? "" : "s"} on supplier bill ${invoiceNumber}.`}
-        phases={SUPPLIER_BILL_PHASES}
+        phases={onTheWay ? ON_THE_WAY_PHASES : SUPPLIER_BILL_PHASES}
       />
       {/*
         The bill the client described: supplier at the top, the generated bill
@@ -419,6 +502,55 @@ export function UploadStockWizard({
               </label>
             </div>
           )}
+
+          {/*
+            The client asked to load a bill before the goods land, so the value
+            still expected is known. The same bill, the same lines; only where
+            the goods are differs.
+          */}
+          <div className="rounded-lg border border-border p-3">
+            <p className="eyebrow mb-2">Have these goods reached the shop?</p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => setOnTheWay(false)}
+                disabled={busy}
+                aria-pressed={!onTheWay}
+                className={`rounded-lg border p-3 text-left transition-colors ${
+                  !onTheWay ? "border-primary bg-primary/5" : "border-border hover:bg-accent"
+                }`}
+              >
+                <span className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <PackageCheck className="h-4 w-4 text-primary" /> Yes, they are in the shop
+                </span>
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  They go onto the shelf now and can be sold straight away.
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setOnTheWay(true)}
+                disabled={busy}
+                aria-pressed={onTheWay}
+                className={`rounded-lg border p-3 text-left transition-colors ${
+                  onTheWay ? "border-primary bg-primary/5" : "border-border hover:bg-accent"
+                }`}
+              >
+                <span className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                  <Truck className="h-4 w-4 text-primary" /> Not yet, they are still on the way
+                </span>
+                <span className="mt-1 block text-xs text-muted-foreground">
+                  The bill and its value are recorded. Nothing reaches the shelf or the till until it is received on Goods on the way.
+                </span>
+              </button>
+            </div>
+            {onTheWay ? (
+              <label className="mt-3 block text-sm sm:max-w-xs">
+                <span className="eyebrow mb-1 block">When they are expected (optional)</span>
+                <Input type="date" value={expectedDate} onChange={(e) => setExpectedDate(e.target.value)} disabled={busy} />
+              </label>
+            ) : null}
+          </div>
         </section>
 
         <section className="space-y-3">
@@ -432,6 +564,54 @@ export function UploadStockWizard({
             <Button type="button" size="sm" variant="outline" onClick={addItemLine} disabled={busy}>
               <PlusCircle className="mr-1.5 h-4 w-4" /> Add another item
             </Button>
+          </div>
+
+          {/*
+            The other way in: a whole bill from the supplier's sheet. It only
+            fills the lines below; saving is still the button at the bottom.
+          */}
+          <div className="rounded-lg border border-dashed border-input p-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <p className="flex items-center gap-2 text-sm font-semibold">
+                  <FileSpreadsheet className="h-4 w-4 text-primary" /> Fill this bill from an Excel sheet
+                </p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  The same sheet as opening stock: PRODUCT NAME, BRAND, QTY/IMEI/SERIAL NO, CONDITION, SPECIFICATION, UNIT COST PRICE. One row for each phone. Every row goes on this one bill.
+                </p>
+              </div>
+              <input
+                ref={sheetInput}
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0]
+                  event.target.value = ""
+                  if (file) void fillFromSheet(file)
+                }}
+              />
+              <Button type="button" size="sm" variant="outline" onClick={() => sheetInput.current?.click()} disabled={busy || readingSheet}>
+                {readingSheet ? "Reading the sheet" : "Choose the sheet"}
+              </Button>
+            </div>
+            {sheetProblems.length ? (
+              <div className="mt-3 rounded-md border border-danger/30 bg-danger-soft p-3">
+                <p className="text-sm font-semibold text-danger">Nothing was filled in. Fix these on the sheet and choose it again.</p>
+                <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto text-xs text-foreground">
+                  {sheetProblems.map((problem) => (
+                    <li key={problem}>{problem}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+            {sheetNotes.length ? (
+              <ul className="mt-3 space-y-1 text-xs text-muted-foreground">
+                {sheetNotes.map((note) => (
+                  <li key={note}>{note}</li>
+                ))}
+              </ul>
+            ) : null}
           </div>
 
           <div className="space-y-3">
@@ -472,16 +652,53 @@ export function UploadStockWizard({
             Payment
           </h3>
 
+          {/*
+            Uploaded value, less the shipping fee, is what the supplier is due.
+            Leave the shipping fee empty and the whole value is payable.
+          */}
           <div className="grid gap-3 md:grid-cols-3">
             <div className="rounded-lg border border-border p-4">
-              <p className="eyebrow">What this whole bill is worth</p>
+              <p className="eyebrow">Total uploaded value</p>
               <p className="mt-1 text-2xl font-semibold num">{formatCurrency(totalInvoiceValue)}</p>
               <p className="mt-1 text-xs text-muted-foreground">
                 From {items.length} line{items.length === 1 ? "" : "s"}, {unitCount} unit{unitCount === 1 ? "" : "s"}
               </p>
             </div>
 
-            <div className="rounded-lg border border-border p-4">
+            <div className={`rounded-lg border p-4 ${shippingTooHigh ? "border-danger/40 bg-danger-soft" : "border-border"}`}>
+              <label className="block">
+                <span className="eyebrow mb-1 block">Shipping fee (₦), if any</span>
+                <Input
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={shippingFee || ""}
+                  onChange={(e) => setShippingFee(Math.max(0, Number(e.target.value) || 0))}
+                  placeholder="0.00"
+                  disabled={busy}
+                  className="text-lg font-semibold num"
+                />
+              </label>
+              <p className="mt-2 text-xs text-muted-foreground">
+                {shippingTooHigh
+                  ? "This is more than everything on the bill. Check the figure."
+                  : "It comes off the uploaded value. Leave it empty when there is none."}
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-primary/30 bg-primary/5 p-4">
+              <p className="eyebrow">Payable to the supplier</p>
+              <p className="mt-1 text-2xl font-semibold num">{formatCurrency(payable)}</p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {shippingFee > 0
+                  ? `${formatCurrency(totalInvoiceValue)} less ${formatCurrency(shippingFee)} shipping`
+                  : "No shipping fee, so the whole uploaded value"}
+              </p>
+            </div>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className={`rounded-lg border p-4 ${payingTooMuch ? "border-danger/40 bg-danger-soft" : "border-border"}`}>
               <label className="block">
                 <span className="eyebrow mb-1 block">What you are paying now (₦)</span>
                 <Input
@@ -495,13 +712,14 @@ export function UploadStockWizard({
                   className="text-lg font-semibold num"
                 />
               </label>
-              <div className="mt-2 flex gap-3 text-xs">
-                <button type="button" onClick={() => setAmountPaid(totalInvoiceValue)} className="font-medium text-primary hover:underline">
+              <div className="mt-2 flex flex-wrap gap-3 text-xs">
+                <button type="button" onClick={() => setAmountPaid(payable)} className="font-medium text-primary hover:underline">
                   Paid in full
                 </button>
                 <button type="button" onClick={() => setAmountPaid(0)} className="font-medium text-muted-foreground hover:underline">
                   Nothing paid yet
                 </button>
+                {payingTooMuch ? <span className="text-danger">More than is payable to the supplier.</span> : null}
               </div>
             </div>
 
@@ -557,10 +775,15 @@ export function UploadStockWizard({
         <p className="text-sm text-muted-foreground">
           Ready to book <strong className="text-foreground">{unitCount}</strong> unit{unitCount === 1 ? "" : "s"} worth{" "}
           <strong className="text-foreground num">{formatCurrency(totalInvoiceValue)}</strong>
+          {onTheWay ? " as goods still on the way. They stay off the shelf until received." : null}
         </p>
         <Button type="submit" size="lg" disabled={busy || totalInvoiceValue <= 0}>
           {busy ? (
-            "Uploading this stock"
+            onTheWay ? "Booking these goods" : "Uploading this stock"
+          ) : onTheWay ? (
+            <>
+              <Truck className="mr-2 h-4 w-4" /> Book as goods on the way
+            </>
           ) : (
             <>
               <PackagePlus className="mr-2 h-4 w-4" /> Upload this stock

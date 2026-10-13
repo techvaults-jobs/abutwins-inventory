@@ -1268,7 +1268,7 @@ export async function getOpeningReport(requestedBranchId?: string) {
     date: (bill.receivedDate ?? bill.createdAt).toISOString(),
     total: money(bill.totalAmount),
     paid: money(bill.paidAmount),
-    owed: purchaseBalance(bill.totalAmount, bill.paidAmount, bill.returnedAmount).owed,
+    owed: purchaseBalance(bill).owed,
   }))
 
   // The opening shelf at cost is the CEO's to see. Everyone else still gets the

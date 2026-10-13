@@ -123,7 +123,7 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
           ...(shopId ? { branchId: shopId } : {}),
           ...payablePurchaseWhere,
         },
-        select: { totalAmount: true, paidAmount: true, returnedAmount: true, supplier: { select: { creditBalance: true, name: true, id: true } }, supplierId: true },
+        select: { totalAmount: true, paidAmount: true, returnedAmount: true, shippingFee: true, supplier: { select: { creditBalance: true, name: true, id: true } }, supplierId: true },
       }),
       prisma.inventory.findMany({
         where: shopId ? { branchId: shopId } : {},
@@ -193,6 +193,7 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
       totalAmount: row.totalAmount,
       paidAmount: row.paidAmount,
       returnedAmount: row.returnedAmount,
+      shippingFee: row.shippingFee,
     }))
   )
   const supplierOwed = supplierLedgers.reduce((sum, row) => sum + row.owed, 0)

@@ -23,6 +23,7 @@ export type SupplierBillRow = {
   totalAmount: number
   paidAmount: number
   returnedAmount?: number
+  shippingFee: number
   status: string
   createdAt: string
   branchCode: string
@@ -126,7 +127,7 @@ function buildHouses(suppliers: SupplierRow[]): House[] {
       const extraCredit = copies.reduce((sum, copy) => sum + (copy.creditBalance ?? 0), 0)
       let net = 0
       for (const bill of bills) {
-        const bal = purchaseBalance(bill.totalAmount, bill.paidAmount, bill.returnedAmount)
+        const bal = purchaseBalance(bill)
         net += bal.remaining - bal.paid
       }
       net -= extraCredit
@@ -460,7 +461,7 @@ function HouseBreakdown({ house }: { house: House }) {
         {house.bills.length ? (
           <ul className="divide-y divide-border rounded-xl border border-border">
             {house.bills.map((bill) => {
-              const bal = purchaseBalance(bill.totalAmount, bill.paidAmount, bill.returnedAmount)
+              const bal = purchaseBalance(bill)
               return (
                 <li key={bill.id} className="px-3 py-2.5 text-sm">
                   <div className="flex items-start justify-between gap-3">
@@ -480,6 +481,11 @@ function HouseBreakdown({ house }: { house: House }) {
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                     <StatusBadge value={bill.status} />
                     <span className="tabular-nums">Paid {formatCurrency(bill.paidAmount)}</span>
+                    {bal.shipping > 0 ? (
+                      <span className="tabular-nums">
+                        · Shipping fee {formatCurrency(bal.shipping)} · Payable {formatCurrency(bal.payable)}
+                      </span>
+                    ) : null}
                     {bal.sentBack > 0 ? <span className="tabular-nums">· Sent back {formatCurrency(bal.sentBack)}</span> : null}
                   </div>
                 </li>

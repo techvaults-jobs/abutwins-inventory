@@ -22,9 +22,10 @@ export default async function PurchasesPage({ searchParams }: { searchParams: Pr
   const shortVsBill = regularPurchases.reduce((sum, row) => sum + row.trace.shortVsBill, 0)
   const billed = regularPurchases.reduce((sum, row) => sum + money(row.totalAmount), 0)
   const paid = regularPurchases.reduce((sum, row) => sum + money(row.paidAmount), 0)
-  const balances = regularPurchases.map((row) => purchaseBalance(row.totalAmount, row.paidAmount, row.returnedAmount))
+  const balances = regularPurchases.map((row) => purchaseBalance(row))
   const owed = balances.reduce((sum, row) => sum + row.owed, 0)
   const sentBack = balances.reduce((sum, row) => sum + row.sentBack, 0)
+  const shipping = balances.reduce((sum, row) => sum + row.shipping, 0)
   const surplus = balances.reduce((sum, row) => sum + row.surplus, 0)
   const openingValue = openingPurchases.reduce((sum, row) => sum + money(row.totalAmount), 0)
 
@@ -103,6 +104,13 @@ export default async function PurchasesPage({ searchParams }: { searchParams: Pr
           tone={sentBack > 0 ? "warning" : "neutral"}
           href="/purchases/returns-history"
         />
+        {shipping > 0 ? (
+          <StatCard
+            label="Shipping fees"
+            value={formatCurrency(shipping)}
+            hint="Inside the value, not owed to suppliers"
+          />
+        ) : null}
         <StatCard
           label="Payment"
           value={formatCurrency(paid)}
@@ -140,7 +148,7 @@ export default async function PurchasesPage({ searchParams }: { searchParams: Pr
           search={q}
           purchases={purchases.map(
             (row): PurchaseRow => {
-              const balance = purchaseBalance(row.totalAmount, row.paidAmount, row.returnedAmount)
+              const balance = purchaseBalance(row)
               return {
                 id: row.id,
                 invoiceNumber: row.invoiceNumber,
@@ -155,6 +163,7 @@ export default async function PurchasesPage({ searchParams }: { searchParams: Pr
                 when: (row.receivedDate ?? row.createdAt).toISOString(),
                 received: Boolean(row.receivedDate),
                 total: money(row.totalAmount),
+                shipping: balance.shipping,
                 sentBack: balance.sentBack,
                 paid: money(row.paidAmount),
                 owed: balance.owed,

@@ -487,6 +487,7 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
       totalAmount: row.totalAmount,
       paidAmount: row.paidAmount,
       returnedAmount: row.returnedAmount,
+      shippingFee: row.shippingFee,
     })),
     ...creditHouses
       .filter((row) => !seenHouses.has(row.id))
@@ -497,6 +498,7 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
         totalAmount: 0,
         paidAmount: 0,
         returnedAmount: 0,
+        shippingFee: 0,
       })),
   ])
   const creditors = ledgers
@@ -1660,7 +1662,7 @@ export async function getReportData(
   ])
   const creditors = purchases
     .map((row) => {
-      const bal = purchaseBalance(row.totalAmount, row.paidAmount, row.returnedAmount)
+      const bal = purchaseBalance(row)
       return {
         id: row.id,
         invoiceNumber: row.invoiceNumber,
@@ -1679,7 +1681,7 @@ export async function getReportData(
   const supplierCredits = [
     ...purchases
       .map((row) => {
-        const bal = purchaseBalance(row.totalAmount, row.paidAmount, row.returnedAmount)
+        const bal = purchaseBalance(row)
         return {
           id: row.id,
           invoiceNumber: row.invoiceNumber,
@@ -1700,6 +1702,7 @@ export async function getReportData(
         totalAmount: 0,
         paidAmount: 0,
         returnedAmount: 0,
+        shippingFee: 0,
       }))
     )
       .filter((house) => house.extraCredit > 0 && house.surplus > 0)

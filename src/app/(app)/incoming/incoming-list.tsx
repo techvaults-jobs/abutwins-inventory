@@ -10,6 +10,7 @@ import { WorkflowSteps } from "@/components/workflow-steps"
 import { Badge } from "@/components/ui/badge"
 import { formatShopWhen, watBounds, watDayKey } from "@/lib/lagos-day"
 import { useUrlFilter } from "@/lib/use-url-filter"
+import { formatCurrency } from "@/lib/utils"
 
 type IncomingLot = {
   id: string
@@ -36,6 +37,18 @@ type IncomingLot = {
     billCost?: number | null
     product: { name: string; brand?: { name: string }; costPrice?: number }
   }>
+}
+
+/**
+ * What a carton is worth: each line at the cost on its supplier bill, or the
+ * price list cost when it has no bill. Once counted in, it is what arrived.
+ */
+function lotValue(lot: IncomingLot) {
+  return lot.items.reduce((sum, item) => {
+    const expected = item.expectedQuantity && item.expectedQuantity > 0 ? item.expectedQuantity : item.quantity
+    const count = lot.status === "ARRIVED" && item.receivedQuantity != null ? item.receivedQuantity : expected
+    return sum + count * (item.suggestedCost ?? item.catalogCost ?? 0)
+  }, 0)
 }
 
 const INCOMING_FILTERS = ["all", "COMING", "LATE", "PENDING_APPROVAL", "ARRIVED", "CANCELLED"] as const
@@ -76,10 +89,36 @@ export function IncomingList({
     return byStatus
   }, [lots, isLate])
 
+  // The value the business is still waiting for: cartons not yet in a shop.
+  const expected = useMemo(() => {
+    const waiting = lots.filter((lot) => lot.status === "COMING" || lot.status === "PENDING_APPROVAL")
+    return {
+      cartons: waiting.length,
+      units: waiting.reduce(
+        (sum, lot) =>
+          sum + lot.items.reduce((n, item) => n + (item.expectedQuantity && item.expectedQuantity > 0 ? item.expectedQuantity : item.quantity), 0),
+        0
+      ),
+      value: waiting.reduce((sum, lot) => sum + lotValue(lot), 0),
+    }
+  }, [lots])
+
   const pager = usePagedRows(filtered, status)
 
   return (
     <div className="space-y-4">
+      <div className="surface-card flex flex-wrap items-end justify-between gap-3 p-5">
+        <div>
+          <p className="eyebrow">Value still expected</p>
+          <p className="mt-1 text-2xl font-semibold num">{formatCurrency(expected.value)}</p>
+        </div>
+        <p className="text-sm text-muted-foreground">
+          {expected.cartons
+            ? `${expected.units} unit${expected.units === 1 ? "" : "s"} in ${expected.cartons} carton${expected.cartons === 1 ? "" : "s"} not yet in a shop. None of it can be sold until it is received.`
+            : "Nothing is on the way. Everything booked has been received."}
+        </p>
+      </div>
+
       <WorkflowSteps
         activeKey={status}
         onSelect={setStatus}
@@ -119,6 +158,7 @@ export function IncomingList({
                   </Badge>
                   <StatusBadge value={lot.status} />
                 </div>
+                <p className="text-sm font-semibold num">{formatCurrency(lotValue(lot))}</p>
                 <p className="text-xs font-medium tabular-nums text-muted-foreground">
                   Booked {formatShopWhen(lot.createdAt)}
                 </p>

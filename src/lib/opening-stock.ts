@@ -252,6 +252,11 @@ export function classifyOpeningIdentity(sheet: string, raw: string): OpeningIden
   return { kind: "bad", reason: "put how many pieces, or a serial if this unit has one" }
 }
 
+/** How a workbook row names its item: units and counts point at products by this. */
+export function openingProductKey(draft: OpeningProductDraft) {
+  return productKey(draft)
+}
+
 function productKey(draft: OpeningProductDraft) {
   return [
     draft.name.toLowerCase(),

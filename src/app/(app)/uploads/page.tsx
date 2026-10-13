@@ -34,7 +34,7 @@ export default async function UploadsPage() {
             This page: one by one or many
           </p>
           <p className="mt-2 text-sm text-muted-foreground">
-            Use the form below. Type the item name and pick it. Then pick condition and storage yourself. Add one phone, or several IMEIs on the same bill, then save.
+            Use the form below. Add one phone or a whole carton on the same bill: paste or scan many IMEIs at once, or fill the bill from an Excel sheet. Goods still on the way can be uploaded too, and stay off the shelf until received.
           </p>
         </div>
         <Link

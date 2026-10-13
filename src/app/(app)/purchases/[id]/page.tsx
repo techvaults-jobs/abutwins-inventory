@@ -2,10 +2,11 @@ import Link from "next/link"
 import { notFound } from "next/navigation"
 import { reverseSupplierPayment } from "@/app/actions/access"
 import { bookPurchaseAsComing } from "@/app/actions/incoming"
-import { getPurchase, payPurchase, receivePurchaseImeis } from "@/app/actions/ops"
+import { getPurchase, payPurchase, receivePurchaseImeis, setPurchaseShippingFee } from "@/app/actions/ops"
 import { ExportCsv } from "@/components/export-csv"
 import { prisma } from "@/lib/prisma"
-import { isShopOwner } from "@/lib/rbac"
+import { can } from "@/lib/permissions"
+import { canManageFinance, isShopOwner } from "@/lib/rbac"
 import { requireUser } from "@/lib/session"
 import { ActionForm } from "@/components/action-form"
 import { PageHeader, StatusBadge } from "@/components/shared"
@@ -32,7 +33,7 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
   })
   const item = purchase.items[0]
   const remaining = item ? item.quantity - item.receivedQty : 0
-  const billMoney = purchaseBalance(purchase.totalAmount, purchase.paidAmount, purchase.returnedAmount)
+  const billMoney = purchaseBalance(purchase)
   // The units on this bill that went back to the supplier, so the bill shows
   // its true value and exactly what was returned.
   const sentBackUnits = await prisma.imeiRecord.findMany({
@@ -40,6 +41,12 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
     select: { id: true, imei1: true, serialNumber: true, updatedAt: true, product: { select: { name: true } } },
     orderBy: { updatedAt: "desc" },
   })
+  const maySetShipping =
+    !isOpening && purchase.status !== "CANCELLED" && ((await canManageFinance(me.role)) || (await can(me.role, "action.upload")))
+  // A bill uploaded as still on the way waits on one carton on Goods on the
+  // way. It is received there, whole, not unit by unit from this page.
+  const waitingLot = purchase.incomingLots.find((lot) => lot.status === "COMING" || lot.status === "PENDING_APPROVAL")
+  const receivedOnGoodsOnTheWay = purchase.source === "UPLOAD_STOCK" && Boolean(waitingLot)
   const due = isOpening ? 0 : billMoney.owed
   const surplus = isOpening ? 0 : billMoney.surplus
   const step = isOpening
@@ -182,7 +189,12 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
           <p className="text-sm text-muted-foreground">Status</p>
           <StatusBadge value={purchase.status} />
           <p className="mt-3 text-sm">
-            Value {formatCurrency(money(purchase.totalAmount))}
+            {billMoney.shipping > 0 ? "Uploaded value" : "Value"} {formatCurrency(money(purchase.totalAmount))}
+            {billMoney.shipping > 0 ? (
+              <span className="block text-xs text-muted-foreground">
+                Shipping fee −{formatCurrency(billMoney.shipping)} · payable to supplier {formatCurrency(billMoney.payable)}
+              </span>
+            ) : null}
             {billMoney.sentBack > 0 ? (
               <span className="block text-xs text-warning">After send-backs {formatCurrency(billMoney.remaining)}</span>
             ) : null}
@@ -215,6 +227,7 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
           </p>
           {isOpening ? null : (
             <p className="text-xs text-muted-foreground">
+              {billMoney.shipping > 0 ? `Payable ${formatCurrency(billMoney.payable)} · ` : ""}
               Paid {formatCurrency(money(purchase.paidAmount))}
               {billMoney.sentBack > 0 ? ` · sent back ${formatCurrency(billMoney.sentBack)}` : ""}
             </p>
@@ -312,7 +325,21 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
           ) : null}
         </div>
       ) : null}
-      {purchase.status !== "RECEIVED" ? (
+      {receivedOnGoodsOnTheWay ? (
+        <div className="surface-card flex flex-wrap items-center justify-between gap-3 border-warning/30 p-5">
+          <div>
+            <h3 className="font-semibold">These goods are still on the way</h3>
+            <p className="text-sm text-muted-foreground">
+              {waitingLot?.status === "PENDING_APPROVAL"
+                ? "They have been counted and are waiting for a second yes. Nothing on this bill can be sold until then."
+                : `Nothing on this bill is on the shelf or can be sold yet. When the goods arrive, receive carton ${waitingLot?.lotNumber} and they go into the shop at once.`}
+            </p>
+          </div>
+          <Link href="/incoming" className="text-sm font-medium text-primary hover:underline">
+            Open Goods on the way
+          </Link>
+        </div>
+      ) : purchase.status !== "RECEIVED" ? (
         <div className="grid gap-4 xl:grid-cols-2">
           <div className="surface-card p-5">
             <h3 className="mb-2 font-semibold">Book as coming</h3>
@@ -423,6 +450,34 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
           No unique numbers on this bill yet. Book Coming IMEIs or confirm arrival.
         </div>
       )}
+      {maySetShipping ? (
+        <div className="surface-card p-5">
+          <h3 className="mb-2 font-semibold">Shipping fee</h3>
+          <p className="mb-4 text-sm text-muted-foreground">
+            The part of the uploaded value that is shipping. It comes off what is payable to the supplier; the goods keep
+            their value. Uploaded {formatCurrency(billMoney.billed)}, payable to the supplier{" "}
+            {formatCurrency(billMoney.payable)}. Leave it empty for none.
+          </p>
+          <ActionForm
+            action={setPurchaseShippingFee}
+            submit="Save shipping fee"
+            successMessage="Shipping fee saved. What is payable to the supplier has changed."
+            variant="outline"
+            className="grid gap-3 md:grid-cols-[1fr_auto] md:items-end"
+          >
+            <input type="hidden" name="id" value={purchase.id} />
+            <Input
+              name="shippingFee"
+              type="number"
+              min={0}
+              step="0.01"
+              defaultValue={billMoney.shipping || ""}
+              placeholder="0.00"
+              aria-label="Shipping fee"
+            />
+          </ActionForm>
+        </div>
+      ) : null}
       {isOpening ? null : due > 0 ? (
         <div className="surface-card p-5">
           <h3 className="mb-2 font-semibold">Pay supplier</h3>

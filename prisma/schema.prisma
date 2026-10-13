@@ -575,6 +575,9 @@ model Purchase {
   /// Cost of units sent back to this supplier. Cuts what we still owe, or
   /// leaves a surplus when we already paid.
   returnedAmount Decimal       @default(0)
+  /// Part of the uploaded value that is shipping, not the supplier's money.
+  /// It stays in the stock value and comes off what we owe the supplier.
+  shippingFee   Decimal        @default(0)
   paymentMethod String?
   notes         String?
   /// UPLOAD_STOCK when the bill was born on Upload stock (manual session or Excel).

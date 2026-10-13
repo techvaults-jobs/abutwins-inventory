@@ -18,9 +18,11 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
   const totalPurchased = supplier.purchases.reduce((sum, row) => sum + money(row.totalAmount), 0)
   const totalPaid = supplier.purchases.reduce((sum, row) => sum + money(row.paidAmount), 0)
   let net = 0
+  let totalShipping = 0
   for (const row of supplier.purchases) {
-    const bal = purchaseBalance(row.totalAmount, row.paidAmount, row.returnedAmount)
+    const bal = purchaseBalance(row)
     net += bal.remaining - bal.paid
+    totalShipping += bal.shipping
   }
   net -= money(supplier.creditBalance)
   const totalOwed = Math.max(0, net)
@@ -50,11 +52,19 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
           />
         ) : null}
         <StatCard
-          label="Everything they billed us"
+          label="Total uploaded value"
           value={formatCurrency(totalPurchased)}
           hint={`${supplier.purchases.length} supplier bill${supplier.purchases.length === 1 ? "" : "s"}`}
           href="#supplier-bills"
         />
+        {totalShipping > 0 ? (
+          <StatCard
+            label="Shipping fees"
+            value={formatCurrency(totalShipping)}
+            hint={`Taken off · ${formatCurrency(Math.max(0, totalPurchased - totalShipping))} payable to them`}
+            href="#supplier-bills"
+          />
+        ) : null}
         <StatCard
           label="Payment"
           value={formatCurrency(totalPaid)}
@@ -148,12 +158,14 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
           <h3 className="font-semibold">Every bill from this supplier</h3>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[760px] text-sm">
+          <table className="w-full min-w-[960px] text-sm">
             <thead className="text-left text-muted-foreground bg-muted/40 text-xs uppercase tracking-wider">
               <tr className="border-b border-border">
                 <th className="px-5 py-3">Bill number</th>
                 <th className="px-3 py-3">Shop</th>
-                <th className="px-3 py-3 text-right">Invoice value</th>
+                <th className="px-3 py-3 text-right">Uploaded value</th>
+                <th className="px-3 py-3 text-right">Shipping fee</th>
+                <th className="px-3 py-3 text-right">Payable value</th>
                 <th className="px-3 py-3 text-right">Payment</th>
                 <th className="px-3 py-3 text-right">Stock return</th>
                 <th className="px-4 py-3 text-right">Balance</th>
@@ -164,7 +176,7 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
               {supplier.purchases.map((row) => {
                 const poVal = money(row.totalAmount)
                 const poPaid = money(row.paidAmount)
-                const bal = purchaseBalance(row.totalAmount, row.paidAmount, row.returnedAmount)
+                const bal = purchaseBalance(row)
 
                 return (
                   <tr key={row.id} className="hover:bg-muted/30 transition-colors">
@@ -181,6 +193,14 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
 
                     <td className="px-3 py-3 text-right tabular-nums font-mono font-medium">
                       {formatCurrency(poVal)}
+                    </td>
+
+                    <td className="px-3 py-3 text-right tabular-nums font-mono">
+                      {bal.shipping > 0 ? `−${formatCurrency(bal.shipping)}` : <span className="text-muted-foreground">—</span>}
+                    </td>
+
+                    <td className="px-3 py-3 text-right tabular-nums font-mono font-medium">
+                      {formatCurrency(bal.payable)}
                     </td>
 
                     <td className="px-3 py-3 text-right tabular-nums font-mono font-semibold text-success">

@@ -21,6 +21,7 @@ export default async function SuppliersPage() {
       totalAmount: money(purchase.totalAmount),
       paidAmount: money(purchase.paidAmount),
       returnedAmount: money(purchase.returnedAmount),
+      shippingFee: money(purchase.shippingFee),
       status: purchase.status,
       createdAt: purchase.createdAt.toISOString(),
       branchCode: purchase.branch.code,
