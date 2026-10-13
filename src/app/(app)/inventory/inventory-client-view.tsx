@@ -203,18 +203,20 @@ export function InventoryClientView({
       header: "Item",
       sortValue: (row) => row.product.name,
       cell: (row) => (
-        <div>
-          <p className="font-medium">{row.product.name}</p>
-          {productSpecLine(row.product) ? <p className="text-xs text-muted-foreground">{productSpecLine(row.product)}</p> : null}
+        // Two lines, not four: with a hundred items the list was mostly air.
+        // The name opens the item's activity, which had its own line before.
+        <div className="max-w-[30rem]">
           <Link
             href={`/products/activity/${row.product.id}`}
             onClick={(event) => event.stopPropagation()}
-            className="text-xs font-medium text-primary hover:underline"
+            title="See this item's activity"
+            className="font-medium hover:text-primary hover:underline"
           >
-            Item activity
+            {row.product.name}
           </Link>
           <p className="text-xs text-muted-foreground">
-            {row.product.brand.name} · {formatCondition(row.product.condition)} · <span className="font-mono">{row.product.sku}</span>
+            {[row.product.brand.name, productSpecLine(row.product) || formatCondition(row.product.condition)].filter(Boolean).join(" · ")} ·{" "}
+            <span className="font-mono">{row.product.sku}</span>
           </p>
         </div>
       ),

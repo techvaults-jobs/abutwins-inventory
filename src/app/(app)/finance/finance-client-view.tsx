@@ -143,15 +143,6 @@ export function FinanceClientView({ data }: { data: FinanceData }) {
         </div>
       </Toolbar>
 
-      <OpeningMoneyPanel
-        shops={data.shops}
-        bankAccounts={data.bankAccounts}
-        canSet={data.canSetOpening}
-        canRemoveBank={data.canRemoveBank}
-        openingCash={data.openingCash}
-        openingBank={data.openingBank}
-      />
-
       <StatGrid>
         <StatCard
           // Money actually received, not invoiced: Reports' "Total sales" is invoiced.
@@ -228,6 +219,16 @@ export function FinanceClientView({ data }: { data: FinanceData }) {
           </div>
         </button>
       </div>
+
+      {/* Set-up sits under the day's figures: it is filled in once, and they are read every day. */}
+      <OpeningMoneyPanel
+        shops={data.shops}
+        bankAccounts={data.bankAccounts}
+        canSet={data.canSetOpening}
+        canRemoveBank={data.canRemoveBank}
+        openingCash={data.openingCash}
+        openingBank={data.openingBank}
+      />
 
       <div className="grid gap-4 xl:grid-cols-2">
         <TableShell

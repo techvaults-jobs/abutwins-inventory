@@ -284,7 +284,7 @@ export function SalesList({ sales }: { sales: SaleRow[] }) {
     {
       id: "ref",
       header: "Ref",
-      hideBelow: "lg",
+      hideBelow: "2xl",
       sortValue: (sale) => sale.paymentRefs[0] ?? "",
       cell: (sale) =>
         sale.paymentRefs.length ? (

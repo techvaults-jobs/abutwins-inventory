@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { ArrowDown, ArrowUp, ChevronsUpDown, ChevronRight, Inbox, Search, SearchX, X } from "lucide-react"
 import { TablePager, usePagedRows } from "@/components/table-pager"
 import { cn } from "@/lib/utils"
@@ -24,7 +24,7 @@ export type DataColumn<T> = {
   sortValue?: (row: T) => string | number
   className?: string
   /** Hide on narrower desktops so the important columns keep their room. */
-  hideBelow?: "lg" | "xl"
+  hideBelow?: "lg" | "xl" | "2xl"
 }
 
 export type DataCard = {
@@ -38,7 +38,51 @@ export type DataCard = {
 
 type Sort = { id: string; dir: "asc" | "desc" } | null
 
-const hideClass = { lg: "hidden lg:table-cell", xl: "hidden xl:table-cell" } as const
+const hideClass = { lg: "hidden lg:table-cell", xl: "hidden xl:table-cell", "2xl": "hidden 2xl:table-cell" } as const
+
+/**
+ * The desktop table, scrolling sideways when its columns do not fit. A wide
+ * table used to end at the card's edge with nothing to say more columns were
+ * there, so a status or a payment column went unseen. The edge now shades on
+ * whichever side still has columns.
+ */
+function SidewaysScroll({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [more, setMore] = useState({ left: false, right: false })
+
+  useEffect(() => {
+    const node = ref.current
+    if (!node) return
+    const measure = () => {
+      const left = node.scrollLeft > 1
+      const right = node.scrollLeft + node.clientWidth < node.scrollWidth - 1
+      setMore((prev) => (prev.left === left && prev.right === right ? prev : { left, right }))
+    }
+    measure()
+    node.addEventListener("scroll", measure, { passive: true })
+    const observer = new ResizeObserver(measure)
+    observer.observe(node)
+    if (node.firstElementChild) observer.observe(node.firstElementChild)
+    return () => {
+      node.removeEventListener("scroll", measure)
+      observer.disconnect()
+    }
+  }, [])
+
+  return (
+    <div className="relative hidden md:block">
+      <div ref={ref} className="overflow-x-auto">
+        {children}
+      </div>
+      {more.left ? <div aria-hidden className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-foreground/15 to-transparent" /> : null}
+      {more.right ? (
+        <div aria-hidden className="pointer-events-none absolute inset-y-0 right-0 flex w-12 items-start justify-end bg-gradient-to-l from-foreground/15 to-transparent pr-1 pt-2">
+          <ChevronRight className="h-4 w-4 text-foreground/70" />
+        </div>
+      ) : null}
+    </div>
+  )
+}
 
 function isInteractive(target: EventTarget | null) {
   return Boolean((target as HTMLElement | null)?.closest("a, button, input, select, textarea, label"))
@@ -187,7 +231,7 @@ export function DataTable<T>({
 
       <div className="surface-card overflow-hidden">
         {/* Desktop and tablet: a real table. */}
-        <div className="hidden overflow-x-auto md:block">
+        <SidewaysScroll>
           <table className="data-table">
             <thead>
               <tr>
@@ -279,7 +323,7 @@ export function DataTable<T>({
             </tbody>
             {footer && sorted.length ? <tfoot className="border-t-2 border-border bg-muted/40 font-semibold">{footer(sorted)}</tfoot> : null}
           </table>
-        </div>
+        </SidewaysScroll>
 
         {/* Phone: one card per row, no sideways scrolling. */}
         <ul className="divide-y divide-border md:hidden">

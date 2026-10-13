@@ -488,8 +488,9 @@ export function ReturnsList({
       header: "Customer and item",
       sortValue: (row) => row.customer.name,
       cell: (row) => (
-        <div className="min-w-0">
-          <p className="font-medium">{row.customer.name}</p>
+        // A width, so a long device line shortens here and Status keeps its place on screen.
+        <div className="max-w-[22rem] min-w-0">
+          <p className="truncate font-medium">{row.customer.name}</p>
           <p className="truncate text-xs text-muted-foreground">
             {row.imei ? deviceLabel(row.imei) : ""}
             {row.imei && itemName(row) ? " · " : ""}
