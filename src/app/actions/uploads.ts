@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma"
 import { recordMovement, setStock } from "@/lib/concurrency"
 import { requireUser } from "@/lib/session"
 import { can } from "@/lib/permissions"
+import { canChangePrices } from "@/lib/roles"
 import { readTableFile, readWorkbookGrids } from "@/lib/table-file"
 import { makeOpeningSku, openingProductKey, planOpeningStock } from "@/lib/opening-stock"
 import { planCustomers, planImeis, planStock, type CatalogItem, type ShopRef } from "@/lib/upload-plan"
@@ -1541,6 +1542,52 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
     })
   }
 
+  // Selling prices typed on the bill. A new item took them when it was made
+  // just above. An item already on the price list changes price only for the
+  // people who set prices; for anyone else the price list stays as it is and
+  // the upload says so.
+  type PriceMove = { productId: string; name: string; key: "minimumPrice" | "sellingPrice"; from: number; to: number }
+  const priceMoves: PriceMove[] = []
+  {
+    const typed = new Map<string, { name: string; minimum: number; selling: number; cost: number }>()
+    payload.items.forEach((item, index) => {
+      const resolved = resolvedItems[index]
+      if (!resolved || resolved.createdProduct) return
+      const minimum = Math.max(0, Number(item.minimumPrice) || 0)
+      const selling = Math.max(0, Number(item.sellingPrice) || 0)
+      if (minimum <= 0 && selling <= 0) return
+      typed.set(resolved.productId, { name: resolved.productName, minimum, selling, cost: resolved.costPrice })
+    })
+    if (typed.size) {
+      const current = await prisma.product.findMany({
+        where: { id: { in: [...typed.keys()] } },
+        select: { id: true, minimumPrice: true, sellingPrice: true },
+      })
+      for (const row of current) {
+        const want = typed.get(row.id)!
+        const nextMinimum = want.minimum > 0 ? want.minimum : money(row.minimumPrice)
+        const nextSelling = want.selling > 0 ? want.selling : money(row.sellingPrice)
+        const minimumMoved = Math.abs(nextMinimum - money(row.minimumPrice)) > 0.005
+        const sellingMoved = Math.abs(nextSelling - money(row.sellingPrice)) > 0.005
+        if (!minimumMoved && !sellingMoved) continue
+        if (nextSelling + 0.005 < nextMinimum) {
+          return {
+            error: `${want.name}: the selling price (₦${nextSelling.toLocaleString("en-NG")}) is below the lowest selling price (₦${nextMinimum.toLocaleString("en-NG")}). Raise the selling price or lower the lowest.`,
+          }
+        }
+        if (minimumMoved) priceMoves.push({ productId: row.id, name: want.name, key: "minimumPrice", from: money(row.minimumPrice), to: nextMinimum })
+        if (sellingMoved) priceMoves.push({ productId: row.id, name: want.name, key: "sellingPrice", from: money(row.sellingPrice), to: nextSelling })
+      }
+    }
+  }
+  const maySetPrices = canChangePrices(user.role)
+  if (priceMoves.length && !maySetPrices) {
+    const names = [...new Set(priceMoves.map((row) => row.name))]
+    softNotes.push(
+      `The selling prices typed for ${names.slice(0, 4).join(", ")}${names.length > 4 ? ` and ${names.length - 4} more` : ""} were not changed, because ${names.length === 1 ? "it is" : "they are"} already on the price list. Only the CEO, the main admin or a branch manager changes a price there. Everything else on the bill was saved.`
+    )
+  }
+
   // A bill still on the way is received one item at a time against its bill
   // line, so each item sits on one line there. The same item typed twice is
   // folded into one line; two costs for one item cannot be told apart later.
@@ -1663,6 +1710,23 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
       })
     }
 
+    // Prices a price setter typed for items already on the price list.
+    if (maySetPrices) {
+      for (const move of priceMoves) {
+        await tx.product.update({ where: { id: move.productId }, data: { [move.key]: move.to.toFixed(2) } })
+        await tx.priceHistory.create({
+          data: {
+            productId: move.productId,
+            oldPrice: move.from.toFixed(2),
+            newPrice: move.to.toFixed(2),
+            priceType: move.key === "minimumPrice" ? "MINIMUM_PRICE" : "SELLING_PRICE",
+            reason: `Set on supplier bill ${invoiceNumber}`,
+            changedBy: user.id,
+          },
+        })
+      }
+    }
+
     // Goods still on the way wait on one carton until someone receives them.
     const lot = onTheWay
       ? await tx.incomingLot.create({
@@ -1769,6 +1833,7 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
       amountPaid,
       balanceOwed,
       paidFrom: payChannel && !("error" in payChannel) ? payChannel.from : null,
+      pricesSet: maySetPrices ? priceMoves.map((row) => ({ item: row.name, price: row.key, from: row.from, to: row.to })) : [],
       onTheWay,
       lotNumber,
       itemsCount: billLines.length,

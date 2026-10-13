@@ -23,7 +23,7 @@ type IncomingLot = {
   updatedAt: Date
   branch: { name: string }
   supplier: { name: string } | null
-  purchase: { invoiceNumber: string } | null
+  purchase: { invoiceNumber: string; shippingFee?: number; totalAmount?: number } | null
   items: Array<{
     id: string
     productId: string
@@ -35,7 +35,7 @@ type IncomingLot = {
     suggestedCost?: number
     catalogCost?: number
     billCost?: number | null
-    product: { name: string; brand?: { name: string }; costPrice?: number }
+    product: { name: string; brand?: { name: string }; costPrice?: number; sellingPrice?: number }
   }>
 }
 
@@ -171,7 +171,13 @@ export function IncomingList({
                 const short = received != null ? expected - received : 0
                 return (
                   <li key={item.id} className="flex items-center justify-between gap-3">
-                    <span className="min-w-0">{item.product.name}</span>
+                    <span className="min-w-0">
+                      {item.product.name}
+                      <span className="block text-xs text-muted-foreground">
+                        Cost {formatCurrency(item.suggestedCost ?? item.catalogCost ?? 0)} each
+                        {item.product.sellingPrice ? ` · sells for ${formatCurrency(item.product.sellingPrice)}` : ""}
+                      </span>
+                    </span>
                     <span className="shrink-0 text-xs text-muted-foreground">
                       {received != null ? (
                         <>
@@ -194,6 +200,13 @@ export function IncomingList({
                 )
               })}
             </ul>
+            {lot.purchase?.shippingFee ? (
+              <p className="mt-2 text-xs text-muted-foreground">
+                Shipping fee {formatCurrency(lot.purchase.shippingFee)} is inside the bill of{" "}
+                {formatCurrency(lot.purchase.totalAmount ?? 0)}, so{" "}
+                {formatCurrency(Math.max(0, (lot.purchase.totalAmount ?? 0) - lot.purchase.shippingFee))} is payable to the supplier.
+              </p>
+            ) : null}
             {lot.status === "PENDING_APPROVAL" ? (
               <p className="mt-2 rounded-md border border-warning/30 bg-warning-soft px-3 py-2 text-xs text-warning">
                 Counted. Waiting for yes on Needs approval before Shop stock rises.

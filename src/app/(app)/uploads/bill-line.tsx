@@ -361,6 +361,23 @@ export const BillLine = memo(function BillLine({
             className="num"
           />
         </label>
+
+        <label className="block text-sm sm:col-span-3">
+          <span className="eyebrow mb-1 block">Selling price (₦)</span>
+          <Input
+            type="number"
+            min={0}
+            step="0.01"
+            value={line.sellingPrice || ""}
+            onChange={(e) => patch({ sellingPrice: Number(e.target.value) || 0 })}
+            disabled={busy}
+            className="num"
+          />
+        </label>
+
+        <p className="self-end pb-2 text-xs text-muted-foreground sm:col-span-6">
+          What the item will sell for once it is in the shop. Leave both empty to keep the prices already on the price list.
+        </p>
       </div>
 
       <p className="flex flex-wrap justify-between gap-2 rounded-md bg-muted/60 px-3 py-1.5 text-xs text-muted-foreground">

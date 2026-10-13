@@ -65,6 +65,7 @@ export function UploadStockWizard({
   products,
   defaultInvoiceNumber,
   defaultUploadDate,
+  startOnTheWay = false,
 }: {
   shops: Shop[]
   suppliers: Supplier[]
@@ -84,6 +85,12 @@ export function UploadStockWizard({
    */
   defaultInvoiceNumber: string
   defaultUploadDate: string
+  /**
+   * Open with "still on the way" already picked. Book goods coming uses the
+   * same bill, so cost, shipping fee and selling prices go in before the
+   * goods land.
+   */
+  startOnTheWay?: boolean
 }) {
   const router = useRouter()
   const [busy, setBusy] = useState(false)
@@ -139,7 +146,7 @@ export function UploadStockWizard({
   const [payBankId, setPayBankId] = useState("")
 
   // Arrival state: in the shop now, or still on the way
-  const [onTheWay, setOnTheWay] = useState(false)
+  const [onTheWay, setOnTheWay] = useState(startOnTheWay)
   const [expectedDate, setExpectedDate] = useState("")
 
   // Calculations. The shipping fee is inside the uploaded value but is not the
@@ -355,7 +362,7 @@ export function UploadStockWizard({
     setAmountPaid(0)
     setShippingFee(0)
     setPayBankId("")
-    setOnTheWay(false)
+    setOnTheWay(startOnTheWay)
     setExpectedDate("")
     setNotes("")
     setItems([blankLine(`line-${lineSeq.current++}`, { brandId: defaultBrandId, categoryId: defaultCategoryId })])
@@ -389,9 +396,13 @@ export function UploadStockWizard({
       <header className="flex flex-wrap items-start justify-between gap-4 border-b border-border bg-muted/40 px-5 py-4">
         <div>
           <p className="eyebrow">Supplier bill</p>
-          <h2 className="text-base font-semibold tracking-tight">Put a carton of goods on the system</h2>
+          <h2 className="text-base font-semibold tracking-tight">
+            {onTheWay ? "Put goods still on the way on the system" : "Put a carton of goods on the system"}
+          </h2>
           <p className="mt-0.5 text-sm text-muted-foreground">
-            Type the product name, pick it, then fill condition and storage yourself. Scanning an IMEI only fills that box. It does not save until you press Upload this stock.
+            {onTheWay
+              ? "Fill in everything now: each item, its cost, its selling price, the shipping fee and what was paid. Nothing reaches the shelf or the till until the goods are received on Goods on the way."
+              : "Type the product name, pick it, then fill condition and storage yourself. Scanning an IMEI only fills that box. It does not save until you press Upload this stock."}
           </p>
         </div>
         <div className="rounded-lg border border-border bg-card px-4 py-2 text-right">
@@ -808,7 +819,7 @@ export function UploadStockWizard({
         <div className="border-t border-border px-5 py-3">
           <div className="rounded-lg border border-border bg-muted/40 p-3">
             <p className="text-sm font-semibold text-foreground">
-              Upload completed. Duplicates were folded into one entry, or numbers already on the system were left as they are. You can edit stock later on Phones and items or Correct and close opening stock.
+              Saved. Read these notes on what was folded into one entry or left as it was.
             </p>
             <ul className="mt-2 space-y-1">
               {softNotes.map((note) => (

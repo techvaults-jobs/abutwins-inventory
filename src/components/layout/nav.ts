@@ -197,7 +197,7 @@ export const navGroups: NavGroup[] = [
         icon: Package,
         children: [
           { name: "On the way", href: "/incoming", icon: Package, hint: "Left the supplier, not in the shop yet" },
-          { name: "Book goods coming", href: "/incoming/new", icon: PlusCircle, hint: "Scan IMEIs or type pieces still coming" },
+          { name: "Book goods coming", href: "/incoming/new", icon: PlusCircle, hint: "The full bill before the goods land: cost, selling price, shipping fee" },
         ],
       },
       {

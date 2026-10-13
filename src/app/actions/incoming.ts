@@ -62,8 +62,16 @@ export async function getIncomingLots() {
     )
     return {
       ...lot,
+      // Only what the screens read, as plain values a browser can take.
+      branch: { id: lot.branch.id, name: lot.branch.name, code: lot.branch.code },
+      supplier: lot.supplier ? { id: lot.supplier.id, name: lot.supplier.name } : null,
       purchase: lot.purchase
-        ? { id: lot.purchase.id, invoiceNumber: lot.purchase.invoiceNumber }
+        ? {
+            id: lot.purchase.id,
+            invoiceNumber: lot.purchase.invoiceNumber,
+            shippingFee: money(lot.purchase.shippingFee),
+            totalAmount: money(lot.purchase.totalAmount),
+          }
         : null,
       items: lot.items.map((item) => {
         const catalogCost = money(item.product.costPrice)
@@ -73,6 +81,9 @@ export async function getIncomingLots() {
           product: {
             ...item.product,
             costPrice: catalogCost,
+            minimumPrice: money(item.product.minimumPrice),
+            sellingPrice: money(item.product.sellingPrice),
+            marketPrice: item.product.marketPrice == null ? null : money(item.product.marketPrice),
           },
           suggestedCost: billCost != null ? billCost : catalogCost,
           catalogCost,
