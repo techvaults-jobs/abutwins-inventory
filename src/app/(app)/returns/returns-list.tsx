@@ -669,26 +669,7 @@ function ReturnDetail({
         <ApplyForm row={row} stock={stock} banks={banks} canReconfirm={canReconfirm} onDone={onDone} />
       ) : null}
       {canReconfirm && row.status === "COMPLETED" && (row.outcome === "CREDIT_NOTE" || row.outcome === "REFUND") ? (
-        <details className="rounded-xl border border-border p-3">
-          <summary className="cursor-pointer text-sm font-semibold">Correct the value of this return</summary>
-          <p className="mt-2 text-xs text-muted-foreground">
-            For a value typed wrong. What the buyer owes, or the credit we owe them, moves by the difference. A refund that
-            already paid money out cannot be changed here.
-          </p>
-          <ActionForm
-            action={correctReturnValue}
-            submit="Correct this value"
-            successMessage="Return corrected. The buyer's balance follows it."
-            size="sm"
-            variant="outline"
-            onSuccess={onDone}
-            className="mt-3 space-y-2"
-          >
-            <input type="hidden" name="id" value={row.id} />
-            <Input name="returnValue" type="number" min={0} step="0.01" defaultValue={returnValue ?? ""} aria-label="Right value of the return" required />
-            <Input name="reason" placeholder="Why it is being corrected" aria-label="Why it is being corrected" required minLength={4} />
-          </ActionForm>
-        </details>
+        <EditReturn row={row} banks={banks} returnValue={returnValue} onDone={onDone} />
       ) : null}
       {offShelf(row) ? (
         <div className="space-y-2 rounded-xl border border-warning/30 bg-warning-soft/50 p-3">
@@ -708,5 +689,91 @@ function ReturnDetail({
         </div>
       ) : null}
     </div>
+  )
+}
+
+const EDIT_REASONS = [
+  { value: "FAULTY", label: "Faulty" },
+  { value: "WARRANTY", label: "Under warranty" },
+  { value: "CUSTOMER_DISSATISFACTION", label: "Dissatisfaction / change of mind" },
+  { value: "DAMAGED", label: "Damaged" },
+  { value: "WRONG_PRODUCT", label: "Wrong product" },
+  { value: "EXCHANGE", label: "Replacement (wants another item)" },
+  { value: "SUPPLIER_RETURN", label: "Send toward supplier" },
+] as const
+
+/**
+ * The CEO's and the main admin's edit of a finished refund or credit note:
+ * what happened, the value, why it came back and the notes. A Refund where
+ * no money was handed back becomes a Credit note here.
+ */
+function EditReturn({
+  row,
+  banks,
+  returnValue,
+  onDone,
+}: {
+  row: ReturnRow
+  banks: RefundBank[]
+  returnValue: number | null
+  onDone: () => void
+}) {
+  const [outcome, setOutcome] = useState(row.outcome)
+  const toRefund = row.outcome === "CREDIT_NOTE" && outcome === "REFUND"
+  const toCredit = row.outcome === "REFUND" && outcome === "CREDIT_NOTE"
+  return (
+    <details className="rounded-xl border border-border p-3">
+      <summary className="cursor-pointer text-sm font-semibold">Edit this return</summary>
+      <p className="mt-2 text-xs text-muted-foreground">
+        Change what happened, the value, why it came back or the notes. Saved as a Refund but no money was handed back?
+        Make it a Credit note: the refund comes off the books and the buyer gets the credit to use at the till.
+      </p>
+      <ActionForm
+        action={correctReturnValue}
+        submit="Save the changes"
+        successMessage="Return edited. The buyer's balance and the books follow it."
+        size="sm"
+        variant="outline"
+        onSuccess={onDone}
+        className="mt-3 space-y-2"
+      >
+        <input type="hidden" name="id" value={row.id} />
+        <label className="block text-sm">
+          <span className="mb-1 block text-xs font-medium text-muted-foreground">What happened</span>
+          <Select name="outcome" value={outcome} onChange={(event) => setOutcome(event.target.value)}>
+            <option value="CREDIT_NOTE">Credit note (no money back; they spend it at the till)</option>
+            <option value="REFUND">Refund (money paid back to them)</option>
+          </Select>
+        </label>
+        {toCredit ? (
+          <p className="rounded-lg bg-success-soft px-3 py-2 text-xs text-success">
+            The refund comes off Money in and out, and the value becomes credit on the buyer&apos;s account.
+          </p>
+        ) : null}
+        {toRefund ? <BankPicker banks={banks} branchId={row.branchId} label="Bank the refund is paid from" required /> : null}
+        <label className="block text-sm">
+          <span className="mb-1 block text-xs font-medium text-muted-foreground">Value of the return (₦)</span>
+          <Input name="returnValue" type="number" min={0} step="0.01" defaultValue={returnValue ?? ""} required />
+        </label>
+        <label className="block text-sm">
+          <span className="mb-1 block text-xs font-medium text-muted-foreground">Why it came back</span>
+          <Select name="returnReason" defaultValue={row.reason}>
+            {EDIT_REASONS.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </Select>
+        </label>
+        <label className="block text-sm">
+          <span className="mb-1 block text-xs font-medium text-muted-foreground">Notes</span>
+          <Input name="notes" defaultValue={row.notes ?? ""} />
+        </label>
+        <label className="block text-sm">
+          <span className="mb-1 block text-xs font-medium text-muted-foreground">Why you are editing it</span>
+          <Input name="editReason" placeholder="Example: no money was refunded, the customer took credit" required minLength={4} />
+        </label>
+      </ActionForm>
+    </details>
   )
 }

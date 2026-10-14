@@ -922,51 +922,70 @@ export async function correctBillLineCost(formData: FormData) {
   return { success: true }
 }
 
+const RETURN_REASONS = ["FAULTY", "WARRANTY", "CUSTOMER_DISSATISFACTION", "DAMAGED", "SUPPLIER_RETURN", "WRONG_PRODUCT", "EXCHANGE"] as const
+
 /**
- * Correct the value of a finished return that only moved the buyer's
- * balance: a credit note, or a refund that cleared what they owed.
+ * Edit a finished return: what happened (refund or credit note), its value,
+ * why it came back and the notes. The CEO's and the main admin's fix for a
+ * return saved the wrong way.
  *
- * The CEO's and the main admin's fix for a value typed wrong. What the
- * buyer owes, or the credit we owe them, moves by the difference. A return
- * that paid money out cannot be corrected here: that money has left, and
- * changing the figure would not bring it back.
+ * The usual case: a return saved as a Refund when no money was handed back.
+ * Making it a Credit note cancels the refund in the books (the bank gets the
+ * money back on Money in and out) and gives the buyer the credit instead,
+ * spendable at the till. A credit note can become a refund too, paid from a
+ * named bank, as long as the buyer has not spent the credit. A refund that
+ * really paid money out keeps that money: its value cannot move it.
+ *
+ * Every change goes to Who did what with the old figures and the reason.
  */
 export async function correctReturnValue(formData: FormData) {
   const user = await requireUser()
   if (user.role !== "CEO" && user.role !== "SUPER_ADMIN") {
-    return { error: "Only the CEO or the main admin can correct a finished return." }
+    return { error: "Only the CEO or the main admin can edit a finished return." }
   }
   const id = String(formData.get("id") || "")
   const nextValue = money(Number(formData.get("returnValue")))
-  const reason = String(formData.get("reason") || "").trim()
+  const why = String(formData.get("editReason") ?? formData.get("reason") ?? "").trim()
   if (!id) return { error: "We could not find that return." }
   if (!Number.isFinite(nextValue) || nextValue < 0) return { error: "Type the right value of the return." }
-  if (reason.length < 4) return { error: "Say why the value is being corrected, for Who did what." }
+  if (why.length < 4) return { error: "Say why the return is being edited, for Who did what." }
 
   const record = await prisma.stockReturn.findUnique({ where: { id }, include: { customer: { select: { name: true } } } })
   if (!record) return { error: "We could not find that return." }
   if (!(await canReachBranch(user, record.branchId))) return { error: OTHER_SHOP }
-  if (record.status !== "COMPLETED") return { error: "Only a finished return can be corrected. Apply it first." }
+  if (record.status !== "COMPLETED") return { error: "Only a finished return can be edited. Apply it first." }
   if (record.outcome !== "CREDIT_NOTE" && record.outcome !== "REFUND") {
-    return { error: "Only a credit note or a refund carries a value to correct." }
+    return { error: "Only a refund or a credit note can be edited here. A repair, replacement or send-back moved a phone; ask for help with those." }
   }
+  const outcomeRaw = String(formData.get("outcome") || record.outcome)
+  if (outcomeRaw !== "CREDIT_NOTE" && outcomeRaw !== "REFUND") return { error: "Pick Refund or Credit note." }
+  const nextOutcome = outcomeRaw as "CREDIT_NOTE" | "REFUND"
+  const reasonRaw = String(formData.get("returnReason") || record.reason)
+  if (!(RETURN_REASONS as readonly string[]).includes(reasonRaw)) return { error: "Pick why it came back." }
+  const nextReason = reasonRaw as ReturnReason
+  const notesRaw = formData.get("notes")
+  const nextNotes = notesRaw == null ? record.notes : String(notesRaw).trim() || null
+
   const sale = record.saleId ? await prisma.sale.findUnique({ where: { id: record.saleId }, include: { items: true } }) : null
   if (record.saleId && !sale) return { error: "We could not find the invoice behind this return." }
 
   const oldValue = money(record.returnValue) || money(record.refundAmount)
-  if (Math.abs(oldValue - nextValue) < 0.005) return { error: "That is already the value of this return." }
+  const nothingMoves = Math.abs(oldValue - nextValue) < 0.005 && nextOutcome === record.outcome
+  if (nothingMoves && nextReason === record.reason && nextNotes === record.notes) {
+    return { error: "Nothing was changed on this return." }
+  }
   // With no invoice there is nothing to check a higher figure against.
-  if (!sale && nextValue > oldValue) {
+  if (!sale && nextValue > oldValue + 0.005) {
     return { error: "This return is not tied to an invoice, so its value can only be lowered here." }
   }
 
   // A credit note from before the till could spend it never reached the
-  // balance; correcting its value now would move only part of it.
-  if (record.outcome === "CREDIT_NOTE") {
+  // balance; editing it now would move only part of it.
+  if (record.outcome === "CREDIT_NOTE" && !nothingMoves) {
     const notCounted = await prisma.ledgerEntry.findFirst({ where: { reference: record.returnNumber, type: "CREDIT_NOTE", amount: 0 }, select: { id: true } })
     const broughtIn = await prisma.ledgerEntry.findFirst({ where: { reference: record.returnNumber, type: "ADJUSTMENT", description: { startsWith: "Credit note now counts" } }, select: { id: true } })
     if (notCounted && !broughtIn) {
-      return { error: "This credit note is from before credit notes counted in the balance. Bring the old credit notes in first, then correct it." }
+      return { error: "This credit note is from before credit notes counted in the balance. Bring the old credit notes in first, then edit it." }
     }
   }
 
@@ -978,7 +997,7 @@ export async function correctReturnValue(formData: FormData) {
       : record.imeiId
         ? sale.items.find((row) => row.imeiId === record.imeiId)
         : undefined
-  if (sale && line) {
+  if (sale && line && nextValue > oldValue + 0.005) {
     const already = await returnedSoFar(prisma, { saleId: sale.id, saleItemId: line.id, excludeReturnId: record.id })
     const cap = returnValueLimit({ sale, line, quantity: record.saleItemId ? Math.min(returnQtyOf(record), line.quantity) : 1, already })
     if (overLimit(nextValue, cap.limit)) {
@@ -986,34 +1005,122 @@ export async function correctReturnValue(formData: FormData) {
     }
   }
 
+  // What really left the bank on this return, from the books.
+  const payouts = await prisma.financeEntry.findMany({
+    where: { reference: record.returnNumber, type: "EXPENSE", amount: { gt: 0 } },
+    select: { id: true, amount: true, bankAccountId: true },
+  })
+  const paidOut = money(payouts.reduce((sum, row) => sum + money(row.amount), 0))
+
   const earlier = sale ? await earlierReturnMoney(prisma, sale.id, record.id) : { value: 0, cashOut: 0 }
   const before = refundSplit({ asked: oldValue, outcome: record.outcome, sale, earlier })
-  const after = refundSplit({ asked: nextValue, outcome: record.outcome, sale, earlier })
-  if (Math.abs(before.cashOut - after.cashOut) > 0.005) {
-    return {
-      error: `This refund paid ${formatCurrency(before.cashOut)} out to the customer. A corrected value would change money that has already left, so it cannot be done here.`,
+  const after = refundSplit({ asked: nextValue, outcome: nextOutcome, sale, earlier })
+  const creditOf = (split: typeof before, outcome: string) =>
+    outcome === "CREDIT_NOTE" ? Math.max(0, split.value - split.debtRelief) : split.creditBack
+
+  // Money that has to leave now: a credit note turned into a refund.
+  let refundBank: { id: string; label: string } | null = null
+  if (nextOutcome === "REFUND") {
+    if (record.outcome === "REFUND" && Math.abs(after.cashOut - paidOut) > 0.005) {
+      return {
+        error: `${formatCurrency(paidOut)} was paid out on this refund. A new value would change money that has already left, so it cannot be done here.`,
+      }
+    }
+    if (record.outcome === "CREDIT_NOTE" && after.cashOut > 0.005) {
+      const bankId = String(formData.get("bankAccountId") || "")
+      if (!bankId) return { error: "Pick the bank account the refund is paid from." }
+      const bank = await prisma.bankAccount.findFirst({ where: { id: bankId, isActive: true }, select: { id: true, bankName: true, accountNumber: true, branchId: true } })
+      if (!bank) return { error: "That bank account is no longer on the list. Pick another." }
+      if (!(await canReachBranch(user, bank.branchId))) return { error: OTHER_SHOP }
+      refundBank = { id: bank.id, label: `${bank.bankName} ${bank.accountNumber}` }
     }
   }
-  const creditOf = (split: typeof before) => (record.outcome === "CREDIT_NOTE" ? Math.max(0, split.value - split.debtRelief) : split.creditBack)
-  // Above zero the buyer owes more; below zero we owe them more.
-  const shift = money(before.debtRelief - after.debtRelief + creditOf(before) - creditOf(after))
+  const cancelPayout = record.outcome === "REFUND" && nextOutcome === "CREDIT_NOTE" && paidOut > 0
+  const cashNow = record.outcome === "CREDIT_NOTE" && nextOutcome === "REFUND" ? after.cashOut : 0
+  // Above zero the buyer owes more (or we owe them less); below zero, the other way.
+  const shift = money(before.debtRelief - after.debtRelief + creditOf(before, record.outcome) - creditOf(after, nextOutcome))
+
+  // Credit already spent at the till cannot also be handed back as money.
+  if (shift > 0.005 && record.outcome === "CREDIT_NOTE") {
+    const holder = await prisma.customer.findUnique({ where: { id: record.customerId }, select: { currentBalance: true } })
+    const unspent = Math.max(0, -money(holder?.currentBalance))
+    if (shift > unspent + 0.005) {
+      return {
+        error: `${record.customer.name} has only ${formatCurrency(unspent)} of credit left; the rest was spent at the till. That much cannot be taken back.`,
+      }
+    }
+  }
 
   try {
     await prisma.$transaction(async (tx) => {
       await tx.stockReturn.update({
         where: { id: record.id },
-        data: { returnValue: after.value.toFixed(2), refundAmount: after.value.toFixed(2) },
+        data: {
+          outcome: nextOutcome,
+          reason: nextReason,
+          notes: nextNotes,
+          returnValue: after.value.toFixed(2),
+          refundAmount: after.value.toFixed(2),
+        },
       })
+      if (cancelPayout) {
+        // The refund never happened: it no longer comes off the bank. The
+        // lines stay, at nothing, with why, so the trail is not lost.
+        for (const row of payouts) {
+          await tx.financeEntry.update({
+            where: { id: row.id },
+            data: { amount: "0.00", description: `Cancelled: ${record.returnNumber} was a credit note, no money was paid out. Was ${formatCurrency(money(row.amount))}` },
+          })
+        }
+        const lines = await tx.ledgerEntry.findMany({ where: { reference: record.returnNumber, type: "REFUND" }, select: { id: true, amount: true } })
+        for (const row of lines) {
+          await tx.ledgerEntry.update({
+            where: { id: row.id },
+            data: { type: "ADJUSTMENT", amount: "0.00", description: `Cancelled: no refund was paid out (was ${formatCurrency(Math.abs(money(row.amount)))}). Made a credit note instead` },
+          })
+        }
+      }
+      let balanceNow: number | null = null
       if (Math.abs(shift) > 0.005) {
         const moved = await shiftCustomerBalance(tx, record.customerId, shift)
+        balanceNow = money(moved.currentBalance)
         await tx.ledgerEntry.create({
           data: {
             customerId: record.customerId,
-            type: "ADJUSTMENT",
+            type: shift < 0 ? "CREDIT_NOTE" : "ADJUSTMENT",
             amount: shift.toFixed(2),
-            balance: money(moved.currentBalance).toFixed(2),
+            balance: balanceNow.toFixed(2),
             reference: record.returnNumber,
-            description: `Return value corrected from ${formatCurrency(oldValue)} to ${formatCurrency(after.value)}${record.outcome === "CREDIT_NOTE" ? ": credit note changed to match" : ""}`,
+            description:
+              nextOutcome === "CREDIT_NOTE" && record.outcome !== "CREDIT_NOTE"
+                ? `Return made a credit note: ${formatCurrency(-shift)} to use on a later purchase`
+                : record.outcome === "CREDIT_NOTE" && nextOutcome === "REFUND"
+                  ? `Credit note turned into a refund: ${formatCurrency(shift)} of credit taken back`
+                  : `Return edited from ${formatCurrency(oldValue)} to ${formatCurrency(after.value)}`,
+          },
+        })
+      }
+      if (cashNow > 0.005 && refundBank) {
+        await tx.financeEntry.create({
+          data: {
+            branchId: record.branchId,
+            account: "BANK",
+            type: "EXPENSE",
+            amount: cashNow.toFixed(2),
+            reference: record.returnNumber,
+            description: `Refund to ${record.customer.name} from ${refundBank.label}`,
+            bankAccountId: refundBank.id,
+          },
+        })
+        const holder = balanceNow ?? money((await tx.customer.findUnique({ where: { id: record.customerId }, select: { currentBalance: true } }))?.currentBalance)
+        await tx.ledgerEntry.create({
+          data: {
+            customerId: record.customerId,
+            type: "REFUND",
+            amount: (-cashNow).toFixed(2),
+            balance: holder.toFixed(2),
+            reference: record.returnNumber,
+            description: "Refund paid to the customer by bank. Does not change what they owe",
           },
         })
       }
@@ -1023,12 +1130,17 @@ export async function correctReturnValue(formData: FormData) {
           action: "UPDATE",
           entityType: "Return",
           entityId: record.returnNumber,
-          oldValue: JSON.stringify({ returnValue: oldValue }),
+          oldValue: JSON.stringify({ outcome: record.outcome, returnValue: oldValue, reason: record.reason, notes: record.notes, paidOut }),
           newValue: JSON.stringify({
+            outcome: nextOutcome,
             returnValue: after.value,
+            reason: nextReason,
+            notes: nextNotes,
+            refundCancelled: cancelPayout ? paidOut : null,
+            refundPaid: cashNow || null,
             balanceMoved: shift,
-            reason,
-            note: `Return ${record.returnNumber} (${record.customer.name}) corrected from ${formatCurrency(oldValue)} to ${formatCurrency(after.value)}. No money paid out changed.`,
+            why,
+            note: `Return ${record.returnNumber} (${record.customer.name}) edited by ${user.name || user.email}: ${record.outcome} ${formatCurrency(oldValue)} → ${nextOutcome} ${formatCurrency(after.value)}.`,
           }),
           branchId: record.branchId,
           risk: "HIGH",
@@ -1036,7 +1148,7 @@ export async function correctReturnValue(formData: FormData) {
       })
     })
   } catch (error) {
-    return { error: shopError(error, "Could not correct this return. Nothing was changed.") }
+    return { error: shopError(error, "Could not edit this return. Nothing was changed.") }
   }
 
   refreshOps()
