@@ -68,7 +68,7 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
               {balanceMeaning(money(customer.currentBalance))}
               {money(customer.currentBalance) < -0.005 ? ". It is a credit note they can spend at the till." : ""}
             </p>
-            <p className="text-xs text-muted-foreground">Plus means they owe us. Minus means we owe them.</p>
+            <p className="text-xs text-muted-foreground">No sign means they owe us. A minus means we owe them.</p>
             <p className="text-xs text-muted-foreground">Credit limit {formatCurrency(money(customer.creditLimit))}</p>
           </div>
           <OpeningBalanceCard

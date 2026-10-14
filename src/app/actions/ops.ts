@@ -14,7 +14,7 @@ import { prisma } from "@/lib/prisma"
 import { mayDecideTransfer, transferDeciders } from "@/lib/transfer-rights"
 import { requireUser } from "@/lib/session"
 import { writeAudit } from "@/lib/audit"
-import { canApprove, canManageFinance, canSeeAllBranches, canSendToSupplier, isShopOwner, scopedBranchId } from "@/lib/rbac"
+import { canApprove, canChangeCost, canManageFinance, canSeeAllBranches, canSendToSupplier, isShopOwner, scopedBranchId } from "@/lib/rbac"
 import { can } from "@/lib/permissions"
 import { formatCurrency, generateDocNumber, money } from "@/lib/utils"
 import { shopError } from "@/lib/shop-speak"
@@ -771,6 +771,276 @@ export async function setPurchaseShippingFee(formData: FormData) {
   revalidatePath(`/purchases/${id}`)
   revalidatePath("/suppliers")
   revalidatePath(`/suppliers/${purchase.supplierId}`)
+  return { success: true }
+}
+
+/**
+ * Correct the unit cost typed on one line of a supplier bill.
+ *
+ * Made for a cost typed with a wrong digit (₦6,533,600 for ₦653,360). The
+ * line and the bill total move to the right figure, and so does everything
+ * that copied the wrong cost: the item on the price list when it still holds
+ * it, the cost kept on sales of this line's units (so profit is right), and
+ * units of this line sent back to the supplier. Nothing paid changes; if the
+ * bill was already paid past its corrected value, the supplier owes us the
+ * difference, as with any overpaid bill. Every change goes to Who did what.
+ */
+export async function correctBillLineCost(formData: FormData) {
+  const user = await requireUser()
+  if (!canChangeCost(user.role)) {
+    return { error: "Only the CEO, the main admin or a branch manager can correct what an item cost us." }
+  }
+  const lineId = String(formData.get("lineId") || "")
+  const nextCost = money(Number(formData.get("unitCost")))
+  const reason = String(formData.get("reason") || "").trim()
+  if (!lineId) return { error: "Pick the line to correct." }
+  if (!Number.isFinite(nextCost) || nextCost < 0) return { error: "Type the right cost of one unit." }
+  if (reason.length < 4) return { error: "Say why the cost is being corrected, for Who did what." }
+
+  const line = await prisma.purchaseItem.findUnique({
+    where: { id: lineId },
+    include: { product: true, purchase: { include: { supplier: true, openingStock: true } } },
+  })
+  if (!line) return { error: "We could not find that line." }
+  const bill = line.purchase
+  if (!(await canReachBranch(user, bill.branchId))) return { error: OTHER_SHOP }
+  if (isOpeningStockPurchase(bill)) {
+    return { error: "This is opening stock. Correct its costs on Correct and close opening stock." }
+  }
+  if (bill.status === "CANCELLED") return { error: "This bill was cancelled. It cannot be changed." }
+  const oldCost = money(line.costPrice)
+  if (Math.abs(oldCost - nextCost) < 0.005) return { error: "That is already the cost on this line." }
+
+  const delta = money((nextCost - oldCost) * line.quantity)
+  const nextTotal = money(money(bill.totalAmount) + delta)
+  if (nextTotal < 0) return { error: "That would take the bill below zero. Check the figure." }
+  if (money(bill.shippingFee) > nextTotal + 0.005) {
+    return { error: `The shipping fee on this bill (${formatCurrency(money(bill.shippingFee))}) would be more than the corrected bill. Lower the shipping fee first.` }
+  }
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.purchaseItem.update({
+        where: { id: line.id },
+        data: { costPrice: nextCost.toFixed(2), totalAmount: (nextCost * line.quantity).toFixed(2) },
+      })
+
+      // Units of this line sent back to the supplier went at the old cost.
+      const sentBack = await tx.supplierReturnLine.findMany({
+        where: { purchaseId: bill.id, productId: line.productId, cost: oldCost.toFixed(2) },
+        select: { id: true, moneyEffect: true },
+      })
+      const offBill = sentBack.filter((row) => row.moneyEffect === "bill").length
+      if (sentBack.length) {
+        await tx.supplierReturnLine.updateMany({
+          where: { id: { in: sentBack.map((row) => row.id) } },
+          data: { cost: nextCost.toFixed(2) },
+        })
+      }
+      const returnedNext = Math.max(0, money(money(bill.returnedAmount) + offBill * (nextCost - oldCost)))
+      await tx.purchase.update({
+        where: { id: bill.id },
+        data: { totalAmount: nextTotal.toFixed(2), returnedAmount: returnedNext.toFixed(2) },
+      })
+
+      // The price list, only while it still holds the wrong figure.
+      let priceListFixed = false
+      if (Math.abs(money(line.product.costPrice) - oldCost) < 0.005) {
+        await tx.product.update({ where: { id: line.productId }, data: { costPrice: nextCost.toFixed(2) } })
+        await tx.priceHistory.create({
+          data: {
+            productId: line.productId,
+            oldPrice: oldCost.toFixed(2),
+            newPrice: nextCost.toFixed(2),
+            priceType: "COST_PRICE",
+            reason: `Corrected on supplier bill ${bill.invoiceNumber}: ${reason}`,
+            changedBy: user.id,
+          },
+        })
+        priceListFixed = true
+      }
+
+      // Sales of this line's units kept the wrong cost, so their profit was wrong.
+      const soldUnits = await tx.imeiRecord.findMany({
+        where: { purchaseId: bill.id, productId: line.productId, saleId: { not: null } },
+        select: { id: true },
+      })
+      const salesFixed = soldUnits.length
+        ? (
+            await tx.saleItem.updateMany({
+              where: { imeiId: { in: soldUnits.map((row) => row.id) }, costPrice: oldCost.toFixed(2) },
+              data: { costPrice: nextCost.toFixed(2) },
+            })
+          ).count
+        : 0
+
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "UPDATE",
+          entityType: "Purchase",
+          entityId: bill.invoiceNumber,
+          oldValue: JSON.stringify({ item: line.product.name, unitCost: oldCost, billTotal: money(bill.totalAmount) }),
+          newValue: JSON.stringify({
+            item: line.product.name,
+            unitCost: nextCost,
+            billTotal: nextTotal,
+            priceListFixed,
+            salesFixed,
+            sentBackFixed: sentBack.length,
+            reason,
+            note: `Cost of ${line.product.name} on ${bill.invoiceNumber} (${bill.supplier.name}) corrected from ${formatCurrency(oldCost)} to ${formatCurrency(nextCost)}. Bill now ${formatCurrency(nextTotal)}.`,
+          }),
+          branchId: bill.branchId,
+        },
+      })
+      if (priceListFixed) {
+        // A cost change on the price list is also logged as one, so the CEO is told.
+        await tx.auditLog.create({
+          data: {
+            userId: user.id,
+            action: "UPDATE",
+            entityType: "Product",
+            entityId: line.productId,
+            oldValue: JSON.stringify({ costPrice: oldCost }),
+            newValue: JSON.stringify({ costPrice: nextCost, reason, note: `Cost corrected on supplier bill ${bill.invoiceNumber}: ${line.product.name}.` }),
+            branchId: bill.branchId,
+          },
+        })
+      }
+    })
+  } catch (error) {
+    return { error: shopError(error, "Could not correct this cost. Nothing was changed.") }
+  }
+
+  refreshOps()
+  revalidatePath(`/purchases/${bill.id}`)
+  revalidatePath("/suppliers")
+  revalidatePath(`/suppliers/${bill.supplierId}`)
+  revalidatePath("/products")
+  revalidatePath("/profits")
+  return { success: true }
+}
+
+/**
+ * Correct the value of a finished return that only moved the buyer's
+ * balance: a credit note, or a refund that cleared what they owed.
+ *
+ * The CEO's and the main admin's fix for a value typed wrong. What the
+ * buyer owes, or the credit we owe them, moves by the difference. A return
+ * that paid money out cannot be corrected here: that money has left, and
+ * changing the figure would not bring it back.
+ */
+export async function correctReturnValue(formData: FormData) {
+  const user = await requireUser()
+  if (user.role !== "CEO" && user.role !== "SUPER_ADMIN") {
+    return { error: "Only the CEO or the main admin can correct a finished return." }
+  }
+  const id = String(formData.get("id") || "")
+  const nextValue = money(Number(formData.get("returnValue")))
+  const reason = String(formData.get("reason") || "").trim()
+  if (!id) return { error: "We could not find that return." }
+  if (!Number.isFinite(nextValue) || nextValue < 0) return { error: "Type the right value of the return." }
+  if (reason.length < 4) return { error: "Say why the value is being corrected, for Who did what." }
+
+  const record = await prisma.stockReturn.findUnique({ where: { id }, include: { customer: { select: { name: true } } } })
+  if (!record) return { error: "We could not find that return." }
+  if (!(await canReachBranch(user, record.branchId))) return { error: OTHER_SHOP }
+  if (record.status !== "COMPLETED") return { error: "Only a finished return can be corrected. Apply it first." }
+  if (record.outcome !== "CREDIT_NOTE" && record.outcome !== "REFUND") {
+    return { error: "Only a credit note or a refund carries a value to correct." }
+  }
+  const sale = record.saleId ? await prisma.sale.findUnique({ where: { id: record.saleId }, include: { items: true } }) : null
+  if (record.saleId && !sale) return { error: "We could not find the invoice behind this return." }
+
+  const oldValue = money(record.returnValue) || money(record.refundAmount)
+  if (Math.abs(oldValue - nextValue) < 0.005) return { error: "That is already the value of this return." }
+  // With no invoice there is nothing to check a higher figure against.
+  if (!sale && nextValue > oldValue) {
+    return { error: "This return is not tied to an invoice, so its value can only be lowered here." }
+  }
+
+  // A credit note from before the till could spend it never reached the
+  // balance; correcting its value now would move only part of it.
+  if (record.outcome === "CREDIT_NOTE") {
+    const notCounted = await prisma.ledgerEntry.findFirst({ where: { reference: record.returnNumber, type: "CREDIT_NOTE", amount: 0 }, select: { id: true } })
+    const broughtIn = await prisma.ledgerEntry.findFirst({ where: { reference: record.returnNumber, type: "ADJUSTMENT", description: { startsWith: "Credit note now counts" } }, select: { id: true } })
+    if (notCounted && !broughtIn) {
+      return { error: "This credit note is from before credit notes counted in the balance. Bring the old credit notes in first, then correct it." }
+    }
+  }
+
+  // Never more than the returned pieces sold for, less other returns.
+  const line = !sale
+    ? undefined
+    : record.saleItemId
+      ? sale.items.find((row) => row.id === record.saleItemId)
+      : record.imeiId
+        ? sale.items.find((row) => row.imeiId === record.imeiId)
+        : undefined
+  if (sale && line) {
+    const already = await returnedSoFar(prisma, { saleId: sale.id, saleItemId: line.id, excludeReturnId: record.id })
+    const cap = returnValueLimit({ sale, line, quantity: record.saleItemId ? Math.min(returnQtyOf(record), line.quantity) : 1, already })
+    if (overLimit(nextValue, cap.limit)) {
+      return { error: `The most this return can be worth is ${formatCurrency(cap.limit)}: what it sold for, less other returns on the invoice.` }
+    }
+  }
+
+  const earlier = sale ? await earlierReturnMoney(prisma, sale.id, record.id) : { value: 0, cashOut: 0 }
+  const before = refundSplit({ asked: oldValue, outcome: record.outcome, sale, earlier })
+  const after = refundSplit({ asked: nextValue, outcome: record.outcome, sale, earlier })
+  if (Math.abs(before.cashOut - after.cashOut) > 0.005) {
+    return {
+      error: `This refund paid ${formatCurrency(before.cashOut)} out to the customer. A corrected value would change money that has already left, so it cannot be done here.`,
+    }
+  }
+  const creditOf = (split: typeof before) => (record.outcome === "CREDIT_NOTE" ? Math.max(0, split.value - split.debtRelief) : split.creditBack)
+  // Above zero the buyer owes more; below zero we owe them more.
+  const shift = money(before.debtRelief - after.debtRelief + creditOf(before) - creditOf(after))
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.stockReturn.update({
+        where: { id: record.id },
+        data: { returnValue: after.value.toFixed(2), refundAmount: after.value.toFixed(2) },
+      })
+      if (Math.abs(shift) > 0.005) {
+        const moved = await shiftCustomerBalance(tx, record.customerId, shift)
+        await tx.ledgerEntry.create({
+          data: {
+            customerId: record.customerId,
+            type: "ADJUSTMENT",
+            amount: shift.toFixed(2),
+            balance: money(moved.currentBalance).toFixed(2),
+            reference: record.returnNumber,
+            description: `Return value corrected from ${formatCurrency(oldValue)} to ${formatCurrency(after.value)}${record.outcome === "CREDIT_NOTE" ? ": credit note changed to match" : ""}`,
+          },
+        })
+      }
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "UPDATE",
+          entityType: "Return",
+          entityId: record.returnNumber,
+          oldValue: JSON.stringify({ returnValue: oldValue }),
+          newValue: JSON.stringify({
+            returnValue: after.value,
+            balanceMoved: shift,
+            reason,
+            note: `Return ${record.returnNumber} (${record.customer.name}) corrected from ${formatCurrency(oldValue)} to ${formatCurrency(after.value)}. No money paid out changed.`,
+          }),
+          branchId: record.branchId,
+          risk: "HIGH",
+        },
+      })
+    })
+  } catch (error) {
+    return { error: shopError(error, "Could not correct this return. Nothing was changed.") }
+  }
+
+  refreshOps()
+  revalidatePath(`/customers/${record.customerId}`)
   return { success: true }
 }
 

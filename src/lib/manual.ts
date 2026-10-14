@@ -311,7 +311,7 @@ const PAGES: Array<
     doThis: [
       "Add a person with a full name, a phone, and the shop.",
       "If they already owe Abu Twins, type Opening balance they owe us. Leave it at zero if they start clean.",
-      "READING THE BALANCE: plus means they owe us, minus means we owe them. A minus balance is a credit note from a return. Suppliers read the same way: minus, we owe the supplier; plus, the supplier owes us.",
+      "READING THE BALANCE: a figure with no sign means they owe us. A minus means we owe them: for a customer it is a credit note from a return. Suppliers read the same way.",
       "For a customer already on the list, open their page and use Add or Change on Opening balance. Type the right figure and why. The difference goes on their account as its own line, so the old figure stays in the history. The CEO, the main admin, the Accountant and the Auditor can do this.",
       "Tap Still owing to see who to call for payment.",
       "Open a customer to see what they still owe and their invoices.",
@@ -327,7 +327,7 @@ const PAGES: Array<
     title: "Suppliers",
     what: "People and firms Abu Twins buys cartons from. Keep the country and city so expected goods have an origin. When you add a house Abu Twins already owed before this software, type Opening balance we still owe and pick the shop. Neighboring dealers you fill from can be marked Neighboring shop. Click a box at the top to see the houses behind that number. Click a house to drop down its bills. Invoice value, Payment, and Stock return sit on each bill. Balance shows + value owing when they owe Abu Twins, or - value owing when Abu Twins still owes them.",
     doThis: [
-      "Click a box at the top to see the houses that make that number. Value owing with a minus shows houses we have not paid. Value owing with a plus shows houses with a surplus after stock return.",
+      "Click a box at the top to see the houses that make that number. Value owing with a minus shows houses we have not paid. Value owing with no sign shows houses that owe us after stock return.",
       "Click a house name to drop down its bills, with invoice value, payment, stock return, and the balance. Copies of the same name sit under that one house.",
       "Add a supplier with a name, a phone, and where they ship from. If we already owed them, type Opening balance we still owe for the shop.",
       "If the house is already on the list, pick that name. Do not type it again.",

@@ -18,7 +18,7 @@ import { shopPayChannel } from "@/lib/sale-money"
 import { belowCost, blindTillPrices, discountOff, sellFloor, type PriceBasis } from "@/lib/pricing"
 import { readPriceApproval } from "@/lib/price-approval"
 import { dueAfterReturns, returnedValueBySale } from "@/lib/returned-value"
-import { isWatDayKey, watBounds } from "@/lib/lagos-day"
+import { isWatDayKey, watBounds, watDayKey } from "@/lib/lagos-day"
 
 /** Bank tenders before cash, so trimming an over-typed payment comes off the cash (the change). */
 function bankFirst<T extends { method: string }>(tenders: T[]) {
@@ -1700,4 +1700,175 @@ export async function getReceiptsForRange(from: string, to: string) {
       notes: sale.notes,
     })),
   }
+}
+
+/**
+ * Correct the price typed on one line of a finished sale.
+ *
+ * Invoices are not rewritten by staff. This is the CEO's and the main admin's
+ * correction for a price typed wrong, with the reason kept and the old figure
+ * in Who did what. The invoice total and the buyer's balance follow:
+ * whatever the sale now comes to, less what was paid, is what they owe. A
+ * correction cannot leave a sale paid past its total: money handed back goes
+ * through a return, where it is counted out properly.
+ *
+ * `moneyTypedWrong` is for when the money taken was typed with the same slip:
+ * the one payment on the sale is brought to the corrected total. It is only
+ * allowed while that day has not been closed.
+ */
+export async function correctSaleLinePrice(formData: FormData) {
+  const user = await requireUser()
+  if (user.role !== "CEO" && user.role !== "SUPER_ADMIN") {
+    return { error: "Only the CEO or the main admin can correct a finished sale." }
+  }
+  const saleItemId = String(formData.get("saleItemId") || "")
+  const nextPrice = money(Number(formData.get("unitPrice")))
+  const reason = String(formData.get("reason") || "").trim()
+  const moneyTypedWrong = String(formData.get("moneyTypedWrong") || "") === "on"
+  if (!saleItemId) return { error: "Pick the line to correct." }
+  if (!Number.isFinite(nextPrice) || nextPrice < 0) return { error: "Type the right price for one unit." }
+  if (reason.length < 4) return { error: "Say why the price is being corrected, for Who did what." }
+
+  const line = await prisma.saleItem.findUnique({
+    where: { id: saleItemId },
+    include: {
+      product: { select: { name: true } },
+      sale: { include: { items: true, payments: true, customer: { select: { id: true, name: true } } } },
+    },
+  })
+  if (!line) return { error: "We could not find that line." }
+  const sale = line.sale
+  if (!(await canReachBranch(user, sale.branchId))) return { error: OTHER_SHOP }
+  if (sale.status !== "COMPLETED") return { error: "Only a finished sale can be corrected." }
+  const oldPrice = money(line.unitPrice)
+  if (Math.abs(oldPrice - nextPrice) < 0.005) return { error: "That is already the price on this line." }
+  const returns = await prisma.stockReturn.count({ where: { saleId: sale.id, status: { not: "REJECTED" } } })
+  if (returns) {
+    return { error: "Something on this sale has been returned, and the return was valued from these prices. Correct the return first, or ask for help." }
+  }
+
+  const delta = money((nextPrice - oldPrice) * line.quantity)
+  const subtotal = money(money(sale.subtotal) + delta)
+  const discount = money(sale.discount)
+  if (discount > subtotal + 0.005) return { error: "The order discount on this sale would be more than the corrected sale." }
+  const total = money(subtotal - discount)
+  const settled = money(sale.paidAmount)
+  const creditUsed = money(sale.creditNoteUsed)
+  const moneyIn = money(settled - creditUsed)
+
+  // When the money was typed wrong too: the one payment line comes to what
+  // the sale now asks, less any credit note used.
+  let paymentFix: { id: string; from: number; to: number; method: string } | null = null
+  if (moneyTypedWrong) {
+    if (sale.payments.length !== 1) {
+      return { error: "This sale was paid in more than one go, so its money cannot be corrected here. Correct the price only." }
+    }
+    const pay = sale.payments[0]
+    const to = Math.max(0, money(total - creditUsed))
+    if (Math.abs(to - money(pay.amount)) < 0.005) return { error: "The money on this sale already matches. Untick money typed wrong." }
+    const day = watDayKey(pay.paidAt)
+    const closed = await prisma.dayClose.findFirst({ where: { branchId: sale.branchId, businessDate: day }, select: { id: true } })
+    if (closed) {
+      return { error: `${day} was already closed with this money counted. The money cannot be changed now; correct the price only.` }
+    }
+    paymentFix = { id: pay.id, from: money(pay.amount), to, method: pay.method }
+  }
+  const nextSettled = paymentFix ? money(paymentFix.to + creditUsed) : settled
+  // The shop's walk-in name is a record too, but nobody owes on it.
+  const buyerId = sale.customer && !/walk-?in/i.test(sale.customer.name) ? sale.customerId : null
+  const overpaid = Math.max(0, money(nextSettled - total))
+  if (overpaid > 0.005) {
+    return {
+      error: `${formatCurrency(nextSettled)} was paid on this sale, more than the corrected ${formatCurrency(total)}. If the money was typed with the same slip, tick that box. If the buyer really paid it, give the ${formatCurrency(overpaid)} back through a return.`,
+    }
+  }
+  if (total > nextSettled + 0.005 && !buyerId) {
+    return {
+      error: `The corrected sale is ${formatCurrency(total)} but ${formatCurrency(nextSettled)} was paid. A walk-in cannot owe. Put the buyer's name on the sale first.`,
+    }
+  }
+  const nextPaid = Math.min(nextSettled, total)
+  const oldDue = Math.max(0, money(sale.totalAmount) - settled)
+  const newDue = Math.max(0, total - nextPaid)
+  const balanceShift = money(newDue - oldDue)
+  // Still owing is a credit sale. Settled now, it takes the name of how it was paid.
+  const channels = new Set(sale.payments.map((pay) => (pay.method === "CASH" ? "CASH" : "TRANSFER")))
+  const settledAs: PaymentMethod =
+    channels.size > 1 ? "SPLIT_PAYMENT" : channels.has("CASH") ? "CASH" : channels.size ? "TRANSFER" : creditUsed > 0 ? "CREDIT_NOTE" : sale.paymentMethod
+  const nextMethod: PaymentMethod = newDue > 0.005 ? "CREDIT" : sale.paymentMethod === "CREDIT" ? settledAs : sale.paymentMethod
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.saleItem.update({
+        where: { id: line.id },
+        data: {
+          unitPrice: nextPrice.toFixed(2),
+          totalPrice: (nextPrice * line.quantity).toFixed(2),
+          discount: discountOff(money(line.listPrice), nextPrice, line.quantity).toFixed(2),
+          priceReason: `Corrected: ${reason}`,
+        },
+      })
+      await tx.sale.update({
+        where: { id: sale.id },
+        data: {
+          subtotal: subtotal.toFixed(2),
+          totalAmount: total.toFixed(2),
+          paidAmount: nextPaid.toFixed(2),
+          paymentMethod: nextMethod,
+        },
+      })
+      if (paymentFix) {
+        await tx.payment.update({ where: { id: paymentFix.id }, data: { amount: paymentFix.to.toFixed(2) } })
+        const entry = await tx.financeEntry.findFirst({
+          where: { reference: sale.invoiceNumber, type: "INCOME", amount: paymentFix.from.toFixed(2) },
+          orderBy: { createdAt: "asc" },
+        })
+        if (entry) await tx.financeEntry.update({ where: { id: entry.id }, data: { amount: paymentFix.to.toFixed(2) } })
+      }
+      if (buyerId && Math.abs(balanceShift) > 0.005) {
+        const after = await shiftCustomerBalance(tx, buyerId, balanceShift)
+        await tx.ledgerEntry.create({
+          data: {
+            customerId: buyerId,
+            type: "ADJUSTMENT",
+            amount: balanceShift.toFixed(2),
+            balance: money(after.currentBalance).toFixed(2),
+            reference: sale.invoiceNumber,
+            description: `Price corrected on ${sale.invoiceNumber}: sale now ${formatCurrency(total)}`,
+          },
+        })
+      }
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "UPDATE",
+          entityType: "Sale",
+          entityId: sale.invoiceNumber,
+          oldValue: JSON.stringify({ item: line.product.name, unitPrice: oldPrice, total: money(sale.totalAmount), paid: settled }),
+          newValue: JSON.stringify({
+            item: line.product.name,
+            unitPrice: nextPrice,
+            total,
+            paid: nextPaid,
+            moneyCorrected: paymentFix ? { from: paymentFix.from, to: paymentFix.to, method: paymentFix.method } : null,
+            reason,
+            note: `Price of ${line.product.name} on ${sale.invoiceNumber} corrected from ${formatCurrency(oldPrice)} to ${formatCurrency(nextPrice)}. Sale now ${formatCurrency(total)}.`,
+          }),
+          branchId: sale.branchId,
+          risk: "HIGH",
+        },
+      })
+    })
+  } catch (error) {
+    return { error: error instanceof ConflictError ? error.message : "Could not correct this sale. Nothing was changed." }
+  }
+
+  revalidatePath(`/sales/${sale.id}`)
+  revalidatePath("/sales")
+  revalidatePath("/finance")
+  revalidatePath("/dashboard")
+  revalidatePath("/reports")
+  revalidatePath("/profits")
+  if (sale.customerId) revalidatePath(`/customers/${sale.customerId}`)
+  return { success: true }
 }

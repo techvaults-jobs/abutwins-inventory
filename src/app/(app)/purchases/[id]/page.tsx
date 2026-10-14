@@ -5,6 +5,9 @@ import { bookPurchaseAsComing } from "@/app/actions/incoming"
 import { getPurchase, receivePurchaseImeis, setPurchaseShippingFee } from "@/app/actions/ops"
 import { listPayingBanks } from "@/lib/supplier-pay"
 import { PaySupplierForm } from "../pay-supplier-form"
+import { CorrectLineCost } from "../correct-line-cost"
+import { canChangeCost } from "@/lib/roles"
+import { shopConditionLabel } from "@/lib/conditions"
 import { ExportCsv } from "@/components/export-csv"
 import { prisma } from "@/lib/prisma"
 import { can } from "@/lib/permissions"
@@ -223,7 +226,7 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
           <p className="text-sm text-muted-foreground">Never scanned {trace.shortVsBill}</p>
         </div>
         <div className="surface-card min-w-0 p-3 sm:p-5">
-          <p className="text-sm text-muted-foreground">{isOpening ? "Not a bill to pay" : surplus > 0 ? "Value owing (+)" : "Value owing (-)"}</p>
+          <p className="text-sm text-muted-foreground">{isOpening ? "Not a bill to pay" : surplus > 0 ? "They owe us" : "We owe them (−)"}</p>
           <p className="text-xl font-semibold text-success">
             {isOpening ? "Value only" : formatCurrency(surplus > 0 ? surplus : due)}
           </p>
@@ -452,6 +455,23 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
           No unique numbers on this bill yet. Book Coming IMEIs or confirm arrival.
         </div>
       )}
+      {lines.length && !isOpening && purchase.status !== "CANCELLED" && canChangeCost(me.role) ? (
+        <div className="surface-card p-5">
+          <h3 className="mb-2 font-semibold">Correct a cost on this bill</h3>
+          <p className="mb-4 text-sm text-muted-foreground">
+            For a cost typed wrong. The bill total, the item&apos;s cost on the price list (when it holds the same wrong
+            figure) and the profit on units already sold from this line all follow. Who did what keeps the old figure.
+          </p>
+          <CorrectLineCost
+            lines={lines.map((line) => ({
+              id: line.id,
+              label: [line.name, line.storage, shopConditionLabel(line.condition)].filter(Boolean).join(" · "),
+              quantity: line.quantity,
+              unitCost: line.unitCost,
+            }))}
+          />
+        </div>
+      ) : null}
       {maySetShipping ? (
         <div className="surface-card p-5">
           <h3 className="mb-2 font-semibold">Shipping fee</h3>

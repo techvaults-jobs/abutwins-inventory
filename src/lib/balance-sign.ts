@@ -4,7 +4,7 @@ import { formatCurrency } from "@/lib/utils"
  * One way to write an account balance, for customers and suppliers alike,
  * the way the client reads them:
  *
- *   +₦1,400,000  they owe us
+ *   ₦1,400,000   they owe us (no sign: the client asked for no plus)
  *   −₦1,400,000  we owe them (a credit note, a send-back surplus)
  *
  * `theyOweUs` is the balance seen from our side: above zero when the other
@@ -12,7 +12,7 @@ import { formatCurrency } from "@/lib/utils"
  */
 export function formatSignedBalance(theyOweUs: number) {
   const value = Math.round(theyOweUs * 100) / 100
-  if (value > 0.005) return `+${formatCurrency(value)}`
+  if (value > 0.005) return formatCurrency(value)
   if (value < -0.005) return `−${formatCurrency(-value)}`
   return formatCurrency(0)
 }

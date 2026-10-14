@@ -26,10 +26,10 @@ export function isTrueOpeningStockNotes(notes?: string | null) {
   return /opening stock/i.test(text) && /not a supplier bill/i.test(text)
 }
 
-/** +₦x when the house owes Abu Twins after stock return. */
+/** What the house owes Abu Twins after stock return. No sign: only what we owe carries a minus. */
 export function formatValueOwingPlus(amount: number) {
   const n = Math.max(0, Number(amount) || 0)
-  return n > 0 ? `+${formatCurrency(n)}` : formatCurrency(0)
+  return formatCurrency(n)
 }
 
 /** -₦x when Abu Twins still owes the house. */

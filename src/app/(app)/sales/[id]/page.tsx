@@ -23,6 +23,7 @@ import { dueAfterReturns, returnedValueBySale } from "@/lib/returned-value"
 import { prisma } from "@/lib/prisma"
 import { buildPaymentTrails } from "@/lib/payment-trail"
 import { PaymentTrail } from "@/components/payment-trail"
+import { CorrectSalePrice } from "./correct-sale-price"
 
 export default async function SaleDetailPage({
   params,
@@ -136,7 +137,7 @@ export default async function SaleDetailPage({
         }
       />
       <div className="rounded-lg border border-warning/30 bg-warning-soft px-4 py-3 text-sm text-warning print:hidden">
-        This sale cannot be changed. Staff cannot edit items, IMEIs, or prices. Collect any remaining money below.
+        Staff cannot edit items, IMEIs, or prices on this sale. Collect any remaining money below. Only the CEO or the main admin can correct a price typed wrong.
       </div>
       <div className="grid gap-4 md:grid-cols-3 print:hidden">
         <div className="surface-card p-5">
@@ -239,6 +240,24 @@ export default async function SaleDetailPage({
             <Input name="name" placeholder="Full name" />
             <Input name="phone" placeholder="Phone" />
           </ActionForm>
+        </div>
+      ) : null}
+      {(me.role === "CEO" || me.role === "SUPER_ADMIN") && sale.status === "COMPLETED" ? (
+        <div className="surface-card p-5 print:hidden">
+          <h3 className="mb-2 font-semibold">Correct a price on this sale</h3>
+          <p className="mb-4 text-sm text-muted-foreground">
+            For a price typed wrong. The invoice total and the buyer&apos;s balance follow. If the money taken was typed
+            with the same slip, tick the box so it is corrected too. Who did what keeps the old figure and your reason.
+          </p>
+          <CorrectSalePrice
+            canFixMoney={sale.payments.length === 1}
+            lines={sale.items.map((item) => ({
+              id: item.id,
+              label: [item.product.name, item.imei?.imei1].filter(Boolean).join(" · "),
+              quantity: item.quantity,
+              unitPrice: money(item.unitPrice),
+            }))}
+          />
         </div>
       ) : null}
       {isShopOwner(me.role) && sale.payments.length ? (

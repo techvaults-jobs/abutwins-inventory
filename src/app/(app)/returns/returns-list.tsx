@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react"
 import Link from "next/link"
 import { Package, Smartphone } from "lucide-react"
-import { completeReturn, restockReturn } from "@/app/actions/ops"
+import { completeReturn, correctReturnValue, restockReturn } from "@/app/actions/ops"
 import { ActionForm } from "@/components/action-form"
 import { StatusBadge } from "@/components/shared"
 import { DataTable, type DataColumn } from "@/components/data-table"
@@ -667,6 +667,28 @@ function ReturnDetail({
       ) : null}
       {row.status === "APPROVED" || row.status === "PENDING" ? (
         <ApplyForm row={row} stock={stock} banks={banks} canReconfirm={canReconfirm} onDone={onDone} />
+      ) : null}
+      {canReconfirm && row.status === "COMPLETED" && (row.outcome === "CREDIT_NOTE" || row.outcome === "REFUND") ? (
+        <details className="rounded-xl border border-border p-3">
+          <summary className="cursor-pointer text-sm font-semibold">Correct the value of this return</summary>
+          <p className="mt-2 text-xs text-muted-foreground">
+            For a value typed wrong. What the buyer owes, or the credit we owe them, moves by the difference. A refund that
+            already paid money out cannot be changed here.
+          </p>
+          <ActionForm
+            action={correctReturnValue}
+            submit="Correct this value"
+            successMessage="Return corrected. The buyer's balance follows it."
+            size="sm"
+            variant="outline"
+            onSuccess={onDone}
+            className="mt-3 space-y-2"
+          >
+            <input type="hidden" name="id" value={row.id} />
+            <Input name="returnValue" type="number" min={0} step="0.01" defaultValue={returnValue ?? ""} aria-label="Right value of the return" required />
+            <Input name="reason" placeholder="Why it is being corrected" aria-label="Why it is being corrected" required minLength={4} />
+          </ActionForm>
+        </details>
       ) : null}
       {offShelf(row) ? (
         <div className="space-y-2 rounded-xl border border-warning/30 bg-warning-soft/50 p-3">
