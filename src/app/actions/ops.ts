@@ -1458,7 +1458,8 @@ async function applyReturn(user: Awaited<ReturnType<typeof requireUser>>, formDa
         })
       }
       const after = await shiftCustomerBalance(tx, record.customerId, -debtRelief)
-      const next = Math.max(0, money(after.currentBalance))
+      // A balance below zero is money we owe the buyer (a credit note).
+      const next = money(after.currentBalance)
       const invoiceRef = sale?.invoiceNumber ? ` on ${sale.invoiceNumber}` : ""
       // Each line says what really happened. A return on a sale nobody paid for
       // only clears the debt; it used to be written as a "Refund", which read as
@@ -1487,14 +1488,19 @@ async function applyReturn(user: Awaited<ReturnType<typeof requireUser>>, formDa
           },
         })
       }
-      const creditLeft = record.outcome === "CREDIT_NOTE" ? Math.max(0, asked - debtRelief) : 0
+      // A credit note gives back what is not cleared off the debt. A refund on
+      // a sale paid with a credit note gives that part back as credit too.
+      const creditLeft = record.outcome === "CREDIT_NOTE" ? Math.max(0, asked - debtRelief) : split.creditBack
       if (creditLeft > 0) {
+        // The credit note takes the balance below zero: we owe them this much,
+        // and the till offers it as a way to pay on their next purchase.
+        const credited = await shiftCustomerBalance(tx, record.customerId, -creditLeft)
         await tx.ledgerEntry.create({
           data: {
             customerId: record.customerId,
             type: "CREDIT_NOTE",
-            amount: "0.00",
-            balance: next.toFixed(2),
+            amount: (-creditLeft).toFixed(2),
+            balance: money(credited.currentBalance).toFixed(2),
             reference: record.returnNumber,
             description: `Credit note for ${formatCurrency(creditLeft)}${invoiceRef}, to use on a later purchase`,
           },

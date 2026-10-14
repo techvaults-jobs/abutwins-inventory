@@ -42,6 +42,8 @@ export type ReceiptData = {
   items: ReceiptLine[]
   total: number
   paid: number
+  /** Part of what was paid that came off the buyer's credit note. */
+  creditNoteUsed?: number
   method: string
   /** Transfer description or POS approval code for bank payments. */
   paymentReference?: string | null
@@ -144,7 +146,12 @@ export function drawReceipt(doc: jsPDF, data: ReceiptData, mark?: string) {
   const due = Math.max(0, data.total - data.paid)
   const rows: Array<[string, string, boolean]> = [
     ["Total", naira(data.total), true],
-    [`Paid (${data.method})`, naira(data.paid), false],
+    ...((data.creditNoteUsed ?? 0) > 0
+      ? ([
+          ["From credit note", naira(data.creditNoteUsed ?? 0), false],
+          [`Paid in money (${data.method})`, naira(data.paid - (data.creditNoteUsed ?? 0)), false],
+        ] as Array<[string, string, boolean]>)
+      : ([[`Paid (${data.method})`, naira(data.paid), false]] as Array<[string, string, boolean]>)),
   ]
   if (due > 0) rows.push(["Still owing", naira(due), true])
 

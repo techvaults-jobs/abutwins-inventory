@@ -119,6 +119,9 @@ export function PosClient({
   const [customerId, setCustomerId] = useState("")
   const [branchId, setBranchId] = useState(defaultBranchId || serverBranches[0]?.id || "")
   const [method, setMethod] = useState<"CASH" | "BANK" | "SPLIT" | "CREDIT">("CASH")
+  // Use the buyer's credit note on this sale. On by default whenever the
+  // picked buyer has one; the cashier can turn it off.
+  const [useCreditNote, setUseCreditNote] = useState(true)
   // Money taken now, split between the till and the bank. Both a Split sale and
   // a Credit sale use these: the difference is whether anything is left owing.
   const [payCash, setPayCash] = useState(0)
@@ -547,16 +550,21 @@ export function PosClient({
   )
   // Cash and Bank always pay the full sale total. Credit sales keep cash and/or bank
   // received now. That stops Amount paid from lagging behind a raised price.
+  /** Money we owe the picked buyer (a balance below zero), usable as payment. */
+  const creditAvailable = customer && customer.currentBalance < 0 ? -customer.currentBalance : 0
+  const creditUse = useCreditNote ? Math.min(creditAvailable, total) : 0
+  /** What is left to pay in cash, bank or credit once the credit note is used. */
+  const toPay = Math.max(0, total - creditUse)
   /** Cash and bank typed in by hand, for a Split or a Credit sale. */
   const handReceived = Math.max(0, payCash) + Math.max(0, payBank)
   const splitsTyped = method === "SPLIT" || method === "CREDIT"
-  const effectivePaid = splitsTyped ? Math.min(handReceived, total) : total
+  const effectivePaid = splitsTyped ? Math.min(handReceived, toPay) : toPay
   /** A Split sale is paid in full, so the two boxes have to reach the total. */
-  const splitShortfall = method === "SPLIT" ? Math.max(0, total - handReceived) : 0
-  const due = Math.max(0, total - effectivePaid)
-  const nextDebt = (customer?.currentBalance ?? 0) + due
+  const splitShortfall = method === "SPLIT" ? Math.max(0, toPay - handReceived) : 0
+  const due = Math.max(0, toPay - effectivePaid)
+  const nextDebt = (customer?.currentBalance ?? 0) + creditUse + due
   const wantsBank =
-    method === "BANK" || (splitsTyped && Math.max(0, payBank) > 0)
+    toPay > 0 && (method === "BANK" || (splitsTyped && Math.max(0, payBank) > 0))
 
   useEffect(() => {
     if (!shopBanks.length) {
@@ -569,19 +577,24 @@ export function PosClient({
   }, [shopBanks, bankAccountId])
 
   useEffect(() => {
-    if (!splitsTyped) setPaid(total)
-  }, [method, total, splitsTyped])
+    if (!splitsTyped) setPaid(toPay)
+  }, [method, toPay, splitsTyped])
 
   // A price edited after the split was typed would leave the two boxes short or
   // over. The bank side absorbs the change, since the cash side is what someone
   // physically counted out.
   useEffect(() => {
     if (method !== "SPLIT") return
-    const cash = Math.min(payCash, total)
-    const bank = Math.max(0, total - cash)
+    const cash = Math.min(payCash, toPay)
+    const bank = Math.max(0, toPay - cash)
     if (cash !== payCash) setPayCash(cash)
     if (bank !== payBank) setPayBank(bank)
-  }, [method, total])
+  }, [method, toPay])
+
+  // A new buyer starts with their credit note in use, if they have one.
+  useEffect(() => {
+    setUseCreditNote(true)
+  }, [customerId])
 
   // Ticking Reseller re-quotes the basket off cost, and unticking puts the
   // standard prices back. A price typed by hand is replaced too — the tick is a
@@ -877,6 +890,10 @@ export function PosClient({
       toast.error("A credit sale needs a buyer name.")
       return
     }
+    if (creditUse > 0 && typeof navigator !== "undefined" && !navigator.onLine) {
+      toast.error("Using a credit note needs the network, so the same credit cannot be spent twice. Wait for it, or turn the credit note off.")
+      return
+    }
     if (due > 0 && !customerId) {
       toast.error("A part payment needs a buyer name. A walk-in must pay everything now.")
       return
@@ -899,7 +916,7 @@ export function PosClient({
     }
     if (method === "SPLIT" && splitShortfall > 0) {
       toast.error(
-        `Cash and bank together come to ${formatCurrency(handReceived)}, ${formatCurrency(splitShortfall)} short of ${formatCurrency(total)}. Add the rest, or use Credit sales if they are not paying it all today.`
+        `Cash and bank together come to ${formatCurrency(handReceived)}, ${formatCurrency(splitShortfall)} short of ${formatCurrency(toPay)}. Add the rest, or use Credit sales if they are not paying it all today.`
       )
       return
     }
@@ -1007,6 +1024,7 @@ export function PosClient({
       branchId,
       paymentMethod: checkoutMethod,
       paidAmount: effectivePaid,
+      creditNoteAmount: creditUse > 0 ? creditUse : undefined,
       depositMethod:
         method === "CREDIT" && tenders.length === 1 ? tenders[0].method : undefined,
       splitTenders: tenders.length > 1 ? tenders : undefined,
@@ -1111,13 +1129,13 @@ export function PosClient({
     } else if (next === "SPLIT") {
       // Start the split at the whole sale in cash, so the cashier moves one
       // figure across rather than typing both.
-      setPayCash(total)
+      setPayCash(toPay)
       setPayBank(0)
-      setPaid(total)
+      setPaid(toPay)
     } else {
       setPayCash(0)
       setPayBank(0)
-      setPaid(total)
+      setPaid(toPay)
     }
   }
 
@@ -1152,7 +1170,7 @@ export function PosClient({
     method === "CREDIT"
       ? "Type what they pay now in cash, bank, or both. The rest stays on Credit sales until it is paid."
       : method === "SPLIT"
-        ? `Part in the till, part into a shop bank. Both must reach ${formatCurrency(total)}. Not paying it all today? Use Credit.`
+        ? `Part in the till, part into a shop bank. Both must reach ${formatCurrency(toPay)}. Not paying it all today? Use Credit.`
         : method === "BANK"
           ? "The full amount landed in one shop bank account. Transfer, POS terminal and USSD all count as Bank."
           : "The full amount is in the till."
@@ -1160,7 +1178,7 @@ export function PosClient({
   const payLabel = busy
     ? "Saving this sale"
     : cart.length
-      ? `Complete sale · ${formatCurrency(total)}`
+      ? `Complete sale · ${formatCurrency(toPay)}${creditUse > 0 ? " after credit note" : ""}`
       : "Complete sale"
 
   return (
@@ -1535,7 +1553,9 @@ export function PosClient({
               </Select>
               {customer ? (
                 <p className="mt-1.5 text-xs text-muted-foreground tabular-nums">
-                  Owes {formatCurrency(customer.currentBalance)}
+                  {customer.currentBalance < 0
+                    ? `We owe them ${formatCurrency(-customer.currentBalance)} (credit note)`
+                    : `Owes ${formatCurrency(customer.currentBalance)}`}
                   {customer.creditLimit > 0 ? ` · limit ${formatCurrency(customer.creditLimit)}` : ""}
                 </p>
               ) : lineDown ? (
@@ -1563,6 +1583,33 @@ export function PosClient({
               ) : null}
             </div>
 
+            {creditAvailable > 0 ? (
+              <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-success/30 bg-success-soft p-3 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 accent-[hsl(var(--primary))]"
+                  checked={useCreditNote}
+                  onChange={(event) => setUseCreditNote(event.target.checked)}
+                />
+                <span className="min-w-0">
+                  <span className="block font-semibold text-foreground">Pay with their credit note</span>
+                  <span className="mt-0.5 block text-xs text-muted-foreground tabular-nums">
+                    {customer?.name} has {formatCurrency(creditAvailable)} of credit from a return.
+                    {useCreditNote && cart.length
+                      ? toPay > 0
+                        ? ` ${formatCurrency(creditUse)} comes off this sale; ${formatCurrency(toPay)} is left to pay below.`
+                        : ` It covers this whole sale. ${formatCurrency(creditAvailable - creditUse)} of credit stays for next time.`
+                      : ""}
+                  </span>
+                </span>
+              </label>
+            ) : null}
+
+            {creditUse > 0 && toPay <= 0 ? (
+              <p className="rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">
+                Nothing more to pay. The credit note settles this sale, so no cash or bank is taken.
+              </p>
+            ) : (
             <div className="text-sm">
               <span className="mb-1.5 block font-medium">How they pay</span>
               {/* One highlight slides to the chosen way of paying. */}
@@ -1596,8 +1643,9 @@ export function PosClient({
               </div>
               <p className="mt-1.5 text-xs text-muted-foreground">{methodHint}</p>
             </div>
+            )}
 
-            {splitsTyped ? (
+            {splitsTyped && toPay > 0 ? (
               <div className="space-y-2">
                 <div className="grid grid-cols-2 gap-2">
                   <label className="block text-sm">
@@ -1608,7 +1656,7 @@ export function PosClient({
                       type="number"
                       min={0}
                       inputMode="decimal"
-                      max={total || undefined}
+                      max={toPay || undefined}
                       value={payCash || ""}
                       placeholder="0"
                       className="tabular-nums"
@@ -1616,12 +1664,12 @@ export function PosClient({
                         const next = Math.max(0, Number(event.target.value) || 0)
                         if (method === "SPLIT") {
                           // The bill is settled in full, so whatever is not cash is bank.
-                          const cash = Math.min(next, total)
+                          const cash = Math.min(next, toPay)
                           setPayCash(cash)
-                          setPayBank(Math.max(0, total - cash))
+                          setPayBank(Math.max(0, toPay - cash))
                           return
                         }
-                        setPayCash(Math.min(next, Math.max(0, total - payBank)))
+                        setPayCash(Math.min(next, Math.max(0, toPay - payBank)))
                       }}
                     />
                   </label>
@@ -1633,19 +1681,19 @@ export function PosClient({
                       type="number"
                       min={0}
                       inputMode="decimal"
-                      max={total || undefined}
+                      max={toPay || undefined}
                       value={payBank || ""}
                       placeholder="0"
                       className="tabular-nums"
                       onChange={(event) => {
                         const next = Math.max(0, Number(event.target.value) || 0)
                         if (method === "SPLIT") {
-                          const bank = Math.min(next, total)
+                          const bank = Math.min(next, toPay)
                           setPayBank(bank)
-                          setPayCash(Math.max(0, total - bank))
+                          setPayCash(Math.max(0, toPay - bank))
                           return
                         }
-                        setPayBank(Math.min(next, Math.max(0, total - payCash)))
+                        setPayBank(Math.min(next, Math.max(0, toPay - payCash)))
                       }}
                     />
                   </label>
@@ -1852,7 +1900,7 @@ export function PosClient({
               </Button>
               <p className="text-center text-xs text-muted-foreground tabular-nums">
                 {cart.length
-                  ? `Paid ${formatCurrency(effectivePaid)}${due > 0 ? ` · owed ${formatCurrency(due)}` : " · in full"}`
+                  ? `${creditUse > 0 ? `Credit note ${formatCurrency(creditUse)} · ` : ""}Paid ${formatCurrency(effectivePaid)}${due > 0 ? ` · owed ${formatCurrency(due)}` : " · in full"}`
                   : "Add something to this sale first"}
                 <span className="hidden lg:inline"> · <Kbd>Ctrl</Kbd> + <Kbd>Enter</Kbd></span>
               </p>

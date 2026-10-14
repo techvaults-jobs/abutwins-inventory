@@ -1,5 +1,6 @@
 "use client"
 
+import { balanceMeaning, formatSignedBalance } from "@/lib/balance-sign"
 import { useMemo, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
@@ -25,7 +26,7 @@ type CustomerItem = {
   _count: { sales: number; returns: number }
 }
 
-type Tab = "ALL" | "OWING" | "CLEAR"
+type Tab = "ALL" | "OWING" | "WE_OWE" | "CLEAR"
 
 export function CustomersClientView({
   customers,
@@ -46,8 +47,9 @@ export function CustomersClientView({
   const accounts = useMemo(
     () =>
       customers.map((customer) => {
-        const owed = money(customer.currentBalance)
-        return { ...customer, owed, isOwing: owed > 0 }
+        // Above zero they owe us; below zero we owe them (a credit note).
+        const balance = money(customer.currentBalance)
+        return { ...customer, balance, owed: Math.max(0, balance), isOwing: balance > 0.005, weOwe: balance < -0.005 }
       }),
     [customers]
   )
@@ -55,12 +57,15 @@ export function CustomersClientView({
   const owingCount = accounts.filter((account) => account.isOwing).length
   const lifetime = accounts.reduce((sum, account) => sum + account.purchased, 0)
   const totalOwed = accounts.reduce((sum, account) => sum + account.owed, 0)
+  const weOweCount = accounts.filter((account) => account.weOwe).length
+  const weOweTotal = accounts.reduce((sum, account) => sum + (account.weOwe ? -account.balance : 0), 0)
 
   const filtered = useMemo(
     () =>
       accounts.filter((account) => {
         if (tab === "OWING" && !account.isOwing) return false
-        if (tab === "CLEAR" && account.isOwing) return false
+        if (tab === "CLEAR" && (account.isOwing || account.weOwe)) return false
+        if (tab === "WE_OWE" && !account.weOwe) return false
         if (branchFilter !== "ALL" && account.branch.id !== branchFilter) return false
         return true
       }),
@@ -88,11 +93,17 @@ export function CustomersClientView({
     { id: "paid", header: "Paid us", align: "right", hideBelow: "xl", sortValue: (row) => row.paid, cell: (row) => <span className="text-success">{formatCurrency(row.paid)}</span> },
     {
       id: "owes",
-      header: "Still owes",
+      header: "Balance",
       align: "right",
-      sortValue: (row) => row.owed,
+      sortValue: (row) => row.balance,
       cell: (row) =>
-        row.isOwing ? <TonePill tone="warning">{formatCurrency(row.owed)}</TonePill> : <TonePill tone="success">Paid up</TonePill>,
+        row.isOwing ? (
+          <TonePill tone="warning">{formatSignedBalance(row.balance)} owes us</TonePill>
+        ) : row.weOwe ? (
+          <TonePill tone="info">{formatSignedBalance(row.balance)} we owe them</TonePill>
+        ) : (
+          <TonePill tone="success">Paid up</TonePill>
+        ),
     },
   ]
 
@@ -121,9 +132,18 @@ export function CustomersClientView({
           tone={totalOwed > 0 ? "warning" : "neutral"}
           onClick={() => setTab("OWING")}
         />
+        {weOweCount ? (
+          <StatCard
+            label="We owe them (credit notes)"
+            value={formatSignedBalance(-weOweTotal)}
+            hint={`${weOweCount} customer${weOweCount === 1 ? "" : "s"} with credit to use at the till`}
+            icon={<Wallet className="h-4 w-4" />}
+            onClick={() => setTab("WE_OWE")}
+          />
+        ) : null}
         <StatCard
           label="Paid up"
-          value={String(accounts.length - owingCount)}
+          value={String(accounts.length - owingCount - weOweCount)}
           hint="They owe us nothing today"
           icon={<UserCheck className="h-4 w-4" />}
           tone="success"
@@ -160,7 +180,8 @@ export function CustomersClientView({
             chips={[
               { key: "ALL", label: "Everyone", count: accounts.length },
               { key: "OWING", label: "Still owing", count: owingCount, tone: "warning" },
-              { key: "CLEAR", label: "Paid up", count: accounts.length - owingCount, tone: "success" },
+              ...(weOweCount ? [{ key: "WE_OWE", label: "We owe them", count: weOweCount }] : []),
+              { key: "CLEAR", label: "Paid up", count: accounts.length - owingCount - weOweCount, tone: "success" as const },
             ]}
           />
         }
@@ -168,7 +189,13 @@ export function CustomersClientView({
           title: row.name,
           subtitle: `${row.phone} · ${row.branch.name}`,
           value: formatCurrency(row.purchased),
-          valueHint: row.isOwing ? <span className="text-warning">Owes {formatCurrency(row.owed)}</span> : <span className="text-success">Paid up</span>,
+          valueHint: row.isOwing ? (
+            <span className="text-warning">{formatSignedBalance(row.balance)} owes us</span>
+          ) : row.weOwe ? (
+            <span>{formatSignedBalance(row.balance)} we owe them</span>
+          ) : (
+            <span className="text-success">Paid up</span>
+          ),
         })}
         empty="No customer matches that filter or shop."
       />

@@ -99,7 +99,8 @@ async function main() {
     }
     if (sale.payments.length > 0) {
       const paySum = sale.payments.reduce((s, p) => s + n(p.amount), 0)
-      if (Math.abs(paySum - paid) > EPSILON) {
+      // A credit note settles part of paidAmount with no payment row.
+      if (Math.abs(paySum + n(sale.creditNoteUsed) - paid) > EPSILON) {
         paymentsVsPaid.push(`${where}: payments ${naira(paySum)} vs paid ${naira(paid)}`)
       }
     }
@@ -156,10 +157,14 @@ async function main() {
       balanceGaps.push(`${where}: balance ${naira(held)} vs statement ${naira(statement)}`)
     }
   }
-  const owedTotal = customers.reduce((s, c) => s + n(c.currentBalance), 0)
+  const owedTotal = customers.reduce((s, c) => s + Math.max(0, n(c.currentBalance)), 0)
   const owingCount = customers.filter((c) => n(c.currentBalance) > EPSILON).length
   console.log(`  ${owingCount} of ${customers.length} customer(s) owe ${naira(owedTotal)} in total`)
-  verdict("no customer is carrying a negative debt", negativeBalances)
+  // A balance below zero is a credit note: money we owe the buyer. Shown, not a fault.
+  if (negativeBalances.length) {
+    console.log(`  ${negativeBalances.length} customer(s) hold a credit note (we owe them):`)
+    for (const row of negativeBalances.slice(0, 20)) console.log(`    ${row}`)
+  }
   verdict("each customer's balance matches the last line of their statement", balanceGaps)
   // An opening balance typed when the customer was created is real debt with no
   // statement behind it. Worth seeing, not a fault.
@@ -273,7 +278,8 @@ async function main() {
   const paymentsTotal = payments.reduce((s, p) => s + n(p.amount), 0)
   const collectedTotal = sales.reduce((s, x) => s + n(x.paidAmount), 0)
   const salesWithRows = sales.filter((x) => x.payments.length > 0)
-  const collectedWhereRows = salesWithRows.reduce((s, x) => s + n(x.paidAmount), 0)
+  // A credit note settles part of paidAmount with no payment line behind it.
+  const collectedWhereRows = salesWithRows.reduce((s, x) => s + n(x.paidAmount) - n(x.creditNoteUsed), 0)
   const rowsTotal = salesWithRows.reduce(
     (s, x) => s + x.payments.reduce((a, p) => a + n(p.amount), 0),
     0

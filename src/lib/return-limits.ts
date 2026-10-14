@@ -107,20 +107,25 @@ export async function earlierReturnMoney(db: Db, saleId: string, excludeReturnId
 export function refundSplit(args: {
   asked: number
   outcome: string
-  sale: { totalAmount: unknown; paidAmount: unknown } | null
+  sale: { totalAmount: unknown; paidAmount: unknown; creditNoteUsed?: unknown } | null
   earlier: { value: number; cashOut: number }
 }) {
   if (!args.sale) {
-    return { value: args.asked, debtRelief: 0, cashOut: args.outcome === "REFUND" ? args.asked : 0 }
+    return { value: args.asked, debtRelief: 0, cashOut: args.outcome === "REFUND" ? args.asked : 0, creditBack: 0 }
   }
   const total = money(args.sale.totalAmount)
-  const paid = money(args.sale.paidAmount)
+  const settled = money(args.sale.paidAmount)
+  // Part of a sale settled from a credit note was never money: it can only go
+  // back as credit, never out of the till or the bank.
+  const fromCredit = Math.min(settled, money(args.sale.creditNoteUsed))
+  const paid = settled - fromCredit
   const value = money(Math.min(args.asked, Math.max(0, total - args.earlier.value)))
-  const stillOwed = Math.max(0, total - paid - args.earlier.value)
+  const stillOwed = Math.max(0, total - settled - args.earlier.value)
   const debtRelief = money(Math.min(stillOwed, value))
   const paidLeft = Math.max(0, paid - args.earlier.cashOut)
   const cashOut = args.outcome === "REFUND" ? money(Math.min(value - debtRelief, paidLeft)) : 0
-  return { value, debtRelief, cashOut }
+  const creditBack = args.outcome === "REFUND" ? money(Math.max(0, Math.min(value - debtRelief - cashOut, fromCredit))) : 0
+  return { value, debtRelief, cashOut, creditBack }
 }
 
 /** For the return form: what can still come back on each line of a sale. */

@@ -125,6 +125,7 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
         totalAmount: true,
         paidAmount: true,
         paymentMethod: true,
+        creditNoteUsed: true,
         branch: { select: { name: true } },
         customer: { select: { name: true } },
         payments: { select: { id: true, method: true, amount: true, bankAccountId: true } },
@@ -1910,7 +1911,7 @@ export async function getReportData(
     }),
     prisma.sale.findMany({
       where: { status: "COMPLETED", ...shopWhere, saleDate: { gte: prior.start, lt: prior.end } },
-      select: { totalAmount: true, paidAmount: true, paymentMethod: true, payments: { select: { method: true, amount: true } } },
+      select: { totalAmount: true, paidAmount: true, creditNoteUsed: true, paymentMethod: true, payments: { select: { method: true, amount: true } } },
     }),
     prisma.expense.findMany({
       where: { ...shopWhere, approvedAt: { not: null }, date: { gte: prior.start, lt: prior.end } },

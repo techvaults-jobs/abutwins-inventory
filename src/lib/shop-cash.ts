@@ -34,6 +34,7 @@ export async function shopCashOnHand(branchId: string) {
       select: {
         paymentMethod: true,
         paidAmount: true,
+        creditNoteUsed: true,
         totalAmount: true,
         payments: { select: { method: true, amount: true } },
       },

@@ -198,7 +198,10 @@ export async function setCustomerOpeningBalance(formData: FormData) {
       // Lowering it cannot undo money already paid: the lowest it can go is
       // what they have paid off so far.
       const owing = money(customer.currentBalance)
-      if (owing + change < -0.005) {
+      // Lowering the opening balance can take what they owe to nothing, never
+      // below it: it must not turn into a credit note we owe them.
+      const floor = Math.min(0, owing)
+      if (owing + change < floor - 0.005) {
         const lowest = Math.max(0, before - owing)
         throw new ConflictError(
           `${customer.name} has already paid off ${formatCurrency(before - owing)} of it, so the opening balance cannot go below ${formatCurrency(lowest)}.`
@@ -207,7 +210,7 @@ export async function setCustomerOpeningBalance(formData: FormData) {
 
       const after = await shiftCustomerBalance(tx, customerId, change)
       const next = money(after.currentBalance)
-      if (next < -0.005) {
+      if (next < floor - 0.005) {
         throw new ConflictError(`${customer.name} was collected from while you were typing. Open their page again.`)
       }
 

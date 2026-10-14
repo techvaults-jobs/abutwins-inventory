@@ -20,6 +20,8 @@ export type SaleTenderRow = {
   totalAmount: unknown
   paidAmount: unknown
   payments?: Array<{ method: string; amount: unknown }> | null
+  /** Settled from a credit note: part of paidAmount, but not money received. */
+  creditNoteUsed?: unknown
 }
 
 export function saleTenders(sale: SaleTenderRow) {
@@ -35,7 +37,7 @@ export function saleTenders(sale: SaleTenderRow) {
       else if (payment.method === "POS") pos += amount
     }
   } else {
-    const paid = money(sale.paidAmount)
+    const paid = Math.max(0, money(sale.paidAmount) - money(sale.creditNoteUsed))
     if (sale.paymentMethod === "CASH") cash = paid
     else if (sale.paymentMethod === "TRANSFER") transfer = paid
     else if (sale.paymentMethod === "POS") pos = paid
@@ -49,11 +51,12 @@ export function saleTenders(sale: SaleTenderRow) {
   let received = cash + bank
   // Older credit sales may have a deposit on paidAmount with no payment rows.
   // Count that money in Total payments received, but do not guess the channel.
-  if (received === 0 && collected > 0 && (sale.paymentMethod === "CREDIT" || sale.paymentMethod === "SPLIT_PAYMENT")) {
-    received = collected
+  const creditNote = money(sale.creditNoteUsed)
+  if (!lines && received === 0 && collected - creditNote > 0 && (sale.paymentMethod === "CREDIT" || sale.paymentMethod === "SPLIT_PAYMENT")) {
+    received = collected - creditNote
   }
 
-  return { cash, transfer, pos, bank, credit, revenue, collected, received }
+  return { cash, transfer, pos, bank, credit, creditNote, revenue, collected, received }
 }
 
 export function sumSaleTenders(rows: SaleTenderRow[]) {
@@ -65,13 +68,14 @@ export function sumSaleTenders(rows: SaleTenderRow[]) {
       acc.pos += row.pos
       acc.bank += row.bank
       acc.credit += row.credit
+      acc.creditNote += row.creditNote
       acc.revenue += row.revenue
       acc.collected += row.collected
       acc.received += row.received
       acc.count += 1
       return acc
     },
-    { cash: 0, transfer: 0, pos: 0, bank: 0, credit: 0, revenue: 0, collected: 0, received: 0, count: 0 }
+    { cash: 0, transfer: 0, pos: 0, bank: 0, credit: 0, creditNote: 0, revenue: 0, collected: 0, received: 0, count: 0 }
   )
 }
 

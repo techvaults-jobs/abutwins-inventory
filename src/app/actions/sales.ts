@@ -8,7 +8,7 @@ import { canManageFinance, canSeeAllBranches, canSeeCost, canSell, scopedBranchI
 import { can } from "@/lib/permissions"
 import { getAppSettings, lowStockLimit } from "@/lib/settings"
 import { letterheadFromSettings } from "@/lib/letterhead"
-import { generateDocNumber, money } from "@/lib/utils"
+import { formatCurrency, generateDocNumber, money } from "@/lib/utils"
 import { ConflictError, claimImei, creditInvoice, drawStock, settle, shiftCustomerBalance } from "@/lib/concurrency"
 import { canReachBranch, OTHER_SHOP, resolveWritableShopId, scopeRecord, viewBranchFilter } from "@/lib/branch-scope"
 import { markParkedPosted } from "@/app/actions/parked"
@@ -469,6 +469,11 @@ export async function checkoutSale(input: {
   depositMethod?: "CASH" | "TRANSFER"
   /** Cash and bank together on a credit deposit (or older parked full splits). */
   splitTenders?: Array<{ method: "CASH" | "TRANSFER" | "POS"; amount: number }>
+  /**
+   * How much of the buyer's credit note to use on this sale. It comes off
+   * first; cash, bank or credit then cover what is left.
+   */
+  creditNoteAmount?: number
   notes?: string
   wholesale?: boolean
   /** Money taken off the whole order, in naira. Bulk deals are recorded here. */
@@ -720,6 +725,21 @@ export async function checkoutSale(input: {
     }
   }
   const subtotal = money(grossTotal - orderDiscount)
+
+  // A credit note is money we owe the buyer, carried as a balance below zero.
+  // Using it settles part or all of the sale with no money coming in.
+  const creditAsked = Math.max(0, money(Number(input.creditNoteAmount) || 0))
+  let creditUse = 0
+  if (creditAsked > 0) {
+    if (!input.customerId) return { error: "A credit note belongs to a buyer. Pick the buyer first." }
+    const holder = await prisma.customer.findUnique({ where: { id: input.customerId }, select: { name: true, currentBalance: true } })
+    if (!holder) return { error: "We could not find that customer." }
+    const available = Math.max(0, -money(holder.currentBalance))
+    if (available <= 0.005) return { error: `${holder.name} has no credit note to use.` }
+    creditUse = money(Math.min(creditAsked, available, subtotal))
+  }
+  /** What is left to settle once the credit note has been used. */
+  const toPay = money(subtotal - creditUse)
   const validSplits = (input.splitTenders ?? []).filter((t) => Number.isFinite(t.amount) && t.amount > 0)
   const isSplit = input.paymentMethod === "SPLIT_PAYMENT" || validSplits.length > 1
   const isCreditTill = input.paymentMethod === "CREDIT"
@@ -735,11 +755,11 @@ export async function checkoutSale(input: {
         : input.paymentMethod === "CASH" ||
             input.paymentMethod === "TRANSFER" ||
             input.paymentMethod === "POS"
-          ? subtotal
+          ? toPay
           : input.paidAmount
 
-  const paid = money(Math.min(Math.max(0, Number.isFinite(Number(rawPaid)) ? Number(rawPaid) : 0), subtotal))
-  const due = subtotal - paid
+  const paid = money(Math.min(Math.max(0, Number.isFinite(Number(rawPaid)) ? Number(rawPaid) : 0), toPay))
+  const due = money(toPay - paid)
   // The tenders as they really landed. Cash and bank typed past the bill is
   // change handed back, so the extra comes off cash first, then bank. Saving
   // the typed amounts made the payment lines and the till's cash add up to
@@ -761,7 +781,9 @@ export async function checkoutSale(input: {
   // Sale label: credit when anything is still owed (even if today's money was cash + bank).
   // Fully paid with two channels stays Split payment. Fully paid with one channel is Cash or Bank.
   const method: PaymentMethod =
-    paid < subtotal
+    toPay <= 0.005
+      ? "CREDIT_NOTE"
+      : paid < toPay
       ? "CREDIT"
       : isSplit
         ? "SPLIT_PAYMENT"
@@ -824,7 +846,7 @@ export async function checkoutSale(input: {
   if (input.customerId && due > 0) {
     const customer = await prisma.customer.findUnique({ where: { id: input.customerId } })
     if (!customer) return { error: "We could not find that customer." }
-    const nextDebt = money(customer.currentBalance) + due
+    const nextDebt = money(customer.currentBalance) + creditUse + due
     if (money(customer.creditLimit) > 0 && nextDebt > money(customer.creditLimit) && !canOverrideCredit) {
       return { error: `${customer.name} would exceed the credit limit of ₦${money(customer.creditLimit).toLocaleString("en-NG")}.` }
     }
@@ -854,7 +876,8 @@ export async function checkoutSale(input: {
           priceApprovedById: approvedBy?.id ?? null,
           priceApprovedBy: approvedBy?.name ?? null,
           totalAmount: subtotal.toFixed(2),
-          paidAmount: paid.toFixed(2),
+          paidAmount: (paid + creditUse).toFixed(2),
+          creditNoteUsed: creditUse.toFixed(2),
           paymentMethod: method,
           notes: input.notes,
           items: {
@@ -957,8 +980,15 @@ export async function checkoutSale(input: {
         // The database does the addition and hands back the real figure, so two
         // clerks posting to one customer at the same time cannot overwrite each
         // other's debt.
-        const customer = await shiftCustomerBalance(tx, input.customerId, due)
+        // What is still owed goes on, and the credit note used comes off what
+        // we owed them: both move the one balance up.
+        const customer = await shiftCustomerBalance(tx, input.customerId, due + creditUse)
         const nextBalance = money(customer.currentBalance)
+        if (creditUse > 0 && nextBalance - due > 0.005) {
+          throw new ConflictError(
+            `${customer.name}'s credit note was used on another sale while this one was being typed. Refresh and try again.`
+          )
+        }
         if (
           due > 0 &&
           money(customer.creditLimit) > 0 &&
@@ -979,6 +1009,20 @@ export async function checkoutSale(input: {
             description: "Sale in the shop",
           },
         })
+        if (creditUse > 0) {
+          // The credit was already in the balance, below zero. The sale line
+          // above used it up; this line says so in words.
+          await tx.ledgerEntry.create({
+            data: {
+              customerId: input.customerId,
+              type: "CREDIT_NOTE",
+              amount: "0.00",
+              balance: (nextBalance + paid).toFixed(2),
+              reference: invoiceNumber,
+              description: `${formatCurrency(creditUse)} of their credit note used on this sale`,
+            },
+          })
+        }
         if (paid > 0) {
           await tx.ledgerEntry.create({
             data: {
@@ -1030,6 +1074,7 @@ export async function checkoutSale(input: {
           newValue: JSON.stringify({
             total: subtotal,
             paid,
+            ...(creditUse > 0 ? { creditNoteUsed: creditUse } : {}),
             method,
             ...(orderDiscount > 0
               ? { orderDiscount, discountReason: discountReason || null }

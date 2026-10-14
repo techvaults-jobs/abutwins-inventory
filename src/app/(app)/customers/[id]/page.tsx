@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation"
+import { balanceMeaning, formatSignedBalance } from "@/lib/balance-sign"
 import { getCustomer, getCustomerOpening } from "@/app/actions/parties"
 import { collectPayment } from "@/app/actions/sales"
 import { ActionForm } from "@/components/action-form"
@@ -61,8 +62,13 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
       <div className="grid gap-4 md:grid-cols-3">
         <div className="space-y-4">
           <div className="surface-card p-5">
-            <p className="text-sm text-muted-foreground">Still owing</p>
-            <p className="text-2xl font-semibold">{formatCurrency(money(customer.currentBalance))}</p>
+            <p className="text-sm text-muted-foreground">Balance</p>
+            <p className="text-2xl font-semibold tabular-nums">{formatSignedBalance(money(customer.currentBalance))}</p>
+            <p className="text-sm font-medium">
+              {balanceMeaning(money(customer.currentBalance))}
+              {money(customer.currentBalance) < -0.005 ? ". It is a credit note they can spend at the till." : ""}
+            </p>
+            <p className="text-xs text-muted-foreground">Plus means they owe us. Minus means we owe them.</p>
             <p className="text-xs text-muted-foreground">Credit limit {formatCurrency(money(customer.creditLimit))}</p>
           </div>
           <OpeningBalanceCard
@@ -97,8 +103,8 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
                   <p className="text-xs text-muted-foreground">{entry.reference} · {formatDate(entry.createdAt)}</p>
                 </div>
                 <div className="shrink-0 text-right">
-                  <p>{formatCurrency(money(entry.amount))}</p>
-                  <p className="text-xs text-muted-foreground">Bal {formatCurrency(money(entry.balance))}</p>
+                  <p className="tabular-nums">{formatSignedBalance(money(entry.amount))}</p>
+                  <p className="text-xs text-muted-foreground tabular-nums">Bal {formatSignedBalance(money(entry.balance))}</p>
                 </div>
               </div>
               )

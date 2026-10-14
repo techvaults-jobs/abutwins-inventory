@@ -25,6 +25,7 @@ export function Receipt({
   total,
   discount = 0,
   paid,
+  creditNoteUsed = 0,
   method,
   paymentReference,
   notes,
@@ -41,6 +42,8 @@ export function Receipt({
   /** Money taken off the whole order. Shown so the lines and the total add up. */
   discount?: number
   paid: number
+  /** Part of what was paid that came off the buyer's credit note. */
+  creditNoteUsed?: number
   method: string
   /** Transfer description or POS approval code for bank payments. */
   paymentReference?: string | null
@@ -120,7 +123,10 @@ export function Receipt({
             </>
           ) : null}
           <div className="flex justify-between"><span>Total</span><span className="font-semibold">{formatCurrency(total)}</span></div>
-          <div className="flex justify-between"><span>Paid</span><span>{formatCurrency(paid)}</span></div>
+          {creditNoteUsed > 0 ? (
+            <div className="flex justify-between"><span>From credit note</span><span>{formatCurrency(creditNoteUsed)}</span></div>
+          ) : null}
+          <div className="flex justify-between"><span>{creditNoteUsed > 0 ? "Paid in money" : "Paid"}</span><span>{formatCurrency(paid - creditNoteUsed)}</span></div>
           <div className="flex justify-between border-t border-slate-200 pt-1 font-semibold">
             <span>Balance</span>
             <span>{formatCurrency(due)}</span>

@@ -136,6 +136,7 @@ const labels: Record<string, string> = {
   TRANSFER: "Bank",
   POS: "Bank (POS)",
   SPLIT_PAYMENT: "Split payment",
+  CREDIT_NOTE: "Paid with credit note",
   BANK: "Bank",
   REVERSED: "Reversed",
   WALK_IN: "Walk-in",

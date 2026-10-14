@@ -86,6 +86,8 @@ enum PaymentMethod {
   POS
   CREDIT
   SPLIT_PAYMENT
+  /// Paid in full from the customer's credit note, with no money taken.
+  CREDIT_NOTE
 }
 
 enum SaleStatus {
@@ -636,6 +638,9 @@ model Sale {
   tax           Decimal       @default(0)
   totalAmount   Decimal
   paidAmount    Decimal       @default(0)
+  /// Part of paidAmount settled from the customer's credit note. Not money:
+  /// no cash or bank came in for it, and it has no payment line.
+  creditNoteUsed Decimal      @default(0)
   paymentMethod PaymentMethod
   paymentNotes  String?
   notes         String?

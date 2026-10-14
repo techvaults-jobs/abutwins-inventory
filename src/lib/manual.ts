@@ -235,6 +235,7 @@ const PAGES: Array<
     needAction: "action.sell",
     what: "The till. One box to scan or type IMEI, serial, phone name, brand, category, or a piece item. Pick the buyer, take Cash or Bank (into a named bank account from Money in and out), or Credit sales, and finish. On credit sales you can still type money received now and say if it was Cash or Bank. What is left is credit sales. The system makes an invoice.",
     doThis: [
+      "CREDIT NOTE: pick the buyer. If we owe them from a return, Pay with their credit note shows above How they pay, already ticked. It comes off the sale first; take cash, bank or credit for what is left. If it covers the whole sale, no money is taken. Untick it to keep the credit for later. It needs the network.",
       "If you see Count the till, close that day first. Complete sale stays locked until you do, even for the main admin.",
       "Confirm you are in the shop you are standing in.",
       "In the one Scan or type box, scan the IMEI or type a name, serial, brand, category, or piece item, then Enter. Use camera if the browser allows it. Coming phones will not appear.",
@@ -310,6 +311,7 @@ const PAGES: Array<
     doThis: [
       "Add a person with a full name, a phone, and the shop.",
       "If they already owe Abu Twins, type Opening balance they owe us. Leave it at zero if they start clean.",
+      "READING THE BALANCE: plus means they owe us, minus means we owe them. A minus balance is a credit note from a return. Suppliers read the same way: minus, we owe the supplier; plus, the supplier owes us.",
       "For a customer already on the list, open their page and use Add or Change on Opening balance. Type the right figure and why. The difference goes on their account as its own line, so the old figure stays in the history. The CEO, the main admin, the Accountant and the Auditor can do this.",
       "Tap Still owing to see who to call for payment.",
       "Open a customer to see what they still owe and their invoices.",

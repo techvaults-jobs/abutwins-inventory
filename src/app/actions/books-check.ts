@@ -75,7 +75,7 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
       }),
       prisma.sale.findMany({
         where: { status: "COMPLETED", ...shopWhere, saleDate: { gte: prior.start, lt: prior.end } },
-        select: { paymentMethod: true, totalAmount: true, paidAmount: true, payments: { select: { method: true, amount: true } } },
+        select: { paymentMethod: true, totalAmount: true, paidAmount: true, creditNoteUsed: true, payments: { select: { method: true, amount: true } } },
       }),
       prisma.expense.aggregate({
         where: { ...shopWhere, date: { gte: window.start, lt: window.end }, approvedAt: { not: null } },

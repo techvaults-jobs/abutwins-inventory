@@ -72,13 +72,13 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
           href="#supplier-bills"
         />
         <StatCard
-          label="Value owing"
+          label="We owe them (−)"
           value={formatValueOwingMinus(totalOwed)}
           tone={totalOwed > 0 ? "warning" : "neutral"}
           href="#supplier-bills"
         />
         <StatCard
-          label="Value owing"
+          label="They owe us (+)"
           value={formatValueOwingPlus(totalSurplus)}
           tone={totalSurplus > 0 ? "success" : "neutral"}
           href="#supplier-bills"

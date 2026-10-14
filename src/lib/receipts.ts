@@ -29,7 +29,7 @@ export async function receiptsInWindow(args: { branchId?: string | null; start: 
         paidAmount: { gt: 0 },
         payments: { none: {} },
       },
-      select: { paidAmount: true, paymentMethod: true },
+      select: { paidAmount: true, creditNoteUsed: true, paymentMethod: true },
     }),
   ])
 
@@ -50,7 +50,9 @@ export async function receiptsInWindow(args: { branchId?: string | null; start: 
     add(row.method, amount)
   }
   for (const row of legacy) {
-    const amount = money(row.paidAmount)
+    // A credit note settles part of a sale with no money coming in.
+    const amount = money(row.paidAmount) - money(row.creditNoteUsed)
+    if (amount <= 0.005) continue
     onPeriodSales += amount
     add(row.paymentMethod, amount)
   }

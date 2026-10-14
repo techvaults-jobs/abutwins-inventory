@@ -81,6 +81,7 @@ export default async function SaleDetailPage({
     })),
     total: money(sale.totalAmount),
     paid: money(sale.paidAmount),
+    creditNoteUsed: money(sale.creditNoteUsed),
     method: statusLabel(sale.paymentMethod),
     paymentReference: sale.payments.find((p) => p.reference)?.reference ?? null,
     notes: sale.notes,
@@ -164,6 +165,11 @@ export default async function SaleDetailPage({
             of {formatCurrency(money(sale.totalAmount))}
             {due > 0 ? ` · still due ${formatCurrency(due)}` : " · settled"}
           </p>
+          {money(sale.creditNoteUsed) > 0 ? (
+            <p className="text-sm text-muted-foreground">
+              {formatCurrency(money(sale.creditNoteUsed))} of it from the buyer&apos;s credit note, not money
+            </p>
+          ) : null}
         </div>
       </div>
       {/* A list, not a four-column table, so a phone name and its price
@@ -278,6 +284,7 @@ export default async function SaleDetailPage({
           total={money(sale.totalAmount)}
           discount={money(sale.discount)}
           paid={money(sale.paidAmount)}
+          creditNoteUsed={money(sale.creditNoteUsed)}
           method={statusLabel(sale.paymentMethod)}
           paymentReference={sale.payments.find((p) => p.reference)?.reference ?? null}
           notes={sale.notes}
