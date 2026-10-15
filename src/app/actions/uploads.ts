@@ -21,6 +21,7 @@ import {
   isOpeningStockSupplierName,
 } from "@/lib/upload-purchase"
 import { generateDocNumber, money } from "@/lib/utils"
+import { watDayKey } from "@/lib/lagos-day"
 import { mapBillCondition, normalizeStorage } from "@/lib/item-specs"
 import { displayPartyName } from "@/lib/party-key"
 import { ensureOpeningStockSupplier, findDuplicateSupplier } from "@/lib/supplier-identity"
@@ -68,6 +69,8 @@ export type UploadResult = {
   shippingFee?: number
   /** Uploaded value less the shipping fee. */
   payable?: number
+  /** Set when Many at once (Excel) put the file on a supplier bill. */
+  asSupplierBill?: boolean
   /** Set when the goods were booked as still on the way, not onto the shelf. */
   onTheWay?: boolean
   lotNumber?: string
@@ -493,6 +496,51 @@ export async function importOpeningStock(formData: FormData): Promise<UploadResu
   const shopPick = await resolveOpeningTargetShops(user, branchId)
   if ("error" in shopPick) return { error: shopPick.error }
 
+  // A shop that already has its opening stock takes new goods on a supplier
+  // bill. Picking a real supplier here used to be refused with "opening stock
+  // is closed", so a sheet of new goods from a house we already deal with
+  // could not be loaded at all. It now goes on that supplier's bill.
+  const pickedId = String(formData.get("supplierId") || "").trim()
+  const pickedHouse =
+    pickedId && pickedId !== OPENING_STOCK_SUPPLIER_OPTION && pickedId !== "__new__"
+      ? await prisma.supplier.findFirst({ where: { id: pickedId, isActive: true } })
+      : null
+  const shopsStarted = await prisma.openingStock.count({ where: { branchId: { in: shopPick.shops.map((shop) => shop.id) } } })
+  if (shopsStarted > 0 && pickedHouse && !isOpeningStockSupplierName(pickedHouse.name) && pickedHouse.kind !== "NEIGHBOR") {
+    if (shopPick.shops.length !== 1) {
+      return { error: "A supplier bill is for one shop. Pick the shop the goods went to, not All shops." }
+    }
+    let sheets: Array<{ sheet: string; grid: string[][] }>
+    try {
+      sheets = await readWorkbookGrids(file)
+    } catch {
+      return { error: "We could not read that Excel file. Save it again and try one more time." }
+    }
+    const read = await billLinesFromGrids(sheets, file.name)
+    if (read.error || !read.lines) return { error: read.error ?? "We could not read that sheet.", problems: read.problems }
+    const note = String(formData.get("notes") || "").trim()
+    const result = await batchUploadStock({
+      branchId: shopPick.shops[0].id,
+      supplierId: pickedHouse.id,
+      invoiceNumber: generateDocNumber("PO"),
+      uploadDate: watDayKey(),
+      amountPaid: 0,
+      notes: [`Loaded from ${file.name} on Many at once (Excel).`, note || null].filter(Boolean).join(" "),
+      items: read.lines,
+    })
+    if (result.error) return result
+    return {
+      ...result,
+      asSupplierBill: true,
+      problems: [...(read.notes ?? []), ...(result.problems ?? [])].slice(0, 40),
+    }
+  }
+  if (shopsStarted > 0 && pickedId === "__new__") {
+    return {
+      error: "This shop already has its opening stock, so new goods go on a supplier bill. Add the supplier on Suppliers (name and phone), then pick it here.",
+    }
+  }
+
   const alreadyOpen: string[] = []
   const targetShops: OpeningShopRef[] = []
   for (const shop of shopPick.shops) {
@@ -504,7 +552,7 @@ export async function importOpeningStock(formData: FormData): Promise<UploadResu
     alreadyOpen.push(
       opening.status === "OPEN"
         ? `${shop.name} already has opening stock. Correct it with the count sheet on Correct & close opening stock.`
-        : `${shop.name}'s opening stock is closed. New goods go on a Supplier bill.`
+        : `${shop.name}'s opening stock is closed. New goods go on a supplier bill: pick the supplier above instead of Opening Stock.`
     )
   }
   if (!targetShops.length) {
@@ -1238,6 +1286,11 @@ export async function readBillWorkbook(formData: FormData): Promise<BillSheetRes
   } catch {
     return { error: "We could not read that file. Save it as Excel or CSV and try again." }
   }
+  return billLinesFromGrids(grids, file.name)
+}
+
+/** A workbook's tabs, read into supplier bill lines. Saves nothing. */
+async function billLinesFromGrids(grids: Array<{ sheet: string; grid: string[][] }>, fileName: string): Promise<BillSheetResult> {
   if (grids.reduce((sum, tab) => sum + tab.grid.length, 0) > MAX_ROWS) {
     return { error: `Use a sheet of up to ${MAX_ROWS.toLocaleString("en-NG")} rows.` }
   }
@@ -1348,7 +1401,7 @@ export async function readBillWorkbook(formData: FormData): Promise<BillSheetRes
       ...leftOut.map((tab) => `Tab ${tab.sheet} has no UNIT COST PRICE column, so it was read as a checklist and left out.`),
       ...repeats.slice(0, 40).map((row) => row.replace(/, so it is counted once\..*$/, ", so it is counted once.")),
     ],
-    fileName: file.name,
+    fileName,
   }
 }
 

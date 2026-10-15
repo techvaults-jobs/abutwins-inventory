@@ -15,7 +15,7 @@ export default async function OpeningStockPage() {
     <div className="space-y-6">
       <PageHeader
         title="Upload stock · Many at once (Excel)"
-        description="Load one shop, or All shops, from Excel. Opening value only, not a bill to pay."
+        description="Load many items from one Excel file. A shop's first load is its opening stock; after that, pick the supplier and the file goes on that supplier's bill."
       />
 
       <div className="surface-card border-primary/30 bg-primary/5 p-4 text-sm text-muted-foreground">

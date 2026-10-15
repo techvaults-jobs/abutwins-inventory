@@ -70,6 +70,11 @@ export function OpeningStockCard({ shops, suppliers }: { shops: Shop[]; supplier
         phases={OPENING_PHASES}
       />
 
+      <p className="rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-sm text-foreground">
+        <span className="font-semibold">Shop already loaded its opening stock?</span> Pick one shop and the supplier the goods
+        came from. The whole file goes on that supplier&apos;s bill, In shop, with nothing paid yet. Record the payment or a
+        shipping fee on the bill afterwards. Use the template from Supplier bill for the right columns.
+      </p>
       <p className="text-sm leading-relaxed text-muted-foreground">
         One file, with tabs for PHONES, ACCESSORIES, SCREEN and LAPTOPS. Pick All shops to put the same names on every
         open shop, or pick one shop. If you do not know every supplier yet, leave Supplier on Opening Stock. The file
@@ -149,6 +154,24 @@ export function OpeningStockCard({ shops, suppliers }: { shops: Shop[]; supplier
           if (result.error) {
             toast.error(result.error)
             setProblems(result.problems ?? [])
+            return
+          }
+          if (result.asSupplierBill) {
+            toast.success(
+              [
+                `Supplier bill ${result.invoiceNumber}`,
+                result.phones ? `${result.phones} phone${result.phones === 1 ? "" : "s"} In shop` : null,
+                result.pieces ? `${result.pieces} piece${result.pieces === 1 ? "" : "s"} added` : null,
+                `owed ${formatCurrency(result.balanceOwed ?? 0)}. Record payment or a shipping fee on the bill`,
+              ]
+                .filter(Boolean)
+                .join(" · ") + "."
+            )
+            setSoftNotes(result.problems ?? [])
+            formRef.current?.reset()
+            setSupplierChoice(OPENING_STOCK_SUPPLIER_OPTION)
+            setTrackingChoice("ALL")
+            router.refresh()
             return
           }
           const parts = [
