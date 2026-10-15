@@ -1,6 +1,7 @@
 import Link from "next/link"
 import { notFound } from "next/navigation"
-import { getSupplier } from "@/app/actions/parties"
+import { getSupplier, getSupplierOpening } from "@/app/actions/parties"
+import { SupplierOpeningCard } from "./supplier-opening-card"
 import { PageHeader, StatCard, StatGrid, StatusBadge } from "@/components/shared"
 import { formatCurrency, formatDate, money } from "@/lib/utils"
 import {
@@ -14,6 +15,7 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
   const { id } = await params
   const supplier = await getSupplier(id)
   if (!supplier) notFound()
+  const opening = await getSupplierOpening(id)
 
   const totalPurchased = supplier.purchases.reduce((sum, row) => sum + money(row.totalAmount), 0)
   const totalPaid = supplier.purchases.reduce((sum, row) => sum + money(row.paidAmount), 0)
@@ -41,6 +43,17 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
         title={supplier.name}
         description={`${supplier.kind === "NEIGHBOR" ? "Neighboring shop" : "Supplier"} · ${[supplier.city, supplier.country].filter(Boolean).join(", ") || "Where they are is not set"} · ${supplier.phone}${supplier.contactPerson ? ` · ${supplier.contactPerson}` : ""}`}
       />
+
+      {opening && !supplier.name.toLowerCase().includes("opening stock") ? (
+        <SupplierOpeningCard
+          supplierId={supplier.id}
+          supplierName={supplier.name}
+          opening={opening.amount}
+          paidOnIt={opening.paidOnIt}
+          bills={opening.bills}
+          canChange={opening.canChange}
+        />
+      ) : null}
 
       <StatGrid>
         {hasOpening ? (

@@ -1,5 +1,6 @@
 "use server"
 
+import { formatSignedBalance } from "@/lib/balance-sign"
 import { revalidatePath } from "next/cache"
 import { prisma } from "@/lib/prisma"
 import { canReachBranch, resolveWritableShopId, scopeRecord, viewBranchFilter } from "@/lib/branch-scope"
@@ -74,7 +75,8 @@ export async function createCustomer(formData: FormData) {
   const branchId = shopGate.shopId
   if (!name || !phone) return { error: "Type the name and phone, and pick the shop." }
 
-  const openingBalance = Math.max(0, Number(formData.get("openingBalance") || 0) || 0)
+  // No sign: they owed us before this software. A minus: we owed them.
+  const openingBalance = Math.round((Number(formData.get("openingBalance") || 0) || 0) * 100) / 100
   const creditLimit = Math.max(0, Number(formData.get("creditLimit") || 0) || 0)
 
   const exists = await prisma.customer.findUnique({ where: { phone } })
@@ -93,7 +95,7 @@ export async function createCustomer(formData: FormData) {
     },
   })
 
-  if (openingBalance > 0) {
+  if (Math.abs(openingBalance) > 0.005) {
     await prisma.ledgerEntry.create({
       data: {
         customerId: customer.id,
@@ -102,7 +104,9 @@ export async function createCustomer(formData: FormData) {
         balance: openingBalance.toFixed(2),
         reference: generateDocNumber(OPENING_REF_PREFIX),
         description:
-          "Opening balance. Money this buyer already owed when the shops started on this software.",
+          openingBalance > 0
+            ? "Opening balance. Money this buyer already owed when the shops started on this software."
+            : "Opening balance. Money we already owed this buyer when the shops started on this software.",
       },
     })
   }
@@ -170,8 +174,9 @@ export async function setCustomerOpeningBalance(formData: FormData) {
   const raw = String(formData.get("openingBalance") ?? "").trim()
   const wanted = Number(raw)
   if (!customerId) return { error: "Customer missing. Open their page again." }
-  if (raw === "" || !Number.isFinite(wanted) || wanted < 0) {
-    return { error: "Type the opening balance in naira, 0 or more." }
+  // No sign: they owed us before this software. A minus: we owed them.
+  if (raw === "" || !Number.isFinite(wanted)) {
+    return { error: "Type the opening balance in naira. Put a minus in front if we owed them." }
   }
   const target = Math.round(wanted * 100) / 100
   const reason = String(formData.get("reason") || "").trim()
@@ -197,22 +202,12 @@ export async function setCustomerOpeningBalance(formData: FormData) {
 
       // Lowering it cannot undo money already paid: the lowest it can go is
       // what they have paid off so far.
+      // The balance is signed (a minus is money we owe them), so the opening
+      // figure moves it by the difference either way. Money they already
+      // paid stays paid: paying off more than they owed leaves us owing them.
       const owing = money(customer.currentBalance)
-      // Lowering the opening balance can take what they owe to nothing, never
-      // below it: it must not turn into a credit note we owe them.
-      const floor = Math.min(0, owing)
-      if (owing + change < floor - 0.005) {
-        const lowest = Math.max(0, before - owing)
-        throw new ConflictError(
-          `${customer.name} has already paid off ${formatCurrency(before - owing)} of it, so the opening balance cannot go below ${formatCurrency(lowest)}.`
-        )
-      }
-
       const after = await shiftCustomerBalance(tx, customerId, change)
       const next = money(after.currentBalance)
-      if (next < floor - 0.005) {
-        throw new ConflictError(`${customer.name} was collected from while you were typing. Open their page again.`)
-      }
 
       const reference = generateDocNumber(OPENING_REF_PREFIX)
       const by = user.name || user.email
@@ -225,8 +220,10 @@ export async function setCustomerOpeningBalance(formData: FormData) {
           reference,
           description:
             before === 0 && lines.length === 0
-              ? `Opening balance ${formatCurrency(target)}: money this buyer already owed before this software. Set by ${by}. ${reason}`
-              : `Opening balance changed from ${formatCurrency(before)} to ${formatCurrency(target)} by ${by}. ${reason}`,
+              ? target < 0
+                ? `Opening balance −${formatCurrency(-target)}: money we already owed this buyer before this software. Set by ${by}. ${reason}`
+                : `Opening balance ${formatCurrency(target)}: money this buyer already owed before this software. Set by ${by}. ${reason}`
+              : `Opening balance changed from ${formatSignedBalance(before)} to ${formatSignedBalance(target)} by ${by}. ${reason}`,
         },
       })
       await tx.auditLog.create({
@@ -263,7 +260,7 @@ export async function setCustomerOpeningBalance(formData: FormData) {
   const { name, target: saved, next } = result.data
   return {
     success: true,
-    message: `${name}: opening balance is now ${formatCurrency(saved)}. Still owing ${formatCurrency(next)}.`,
+    message: `${name}: opening balance is now ${formatSignedBalance(saved)}. Balance ${formatSignedBalance(next)}.`,
   }
 }
 
@@ -414,9 +411,13 @@ export async function createSupplier(formData: FormData) {
   const clash = await findDuplicateSupplier({ name, phone })
   if (clash) return clash
 
-  const openingBalance = Math.max(0, Number(formData.get("openingBalance") || 0) || 0)
+  // The client's rule for every account: no sign, they owed us; a minus, we
+  // owed them. A minus becomes an unpaid opening bill; no sign is credit.
+  const openingBalance = Math.round((Number(formData.get("openingBalance") || 0) || 0) * 100) / 100
+  const weOwed = Math.max(0, -openingBalance)
+  const theyOwed = Math.max(0, openingBalance)
   let shopId: string | null = null
-  if (openingBalance > 0) {
+  if (weOwed > 0) {
     const shopGate = await resolveWritableShopId(user, String(formData.get("branchId") ?? user.branchId ?? ""))
     if ("error" in shopGate) return { error: shopGate.error }
     shopId = shopGate.shopId
@@ -432,12 +433,14 @@ export async function createSupplier(formData: FormData) {
       country: String(formData.get("country") || "").trim() || null,
       city: String(formData.get("city") || "").trim() || null,
       kind: (String(formData.get("kind") || "SUPPLIER") === "NEIGHBOR" ? "NEIGHBOR" : "SUPPLIER") as SupplierKind,
+      creditBalance: theyOwed.toFixed(2),
+      openingCredit: theyOwed.toFixed(2),
     },
   })
 
   // Opening money we already owed this house becomes an unpaid bill so Suppliers,
   // Reports, and Check the books all count it the same way as later cartons.
-  if (openingBalance > 0 && shopId) {
+  if (weOwed > 0 && shopId) {
     await prisma.purchase.create({
       data: {
         invoiceNumber: generateDocNumber("OBAL"),
@@ -445,7 +448,7 @@ export async function createSupplier(formData: FormData) {
         branchId: shopId,
         userId: user.id,
         status: "RECEIVED",
-        totalAmount: openingBalance.toFixed(2),
+        totalAmount: weOwed.toFixed(2),
         paidAmount: "0",
         notes:
           "Opening balance. Money we already owed this house when the shops started on this software. Not a new carton.",
@@ -459,6 +462,155 @@ export async function createSupplier(formData: FormData) {
   revalidatePath("/reports")
   revalidatePath("/purchases")
   return { success: true }
+}
+
+/** Opening bills: money we owed a house before this software. */
+const supplierOpeningBills = (supplierId: string) => ({ supplierId, source: "OPENING_BALANCE", status: { not: "CANCELLED" as const } })
+
+/** A house's opening balance as it stands: no sign, they owed us; a minus, we owed them. */
+export async function getSupplierOpening(supplierId: string) {
+  const user = await requireUser()
+  const [supplier, bills] = await Promise.all([
+    prisma.supplier.findUnique({ where: { id: supplierId }, select: { openingCredit: true } }),
+    prisma.purchase.findMany({
+      where: supplierOpeningBills(supplierId),
+      select: { id: true, invoiceNumber: true, totalAmount: true, paidAmount: true, returnedAmount: true, createdAt: true },
+      orderBy: { createdAt: "asc" },
+    }),
+  ])
+  if (!supplier) return null
+  const weOwed = bills.reduce((sum, bill) => sum + money(bill.totalAmount), 0)
+  const paid = bills.reduce((sum, bill) => sum + money(bill.paidAmount), 0)
+  return {
+    amount: money(supplier.openingCredit) - weOwed,
+    paidOnIt: paid,
+    bills: bills.map((bill) => ({ id: bill.id, invoiceNumber: bill.invoiceNumber, total: money(bill.totalAmount), paid: money(bill.paidAmount) })),
+    canChange: canSetOpeningMoney(user.role),
+  }
+}
+
+/**
+ * Add or correct a supplier's opening balance after the house was made.
+ *
+ * The super admin could only set it when adding a supplier, and only as
+ * money we owed. Now it can be set or changed any time, either way: a minus
+ * (−1,400,000) is money we owed them and sits on an unpaid opening bill,
+ * so Pay supplier, the supplier account and Money in and out treat it like
+ * any bill; no sign is money they owed us, carried as credit with them.
+ */
+export async function setSupplierOpeningBalance(formData: FormData) {
+  const user = await requireUser()
+  if (!canSetOpeningMoney(user.role)) {
+    return { error: "Only the CEO, the main admin, the Accountant or the Auditor can set a supplier's opening balance." }
+  }
+  const supplierId = String(formData.get("supplierId") || "")
+  const raw = String(formData.get("openingBalance") ?? "").trim()
+  const wanted = Number(raw)
+  const reason = String(formData.get("reason") || "").trim()
+  if (!supplierId) return { error: "Supplier missing. Open their page again." }
+  if (raw === "" || !Number.isFinite(wanted)) {
+    return { error: "Type the opening balance in naira. Put a minus in front if we owed them." }
+  }
+  if (reason.length < 3) return { error: "Say why the opening balance is being set or changed." }
+  const target = Math.round(wanted * 100) / 100
+  const weOwe = Math.max(0, -target)
+  const theyOwe = Math.max(0, target)
+
+  const supplier = await prisma.supplier.findUnique({ where: { id: supplierId } })
+  if (!supplier) return { error: "We could not find that supplier." }
+  if (isOpeningStockSupplierName(supplier.name)) {
+    return { error: "Opening stock is the value the shops started with. It has no opening balance." }
+  }
+  const bills = await prisma.purchase.findMany({ where: supplierOpeningBills(supplierId), orderBy: { createdAt: "desc" } })
+  const weOwedBefore = bills.reduce((sum, bill) => sum + money(bill.totalAmount), 0)
+  const before = money(supplier.openingCredit) - weOwedBefore
+  if (Math.abs(target - before) < 0.005) return { error: `The opening balance is already ${formatSignedBalance(target)}.` }
+
+  // Money already paid on the opening bill stays paid: it can come down only
+  // as far as what has been paid on it.
+  const paidOn = bills.reduce((sum, bill) => sum + money(bill.paidAmount) + money(bill.returnedAmount), 0)
+  if (weOwe + 0.005 < paidOn) {
+    return {
+      error: `${formatCurrency(paidOn)} has already been paid on this opening balance, so what we owed them cannot be set below ${formatCurrency(paidOn)}.`,
+    }
+  }
+  const creditChange = money(theyOwe - money(supplier.openingCredit))
+  if (money(supplier.creditBalance) + creditChange < -0.005) {
+    return { error: "Part of the credit this house owed us has already been used, so it cannot come down that far." }
+  }
+
+  let shopId: string | null = null
+  if (weOwe > weOwedBefore + 0.005 && !bills.length) {
+    const hq = await prisma.branch.findFirst({ where: { isActive: true }, orderBy: [{ isHq: "desc" }, { name: "asc" }], select: { id: true } })
+    shopId = user.branchId ?? hq?.id ?? null
+    if (!shopId) return { error: "No shop is open to hold the opening bill." }
+  }
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      if (Math.abs(weOwe - weOwedBefore) > 0.005) {
+        if (bills.length) {
+          // The newest opening bill takes the change; older ones stay as they were.
+          const [latest, ...rest] = bills
+          const others = rest.reduce((sum, bill) => sum + money(bill.totalAmount), 0)
+          const nextTotal = Math.max(money(latest.paidAmount) + money(latest.returnedAmount), weOwe - others)
+          await tx.purchase.update({
+            where: { id: latest.id },
+            // Brought to nothing with nothing paid: the bill is no longer needed.
+            data: nextTotal <= 0.005 && money(latest.paidAmount) <= 0.005
+              ? { totalAmount: "0.00", status: "CANCELLED" }
+              : { totalAmount: nextTotal.toFixed(2) },
+          })
+        } else if (weOwe > 0.005 && shopId) {
+          await tx.purchase.create({
+            data: {
+              invoiceNumber: generateDocNumber("OBAL"),
+              supplierId,
+              branchId: shopId,
+              userId: user.id,
+              status: "RECEIVED",
+              totalAmount: weOwe.toFixed(2),
+              paidAmount: "0",
+              notes: "Opening balance. Money we already owed this house when the shops started on this software. Not a new carton.",
+              source: "OPENING_BALANCE",
+            },
+          })
+        }
+      }
+      if (Math.abs(creditChange) > 0.005) {
+        await tx.supplier.update({
+          where: { id: supplierId },
+          data: { creditBalance: { increment: creditChange }, openingCredit: theyOwe.toFixed(2) },
+        })
+      }
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "UPDATE",
+          entityType: "Supplier",
+          entityId: supplierId,
+          oldValue: JSON.stringify({ openingBalance: before }),
+          newValue: JSON.stringify({
+            openingBalance: target,
+            reason,
+            note: `Opening balance for ${supplier.name}: ${formatSignedBalance(before)} to ${formatSignedBalance(target)}. ${target < 0 ? "We owed them" : target > 0 ? "They owed us" : "Nothing either way"} before this software.`,
+          }),
+          branchId: user.branchId,
+          risk: "MEDIUM",
+        },
+      })
+    })
+  } catch (error) {
+    return { error: error instanceof Error && error.message ? "Could not save the opening balance. Nothing was changed." : "Could not save." }
+  }
+
+  revalidatePath(`/suppliers/${supplierId}`)
+  revalidatePath("/suppliers")
+  revalidatePath("/purchases")
+  revalidatePath("/finance")
+  revalidatePath("/reports")
+  revalidatePath("/dashboard")
+  return { success: true, message: `${supplier.name}: opening balance is now ${formatSignedBalance(target)}.` }
 }
 
 export async function getBranches() {

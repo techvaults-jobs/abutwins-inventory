@@ -549,6 +549,9 @@ model Supplier {
   isActive      Boolean      @default(true)
   /// Surplus after send-backs that were not on a supplier bill, so this house owes us.
   creditBalance Decimal      @default(0)
+  /// The part of creditBalance that is opening balance: money this house
+  /// owed us before this software. Money we owed them is an OBAL bill.
+  openingCredit Decimal      @default(0)
   createdAt     DateTime     @default(now())
   updatedAt     DateTime     @updatedAt
 

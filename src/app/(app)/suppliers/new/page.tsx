@@ -53,8 +53,8 @@ export default async function AddSupplierPage() {
                 ))}
               </Select>
             </FormField>
-            <FormField label="Opening balance we still owe" hint="Money owed to this house before this software. Leave at zero to start clean.">
-              <Input name="openingBalance" type="number" min={0} step="0.01" inputMode="decimal" placeholder="0" />
+            <FormField label="Opening balance" hint="What stood before this software. A minus in front (−1400000): we owed them. No sign: they owed us. Leave at zero to start clean. It can be changed later on the supplier's page.">
+              <Input name="openingBalance" type="number" step="0.01" inputMode="decimal" placeholder="0" />
             </FormField>
           </div>
         </FormSection>

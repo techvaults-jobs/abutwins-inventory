@@ -9,7 +9,8 @@ import { FormField } from "@/components/form-field"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
-import { cn, formatCurrency, formatDate } from "@/lib/utils"
+import { formatSignedBalance } from "@/lib/balance-sign"
+import { cn, formatDate } from "@/lib/utils"
 
 type OpeningLine = { id: string; change: number; reference: string; description: string; createdAt: Date | string }
 
@@ -40,12 +41,9 @@ export function OpeningBalanceCard({
   const [showHistory, setShowHistory] = useState(false)
 
   const wanted = typed.trim() === "" ? null : Number(typed)
-  const valid = wanted !== null && Number.isFinite(wanted) && wanted >= 0
+  const valid = wanted !== null && Number.isFinite(wanted)
   const change = valid ? wanted - opening : 0
   const nextOwing = owing + change
-  // Paid off already: the opening cannot go below that.
-  const lowest = Math.max(0, opening - owing)
-  const tooLow = valid && wanted < lowest - 0.005
   const set = history.length > 0
 
   function start() {
@@ -58,12 +56,12 @@ export function OpeningBalanceCard({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm text-muted-foreground">Opening balance</p>
-          <p className="text-2xl font-semibold tabular-nums">{formatCurrency(opening)}</p>
+          <p className="text-2xl font-semibold tabular-nums">{formatSignedBalance(opening)}</p>
           <p className="text-xs text-muted-foreground">
             {set
               ? history.length === 1
-                ? `Owed before this software · set ${formatDate(history[0].createdAt)}`
-                : `Owed before this software · changed ${history.length - 1} time${history.length === 2 ? "" : "s"}, last ${formatDate(history[history.length - 1].createdAt)}`
+                ? `${opening < 0 ? "We owed them" : "They owed us"} before this software · set ${formatDate(history[0].createdAt)}`
+                : `${opening < 0 ? "We owed them" : "They owed us"} before this software · changed ${history.length - 1} time${history.length === 2 ? "" : "s"}, last ${formatDate(history[history.length - 1].createdAt)}`
               : "No opening balance on this account yet."}
           </p>
         </div>
@@ -97,8 +95,7 @@ export function OpeningBalanceCard({
                   <span
                     className={cn("shrink-0 font-semibold tabular-nums", line.change < 0 ? "text-success" : "text-warning")}
                   >
-                    {line.change > 0 ? "+" : ""}
-                    {formatCurrency(line.change)}
+                    {formatSignedBalance(line.change)}
                   </span>
                 </li>
               ))}
@@ -115,8 +112,9 @@ export function OpeningBalanceCard({
                 {set ? "Change opening balance" : "Add opening balance"}: {customerName}
               </DialogTitle>
               <DialogDescription>
-                Money this customer already owed us before the shops started on this software. The difference is posted
-                to their account as its own line, so the old figure stays in the history.
+                What stood between us and this customer before the shops started on this software. No sign: they owed us.
+                A minus: we owed them. The difference is posted to their account as its own line, so the old figure stays
+                in the history.
               </DialogDescription>
             </DialogHeader>
             <ActionForm
@@ -136,18 +134,13 @@ export function OpeningBalanceCard({
             >
               <input type="hidden" name="customerId" value={customerId} />
               <FormField
-                label="Opening balance they owe us (₦)"
-                hint={
-                  lowest > 0
-                    ? `They have paid off ${formatCurrency(lowest)} of it already, so it cannot go below that.`
-                    : "Type 0 to clear an opening balance put on by mistake."
-                }
+                label="Opening balance (₦)"
+                hint="Put a minus in front if we owed them, for example −1400000. Type 0 to clear one put on by mistake."
               >
                 <Input
                   name="openingBalance"
                   type="number"
                   inputMode="decimal"
-                  min={lowest}
                   step="0.01"
                   value={typed}
                   onChange={(event) => setTyped(event.target.value)}
@@ -160,23 +153,19 @@ export function OpeningBalanceCard({
                 <div>
                   <dt className="text-muted-foreground">Opening balance</dt>
                   <dd className="font-semibold tabular-nums">
-                    {formatCurrency(opening)}
-                    {valid && Math.abs(change) >= 0.005 ? <> → {formatCurrency(wanted)}</> : null}
+                    {formatSignedBalance(opening)}
+                    {valid && Math.abs(change) >= 0.005 ? <> → {formatSignedBalance(wanted)}</> : null}
                   </dd>
                 </div>
                 <div>
-                  <dt className="text-muted-foreground">Still owing</dt>
-                  <dd className={cn("font-semibold tabular-nums", tooLow && "text-danger")}>
-                    {formatCurrency(owing)}
-                    {valid && Math.abs(change) >= 0.005 ? <> → {formatCurrency(Math.max(0, nextOwing))}</> : null}
+                  <dt className="text-muted-foreground">Balance</dt>
+                  <dd className="font-semibold tabular-nums">
+                    {formatSignedBalance(owing)}
+                    {valid && Math.abs(change) >= 0.005 ? <> → {formatSignedBalance(nextOwing)}</> : null}
                   </dd>
                 </div>
               </dl>
-              {tooLow ? (
-                <p className="text-xs text-danger">
-                  That is below what they have already paid off. The lowest it can be is {formatCurrency(lowest)}.
-                </p>
-              ) : null}
+
 
               <FormField label="Why" hint="Kept on their account and in Who did what.">
                 <Input

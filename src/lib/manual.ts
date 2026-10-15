@@ -311,6 +311,7 @@ const PAGES: Array<
     doThis: [
       "Add a person with a full name, a phone, and the shop.",
       "If they already owe Abu Twins, type Opening balance they owe us. Leave it at zero if they start clean.",
+      "OPENING BALANCE: on a customer's or a supplier's page, Opening balance, then Add or Change. Type what stood before this software: no sign when they owed us, a minus in front when we owed them (−1400000). For a supplier, money we owed becomes an opening bill you pay like any other.",
       "READING THE BALANCE: a figure with no sign means they owe us. A minus means we owe them: for a customer it is a credit note from a return. Suppliers read the same way.",
       "For a customer already on the list, open their page and use Add or Change on Opening balance. Type the right figure and why. The difference goes on their account as its own line, so the old figure stays in the history. The CEO, the main admin, the Accountant and the Auditor can do this.",
       "Tap Still owing to see who to call for payment.",
