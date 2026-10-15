@@ -20,6 +20,9 @@ export function normalizeStorage(raw?: string | null): string {
   const compact = trimmed.toUpperCase().replace(/\s+/g, "")
   if (compact === "1TERABYTE" || compact === "1TB" || compact === "1024GB") return "1TB"
   if (compact === "2TERABYTE" || compact === "2TB" || compact === "2048GB") return "2TB"
+  // "1TB GB" on a sheet: the TB already says it.
+  const tera = compact.match(/^(\d+)TB(GB)?$/)
+  if (tera) return `${tera[1]}TB`
   if (/^\d+GB$/.test(compact)) return compact
   if (/^\d+$/.test(compact)) return `${compact}GB`
   return trimmed

@@ -8,7 +8,7 @@ import { requireUser } from "@/lib/session"
 import { can } from "@/lib/permissions"
 import { canSetPricesOnBill } from "@/lib/roles"
 import { readTableFile, readWorkbookGrids } from "@/lib/table-file"
-import { makeOpeningSku, openingProductKey, planOpeningStock } from "@/lib/opening-stock"
+import { makeOpeningSku, openingProductKey, planOpeningStock, tabHasCostColumn } from "@/lib/opening-stock"
 import { planCustomers, planImeis, planStock, type CatalogItem, type ShopRef } from "@/lib/upload-plan"
 import {
   OPENING_STOCK_ALL_SHOPS,
@@ -1242,10 +1242,22 @@ export async function readBillWorkbook(formData: FormData): Promise<BillSheetRes
     return { error: `Use a sheet of up to ${MAX_ROWS.toLocaleString("en-NG")} rows.` }
   }
 
+  // A tab with no cost column is a checklist (names and IMEIs to tick), not
+  // stock. Reading it as stock turned every name on it into a phone with no
+  // IMEI, and the whole bill was refused.
+  const leftOut = grids.filter((tab) => tab.grid.some((row) => row.some(Boolean)) && !tabHasCostColumn(tab.grid))
+  const stockTabs = grids.filter((tab) => tabHasCostColumn(tab.grid))
+  if (!stockTabs.length) {
+    return {
+      error:
+        "No tab in that sheet has both PRODUCT NAME and UNIT COST PRICE on its header row. Download the template on this screen and copy the stock into it.",
+    }
+  }
+
   // Read leniently so one bad row is named instead of the whole sheet being
   // refused without saying where; a bill still needs a cost on every item,
   // which is checked just below.
-  const plan = planOpeningStock(grids, { allowMissingPrices: true })
+  const plan = planOpeningStock(stockTabs, { allowMissingPrices: true })
   // A number written twice is counted once and said so; any other row the
   // reader set aside would leave the bill short, so it stops the fill.
   const repeats = plan.skipped.filter((row) => row.includes("on this workbook twice"))
@@ -1264,11 +1276,14 @@ export async function readBillWorkbook(formData: FormData): Promise<BillSheetRes
   const brandIds = new Map(brands.map((row) => [row.name.trim().toLowerCase(), row.id]))
   const categoryIds = new Map(categories.map((row) => [row.name.trim().toLowerCase(), row.id]))
 
-  const unitsByKey = new Map<string, string[]>()
+  // Units of one model at different costs stay on their own lines, so each
+  // keeps the cost written on its row.
+  const unitsByKey = new Map<string, Map<number | null, string[]>>()
   for (const unit of plan.units) {
-    const list = unitsByKey.get(unit.productKey) ?? []
-    list.push(unit.identity.value)
-    unitsByKey.set(unit.productKey, list)
+    const byCost = unitsByKey.get(unit.productKey) ?? new Map<number | null, string[]>()
+    const cost = unit.cost ?? null
+    byCost.set(cost, [...(byCost.get(cost) ?? []), unit.identity.value])
+    unitsByKey.set(unit.productKey, byCost)
   }
   const qtyByKey = new Map(plan.quantities.map((row) => [row.productKey, row.quantity]))
 
@@ -1277,8 +1292,10 @@ export async function readBillWorkbook(formData: FormData): Promise<BillSheetRes
   for (const draft of plan.products) {
     const key = openingProductKey(draft)
     const tracked = draft.tracking === "IMEI" || draft.tracking === "SERIAL"
-    const identities = tracked ? unitsByKey.get(key) ?? [] : []
-    const quantity = tracked ? identities.length : qtyByKey.get(key) ?? 0
+    const costGroups: Array<{ cost: number; identities: string[]; quantity: number }> = tracked
+      ? [...(unitsByKey.get(key) ?? new Map()).entries()].map(([cost, ids]) => ({ cost: cost ?? draft.costPrice, identities: ids, quantity: ids.length }))
+      : [{ cost: draft.costPrice, identities: [], quantity: qtyByKey.get(key) ?? 0 }]
+    const quantity = costGroups.reduce((sum, group) => sum + group.quantity, 0)
     if (quantity < 1) {
       problems.push(
         tracked
@@ -1287,7 +1304,7 @@ export async function readBillWorkbook(formData: FormData): Promise<BillSheetRes
       )
       continue
     }
-    if (!(draft.costPrice > 0)) {
+    if (costGroups.some((group) => !(group.cost > 0))) {
       problems.push(`${draft.name}: the unit cost price is missing. A supplier bill needs what each one cost.`)
       continue
     }
@@ -1296,21 +1313,23 @@ export async function readBillWorkbook(formData: FormData): Promise<BillSheetRes
       unknownBrands.add(draft.brand)
       continue
     }
-    lines.push({
-      productMode: "new",
-      productId: "",
-      productName: draft.name,
-      brandId,
-      categoryId: categoryIds.get(draft.category.trim().toLowerCase()) || "",
-      condition: draft.condition,
-      storage: normalizeStorage(draft.storage || ""),
-      costPrice: draft.costPrice,
-      minimumPrice: draft.minimumPrice,
-      sellingPrice: draft.sellingPrice,
-      quantity,
-      tracking: draft.tracking,
-      identities,
-    })
+    for (const group of costGroups) {
+      lines.push({
+        productMode: "new",
+        productId: "",
+        productName: draft.name,
+        brandId,
+        categoryId: categoryIds.get(draft.category.trim().toLowerCase()) || "",
+        condition: draft.condition,
+        storage: normalizeStorage(draft.storage || ""),
+        costPrice: group.cost,
+        minimumPrice: draft.minimumPrice,
+        sellingPrice: draft.sellingPrice,
+        quantity: group.quantity,
+        tracking: draft.tracking,
+        identities: group.identities,
+      })
+    }
   }
   for (const brand of unknownBrands) {
     problems.push(`Brand "${brand}" is not on the brand list. Add it on Phones and items, or correct the spelling on the sheet.`)
@@ -1325,7 +1344,10 @@ export async function readBillWorkbook(formData: FormData): Promise<BillSheetRes
   if (!lines.length) return { error: "There is nothing to put on a bill in that sheet." }
   return {
     lines,
-    notes: repeats.slice(0, 40).map((row) => row.replace(/, so it is counted once\..*$/, ", so it is counted once.")),
+    notes: [
+      ...leftOut.map((tab) => `Tab ${tab.sheet} has no UNIT COST PRICE column, so it was read as a checklist and left out.`),
+      ...repeats.slice(0, 40).map((row) => row.replace(/, so it is counted once\..*$/, ", so it is counted once.")),
+    ],
     fileName: file.name,
   }
 }
@@ -1602,9 +1624,14 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
         continue
       }
       if (Math.abs(existing.costPrice - item.costPrice) > 0.005) {
-        return {
-          error: `${item.productName} is on this bill twice with two different cost prices. Goods on the way need one cost for each item. Use one cost, or put the second lot on its own bill.`,
-        }
+        // One line per item while on the way, so two costs share one line at
+        // their average. The bill total stays exactly what the sheet says.
+        const together = existing.quantity + item.quantity
+        const value = existing.costPrice * existing.quantity + item.costPrice * item.quantity
+        softNotes.push(
+          `${item.productName} came at two costs (₦${existing.costPrice.toLocaleString("en-NG")} and ₦${item.costPrice.toLocaleString("en-NG")}). On the way it is one line at ₦${money(value / together).toLocaleString("en-NG")} each; the bill total is unchanged.`
+        )
+        existing.costPrice = value / together
       }
       existing.quantity += item.quantity
       existing.identities.push(...item.identities)

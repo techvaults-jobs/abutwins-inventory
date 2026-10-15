@@ -601,7 +601,7 @@ export function UploadStockWizard({
                   <FileSpreadsheet className="h-4 w-4 text-primary" /> Fill this bill from an Excel sheet
                 </p>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  The same sheet as opening stock: PRODUCT NAME, BRAND, QTY/IMEI/SERIAL NO, CONDITION, SPECIFICATION, UNIT COST PRICE. One row for each phone. Every row goes on this one bill.
+                  Download the template, fill one row for each phone (its IMEI in QTY/IMEI/SERIAL NO) with its cost and selling prices, then choose it here. Every row goes on this one bill. Tabs without UNIT COST PRICE are left out.
                 </p>
               </div>
               <input
@@ -615,9 +615,18 @@ export function UploadStockWizard({
                   if (file) void fillFromSheet(file)
                 }}
               />
-              <Button type="button" size="sm" variant="outline" onClick={() => sheetInput.current?.click()} disabled={busy || readingSheet}>
-                {readingSheet ? "Reading the sheet" : "Choose the sheet"}
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <a
+                  href="/templates/supplier-bill-template.xlsx"
+                  download="Supplier bill template.xlsx"
+                  className="inline-flex h-9 items-center rounded-md border border-input px-3 text-sm font-medium hover:bg-accent"
+                >
+                  Download the template
+                </a>
+                <Button type="button" size="sm" variant="outline" onClick={() => sheetInput.current?.click()} disabled={busy || readingSheet}>
+                  {readingSheet ? "Reading the sheet" : "Choose the sheet"}
+                </Button>
+              </div>
             </div>
             {sheetProblems.length ? (
               <div className="mt-3 rounded-md border border-danger/30 bg-danger-soft p-3">

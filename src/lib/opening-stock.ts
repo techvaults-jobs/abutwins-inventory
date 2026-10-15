@@ -35,6 +35,8 @@ export type OpeningUnitLine = {
   sheet: string
   line: number
   productKey: string
+  /** The cost written on this unit's own row; one model can come at two costs. */
+  cost?: number
   identity: Extract<OpeningIdentity, { kind: "imei" | "serial" }>
 }
 
@@ -101,7 +103,7 @@ function mapHeaders(cells: string[]) {
     else if (key === "condition") index.condition = i
     else if (key.includes("specification") || key.includes("storage") || key === "spec") index.spec = i
     else if (key.includes("unit_cost") || (key.includes("cost") && key.includes("price"))) index.cost = i
-    else if (key.includes("min") && key.includes("sell")) index.minSell = i
+    else if ((key.includes("min") || key.includes("lowest")) && key.includes("sell")) index.minSell = i
     else if (key.includes("selling") && key.includes("price")) index.selling = i
     else if (key === "s_n" || key === "sn" || key === "s_no") index.sn = i
   })
@@ -250,6 +252,17 @@ export function classifyOpeningIdentity(sheet: string, raw: string): OpeningIden
   if (wholeNumber && asNumber > PLAUSIBLE_PIECE_COUNT) return { kind: "serial", value }
   if (value.length >= 4) return { kind: "serial", value }
   return { kind: "bad", reason: "put how many pieces, or a serial if this unit has one" }
+}
+
+/**
+ * True when a tab carries stock: a header with PRODUCT NAME and a cost
+ * column. A checklist tab (names and IMEIs to tick, no cost) is not stock.
+ */
+export function tabHasCostColumn(grid: string[][]) {
+  const at = findHeaderRow(grid)
+  if (at < 0) return false
+  const headers = mapHeaders(grid[at])
+  return headers.name != null && headers.cost != null
 }
 
 /** How a workbook row names its item: units and counts point at products by this. */
@@ -455,6 +468,7 @@ export function planOpeningStock(
         sheet,
         line,
         productKey: key,
+        cost: costOk ? rawCost : undefined,
         identity:
           tracking === "SERIAL"
             ? { kind: "serial", value: identity.value }
