@@ -1,7 +1,7 @@
 import Link from "next/link"
 import { FileSpreadsheet, PackagePlus, ScanLine } from "lucide-react"
 import { PageHeader } from "@/components/shared"
-import { getUploadProgress } from "@/app/actions/uploads"
+import { getBillToContinue, getUploadProgress } from "@/app/actions/uploads"
 import { watDayKey } from "@/lib/lagos-day"
 import { generateDocNumber } from "@/lib/utils"
 import { UploadStockWizard } from "./upload-stock-wizard"
@@ -16,9 +16,12 @@ export const maxDuration = 180
  * and one phone after another on a bill. This screen is the bill path. The Excel
  * path and the single-phone path sit one click away.
  */
-export default async function UploadsPage() {
+export default async function UploadsPage({ searchParams }: { searchParams: Promise<{ bill?: string }> }) {
+  const { bill } = await searchParams
   const progress = await getUploadProgress()
   if (!progress) return null
+  // ?bill=PO-… opens straight onto that bill, to add more of its items.
+  const continueBill = bill ? await getBillToContinue(bill) : null
 
   return (
     <div className="space-y-6">
@@ -72,6 +75,7 @@ export default async function UploadsPage() {
         products={progress.products}
         defaultInvoiceNumber={generateDocNumber("PO")}
         defaultUploadDate={watDayKey()}
+        continueBill={continueBill ?? undefined}
       />
 
       <div className="surface-card p-5">

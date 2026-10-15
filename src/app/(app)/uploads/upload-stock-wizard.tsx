@@ -56,6 +56,9 @@ const ON_THE_WAY_PHASES = [
   "Saving the supplier bill and what is still owed",
 ]
 
+/** A bill already on the system that more items are being added to. */
+type BillToContinue = { invoiceNumber: string; supplierId: string; branchId: string; supplierName: string }
+
 export function UploadStockWizard({
   shops,
   suppliers,
@@ -66,6 +69,7 @@ export function UploadStockWizard({
   defaultInvoiceNumber,
   defaultUploadDate,
   startOnTheWay = false,
+  continueBill,
 }: {
   shops: Shop[]
   suppliers: Supplier[]
@@ -91,6 +95,8 @@ export function UploadStockWizard({
    * goods land.
    */
   startOnTheWay?: boolean
+  /** Open on a bill already on the system, to add more of its items. */
+  continueBill?: BillToContinue
 }) {
   const router = useRouter()
   const [busy, setBusy] = useState(false)
@@ -113,9 +119,13 @@ export function UploadStockWizard({
   }, [products])
 
   // Header state
-  const [invoiceNumber, setInvoiceNumber] = useState(defaultInvoiceNumber)
+  // One physical invoice is one bill, however many sittings it takes. While
+  // `continuing` is set, everything saved goes onto that bill.
+  const [continuing, setContinuing] = useState<BillToContinue | null>(continueBill ?? null)
+  const [lastSaved, setLastSaved] = useState<BillToContinue | null>(null)
+  const [invoiceNumber, setInvoiceNumber] = useState(continueBill?.invoiceNumber ?? defaultInvoiceNumber)
   const [uploadDate, setUploadDate] = useState(defaultUploadDate)
-  const [branchId, setBranchId] = useState(shops[0]?.id || "")
+  const [branchId, setBranchId] = useState(continueBill?.branchId || shops[0]?.id || "")
   // Opening stock is never a supplier on a bill, so it is not on the list and
   // must not be the one picked to begin with. When it sat first, the list
   // showed the next supplier while the bill was sent under Opening stock, and
@@ -125,7 +135,7 @@ export function UploadStockWizard({
     [suppliers]
   )
   const [supplierMode, setSupplierMode] = useState<"existing" | "new">(listedSuppliers.length ? "existing" : "new")
-  const [supplierId, setSupplierId] = useState(listedSuppliers[0]?.id || "")
+  const [supplierId, setSupplierId] = useState(continueBill?.supplierId || listedSuppliers[0]?.id || "")
   const [newSupplierName, setNewSupplierName] = useState("")
   const [newSupplierPhone, setNewSupplierPhone] = useState("")
   const [newSupplierCountry, setNewSupplierCountry] = useState("")
@@ -315,7 +325,9 @@ export function UploadStockWizard({
 
     let result: UploadResult
     try {
-      const UPLOAD_TIMEOUT_MS = 90_000
+      // The server allows a bill three minutes. Giving up sooner on this side
+      // told staff a long bill had failed while it was still being saved.
+      const UPLOAD_TIMEOUT_MS = 175_000
       const timeoutPromise = new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("timeout")), UPLOAD_TIMEOUT_MS)
       )
@@ -325,7 +337,7 @@ export function UploadStockWizard({
       const isTimeout = err instanceof Error && err.message === "timeout"
       toast.error(
         isTimeout
-          ? "The upload is taking too long. The network may have dropped. Wait a moment and try again — duplicates are handled automatically."
+          ? `No answer from the shop system after 3 minutes. Open Goods from supplier and look for ${invoiceNumber} before trying again: it may have saved. If it is there, add only what is missing to it.`
           : "That did not reach the shop system. Check your network and try again."
       )
       return
@@ -343,9 +355,11 @@ export function UploadStockWizard({
     ].filter(Boolean)
     toast.success(
       [
-        result.onTheWay
-          ? `Booked as goods on the way on ${result.invoiceNumber}. Nothing can be sold until it is received on Goods on the way`
-          : `Stock uploaded on ${result.invoiceNumber}`,
+        result.addedToBill
+          ? `Added to bill ${result.invoiceNumber}${result.onTheWay ? " as goods on the way" : ""}`
+          : result.onTheWay
+            ? `Booked as goods on the way on ${result.invoiceNumber}. Nothing can be sold until it is received on Goods on the way`
+            : `Stock uploaded on ${result.invoiceNumber}`,
         result.phones ? `${result.phones} phones ${result.onTheWay ? "expected" : "booked"}` : null,
         result.pieces ? `${result.pieces} pieces ${result.onTheWay ? "expected" : "added"}` : null,
         result.shippingFee ? `Shipping fee ${formatCurrency(result.shippingFee)} taken off, so ${formatCurrency(result.payable ?? 0)} is payable to the supplier` : null,
@@ -357,8 +371,22 @@ export function UploadStockWizard({
     )
     setSoftNotes(result.problems ?? [])
 
-    // Reset form with new PO
-    setInvoiceNumber(generateDocNumber("PO"))
+    // Ready for the next lot. The bill just saved can take more of the same
+    // invoice's items: the panel at the top offers it, and staying on it is one tap.
+    const savedTo: BillToContinue = {
+      invoiceNumber: result.invoiceNumber ?? invoiceNumber,
+      supplierId: result.supplierId ?? supplierId,
+      branchId,
+      supplierName:
+        listedSuppliers.find((row) => row.id === (result.supplierId ?? supplierId))?.name ?? (newSupplierName.trim() || "this supplier"),
+    }
+    setLastSaved(savedTo)
+    if (continuing) {
+      setContinuing(savedTo)
+      setInvoiceNumber(savedTo.invoiceNumber)
+    } else {
+      setInvoiceNumber(generateDocNumber("PO"))
+    }
     setAmountPaid(0)
     setShippingFee(0)
     setPayBankId("")
@@ -406,10 +434,53 @@ export function UploadStockWizard({
           </p>
         </div>
         <div className="rounded-lg border border-border bg-card px-4 py-2 text-right">
-          <p className="eyebrow">Bill number</p>
+          <p className="eyebrow">{continuing ? "Adding to bill" : "Bill number"}</p>
           <p className="font-mono text-sm font-semibold text-primary">{invoiceNumber}</p>
         </div>
       </header>
+
+      {continuing ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-primary/20 bg-primary/5 px-5 py-3 text-sm">
+          <p>
+            Everything you save now goes onto bill <span className="font-mono font-semibold">{continuing.invoiceNumber}</span>{" "}
+            from <span className="font-semibold">{continuing.supplierName}</span>, the same as the paper invoice. Save as
+            often as you like.
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={() => {
+              setContinuing(null)
+              setInvoiceNumber(generateDocNumber("PO"))
+            }}
+          >
+            Start a new bill instead
+          </Button>
+        </div>
+      ) : lastSaved ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-success/30 bg-success-soft px-5 py-3 text-sm">
+          <p>
+            Saved on bill <span className="font-mono font-semibold">{lastSaved.invoiceNumber}</span>. More items from the same
+            paper invoice? Keep them on that one bill.
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            disabled={busy}
+            onClick={() => {
+              setContinuing(lastSaved)
+              setInvoiceNumber(lastSaved.invoiceNumber)
+              setBranchId(lastSaved.branchId)
+              setSupplierMode("existing")
+              setSupplierId(lastSaved.supplierId)
+            }}
+          >
+            Add more items to {lastSaved.invoiceNumber}
+          </Button>
+        </div>
+      ) : null}
 
       <div className="space-y-6 p-5">
         <section className="space-y-3">
@@ -423,7 +494,7 @@ export function UploadStockWizard({
           <div className="grid gap-3 sm:grid-cols-3">
             <label className="block text-sm">
               <span className="eyebrow mb-1 block">Which shop the goods go to</span>
-              <Select value={branchId} onChange={(e) => setBranchId(e.target.value)} required disabled={busy}>
+              <Select value={branchId} onChange={(e) => setBranchId(e.target.value)} required disabled={busy || Boolean(continuing)}>
                 {shops.map((shop) => (
                   <option key={shop.id} value={shop.id}>
                     {shop.name} ({shop.code})
@@ -453,7 +524,7 @@ export function UploadStockWizard({
                 <button
                   type="button"
                   onClick={() => setSupplierMode("new")}
-                  disabled={busy}
+                  disabled={busy || Boolean(continuing)}
                   className={`flex-1 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors ${
                     supplierMode === "new" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"
                   }`}
@@ -471,7 +542,7 @@ export function UploadStockWizard({
                 value={supplierId}
                 onChange={(e) => setSupplierId(e.target.value)}
                 required
-                disabled={busy || listedSuppliers.length === 0}
+                disabled={busy || listedSuppliers.length === 0 || Boolean(continuing)}
                 emptyLabel="No supplier is on the list yet. Choose New supplier."
               >
                 {listedSuppliers.map((supplier) => (

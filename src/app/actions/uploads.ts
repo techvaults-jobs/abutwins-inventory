@@ -69,6 +69,10 @@ export type UploadResult = {
   shippingFee?: number
   /** Uploaded value less the shipping fee. */
   payable?: number
+  /** The supplier the bill is under, so the screen can keep adding to it. */
+  supplierId?: string
+  /** True when the lines went onto a bill already on the system. */
+  addedToBill?: boolean
   /** Set when Many at once (Excel) put the file on a supplier bill. */
   asSupplierBill?: boolean
   /** Set when the goods were booked as still on the way, not onto the shelf. */
@@ -1253,6 +1257,23 @@ export async function getUploadProgress() {
   }
 }
 
+/**
+ * A bill that Upload stock can keep adding to: one loaded on Upload stock,
+ * not cancelled, in a shop this person can load. Null otherwise.
+ */
+export async function getBillToContinue(invoiceNumber: string) {
+  const gate = await requireUploader()
+  if ("error" in gate) return null
+  const bill = await prisma.purchase.findUnique({
+    where: { invoiceNumber: invoiceNumber.trim() },
+    select: { invoiceNumber: true, supplierId: true, branchId: true, source: true, status: true, supplier: { select: { name: true } } },
+  })
+  if (!bill || bill.source !== UPLOAD_STOCK_SOURCE || bill.status === "CANCELLED") return null
+  const shopGate = await resolveWritableShopId(gate.user, bill.branchId)
+  if ("error" in shopGate || shopGate.shopId !== bill.branchId) return null
+  return { invoiceNumber: bill.invoiceNumber, supplierId: bill.supplierId, branchId: bill.branchId, supplierName: bill.supplier.name }
+}
+
 export type BillSheetResult = {
   error?: string
   /** Lines the sheet could not give; nothing is filled in while any remain. */
@@ -1599,9 +1620,14 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
     createdProduct: boolean
   }> = []
 
+  // One look-up per distinct item, however many lines carry it: a long bill
+  // of one model used to ask the database the same questions on every line.
+  const resolvedByKey = new Map<string, Awaited<ReturnType<typeof resolveBillProduct>>>()
   for (let i = 0; i < payload.items.length; i++) {
     const item = payload.items[i]
-    const resolved = await resolveBillProduct(item, shop.id)
+    const lookupKey = [billLineName(item).toLowerCase(), item.brandId || "", billLineCondition(item) || "", billLineStorage(item) || "", item.tracking, item.productId || ""].join("|")
+    const resolved = resolvedByKey.get(lookupKey) ?? (await resolveBillProduct(item, shop.id))
+    resolvedByKey.set(lookupKey, "error" in resolved ? resolved : { ...resolved, createdProduct: false })
     if ("error" in resolved) {
       return { error: `Item line #${i + 1}: ${resolved.error}` }
     }
@@ -1695,16 +1721,55 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
 
   // 4. Calculate Financials
   const invoiceNumber = payload.invoiceNumber || generateDocNumber("PO")
+  // One physical invoice is one bill, however many sittings it takes to load.
+  // A bill number already on the system, for the same supplier and shop, takes
+  // the new lines; it used to fail on the repeated number, so a long invoice
+  // was split across several bills.
+  const existingBill = payload.invoiceNumber
+    ? await prisma.purchase.findUnique({
+        where: { invoiceNumber },
+        select: {
+          id: true,
+          supplierId: true,
+          branchId: true,
+          source: true,
+          status: true,
+          totalAmount: true,
+          paidAmount: true,
+          returnedAmount: true,
+          shippingFee: true,
+          notes: true,
+          receivedDate: true,
+        },
+      })
+    : null
+  if (existingBill) {
+    if (existingBill.supplierId !== supplierId || existingBill.branchId !== shop.id) {
+      return { error: `Bill ${invoiceNumber} is already on the system for another supplier or shop. Open that bill, or start a new one.` }
+    }
+    if (existingBill.source !== UPLOAD_STOCK_SOURCE || existingBill.status === "CANCELLED") {
+      return { error: `Bill ${invoiceNumber} cannot take more items here. Start a new bill.` }
+    }
+  }
   const totalAmount = billLines.reduce((sum, item) => sum + item.quantity * item.costPrice, 0)
   const shippingFee = Math.max(0, money(payload.shippingFee))
-  if (shippingFee > totalAmount + 0.005) {
+  const billBefore = existingBill
+    ? purchaseBalance(existingBill)
+    : { billed: 0, shipping: 0, payable: 0, paid: 0, sentBack: 0, remaining: 0, owed: 0, surplus: 0 }
+  if (shippingFee + billBefore.shipping > totalAmount + billBefore.billed + 0.005) {
     return {
       error: `The shipping fee (₦${shippingFee.toLocaleString("en-NG")}) is more than everything uploaded on this bill (₦${totalAmount.toLocaleString("en-NG")}). Check the figure.`,
     }
   }
   // The shipping fee is inside the uploaded value but is not the supplier's
   // money, so the supplier is due the value less the fee.
-  const payable = Math.max(0, totalAmount - shippingFee)
+  const billAfter = purchaseBalance({
+    totalAmount: billBefore.billed + totalAmount,
+    paidAmount: billBefore.paid,
+    returnedAmount: billBefore.sentBack,
+    shippingFee: billBefore.shipping + shippingFee,
+  })
+  const payable = billAfter.owed
   const amountPaid = Math.max(0, Number(payload.amountPaid) || 0)
   if (amountPaid > payable + 0.005) {
     return {
@@ -1726,7 +1791,7 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
     }
   }
   const balanceOwed = Math.max(0, payable - amountPaid)
-  const fullyPaid = payable > 0 && amountPaid >= payable - 0.005
+  const fullyPaid = billAfter.payable > 0 && balanceOwed <= 0.005
   const uploadDate = payload.uploadDate ? new Date(payload.uploadDate) : new Date()
   const expectedDate = onTheWay && payload.expectedDate ? new Date(payload.expectedDate) : null
   const lotNumber = onTheWay ? generateDocNumber("IN") : null
@@ -1736,8 +1801,28 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
   const totalProductsAdded = billLines.filter((i) => i.createdProduct).length
 
   const purchase = await prisma.$transaction(async (tx) => {
-    // Create Purchase (PO)
-    const po = await tx.purchase.create({
+    // More lines on a bill already on the system: its figures grow, and a
+    // line says when and how much was added, so the paper trail is whole.
+    const po = existingBill
+      ? await tx.purchase.update({
+          where: { id: existingBill.id },
+          data: {
+            totalAmount: { increment: totalAmount.toFixed(2) },
+            shippingFee: { increment: shippingFee.toFixed(2) },
+            paidAmount: { increment: amountPaid.toFixed(2) },
+            paymentMethod: fullyPaid ? "PAID_ON_UPLOAD" : billBefore.paid + amountPaid > 0 ? "PARTIAL_PAYMENT" : "UNPAID",
+            ...(onTheWay && expectedDate ? { expectedDate } : {}),
+            notes: [
+              existingBill.notes,
+              `Added ${billLines.length} line(s) worth ₦${totalAmount.toLocaleString("en-NG")} on ${uploadDate.toISOString().slice(0, 10)}${onTheWay ? " as goods still on the way" : ""}.`,
+              amountPaid > 0 ? `Paid ₦${amountPaid.toLocaleString("en-NG")} with it.` : null,
+              payload.notes || null,
+            ]
+              .filter(Boolean)
+              .join(" "),
+          },
+        })
+      : await tx.purchase.create({
       data: {
         invoiceNumber,
         supplierId,
@@ -1842,17 +1927,42 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
     // Process each item
     for (const item of billLines) {
       const tracked = item.tracking === "IMEI" || item.tracking === "SERIAL"
-      // Purchase Item
-      await tx.purchaseItem.create({
-        data: {
-          purchaseId: po.id,
-          productId: item.productId,
-          quantity: item.quantity,
-          receivedQty: onTheWay ? 0 : item.quantity,
-          costPrice: item.costPrice.toFixed(2),
-          totalAmount: (item.quantity * item.costPrice).toFixed(2),
-        },
-      })
+      // Purchase Item. On a bill that already has this item, the line grows:
+      // at the same cost it simply counts more; still on the way (received
+      // against one line per item) two costs share the line at their average.
+      const sameLine = existingBill
+        ? await tx.purchaseItem.findFirst({
+            where: {
+              purchaseId: po.id,
+              productId: item.productId,
+              ...(onTheWay ? {} : { costPrice: item.costPrice.toFixed(2) }),
+            },
+          })
+        : null
+      if (sameLine) {
+        const quantity = sameLine.quantity + item.quantity
+        const lineTotal = money(sameLine.totalAmount) + item.quantity * item.costPrice
+        await tx.purchaseItem.update({
+          where: { id: sameLine.id },
+          data: {
+            quantity,
+            receivedQty: onTheWay ? sameLine.receivedQty : sameLine.receivedQty + item.quantity,
+            costPrice: (lineTotal / quantity).toFixed(2),
+            totalAmount: lineTotal.toFixed(2),
+          },
+        })
+      } else {
+        await tx.purchaseItem.create({
+          data: {
+            purchaseId: po.id,
+            productId: item.productId,
+            quantity: item.quantity,
+            receivedQty: onTheWay ? 0 : item.quantity,
+            costPrice: item.costPrice.toFixed(2),
+            totalAmount: (item.quantity * item.costPrice).toFixed(2),
+          },
+        })
+      }
 
       if (lot) {
         // Counted as coming, not as stock: the shelf and the till do not see it.
@@ -1912,6 +2022,20 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
       }
     }
 
+    if (existingBill) {
+      // Where the whole bill stands now: every line in, some, or none yet.
+      const lines = await tx.purchaseItem.findMany({ where: { purchaseId: po.id }, select: { quantity: true, receivedQty: true } })
+      const allIn = lines.every((row) => row.receivedQty >= row.quantity)
+      const someIn = lines.some((row) => row.receivedQty > 0)
+      await tx.purchase.update({
+        where: { id: po.id },
+        data: {
+          status: allIn ? "RECEIVED" : someIn ? "PARTIAL_RECEIVED" : "ORDERED",
+          receivedDate: allIn ? existingBill.receivedDate ?? uploadDate : existingBill.receivedDate,
+        },
+      })
+    }
+
     return po
   }, { timeout: 180_000, maxWait: 20_000 })
 
@@ -1946,6 +2070,8 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
     success: true,
     invoiceNumber,
     purchaseId: purchase.id,
+    supplierId,
+    addedToBill: Boolean(existingBill),
     submissionValue: totalAmount,
     paidAmount: amountPaid,
     balanceOwed,

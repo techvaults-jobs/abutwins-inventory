@@ -330,7 +330,23 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
           ) : null}
         </div>
       ) : null}
-      {receivedOnGoodsOnTheWay ? (
+      {purchase.source === "UPLOAD_STOCK" && purchase.status !== "CANCELLED" && !isOpening && (await can(me.role, "action.upload")) ? (
+        <div className="surface-card flex flex-wrap items-center justify-between gap-3 p-5">
+          <div>
+            <h3 className="font-semibold">More items on this paper invoice?</h3>
+            <p className="text-sm text-muted-foreground">
+              Add them to this same bill, as many times as it takes, so one bill on the system matches the invoice in your hand.
+            </p>
+          </div>
+          <Link
+            href={`/uploads?bill=${encodeURIComponent(purchase.invoiceNumber)}`}
+            className="inline-flex h-10 items-center rounded-lg bg-primary px-4 text-sm font-semibold text-primary-foreground hover:bg-primary/90"
+          >
+            Add more items to this bill
+          </Link>
+        </div>
+      ) : null}
+            {receivedOnGoodsOnTheWay ? (
         <div className="surface-card flex flex-wrap items-center justify-between gap-3 border-warning/30 p-5">
           <div>
             <h3 className="font-semibold">These goods are still on the way</h3>
