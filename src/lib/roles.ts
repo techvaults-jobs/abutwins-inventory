@@ -49,6 +49,18 @@ export function canSeeProfit(role: UserRole) {
 }
 
 /**
+ * The till and the shop floor see today's money, not the shop's running
+ * totals: the month's sales, expenses and supplier payments, stock value, what
+ * we owe suppliers, the six-month chart or how the shops rank.
+ */
+export const FLOOR_ROLES: readonly UserRole[] = ["CASHIER", "SALES_EXECUTIVE"]
+
+/** The shop's totals beyond today. See FLOOR_ROLES. */
+export function canSeeShopTotals(role: UserRole) {
+  return !FLOOR_ROLES.includes(role)
+}
+
+/**
  * What an item cost us, on the price list, stock value and reports. People
  * loading stock still type the cost from the supplier bill as they enter it.
  */

@@ -32,6 +32,7 @@ import { KpiCard, Sparkline, StatCard, StatGrid } from "@/components/shared"
 import { Badge } from "@/components/ui/badge"
 import { formatShopWhen, formatWatLong, watDayKey } from "@/lib/lagos-day"
 import { getAllowedKeys, hrefsForKeys } from "@/lib/permissions"
+import { canSeeShopTotals } from "@/lib/roles"
 import { getAppSettings, lowStockLimit } from "@/lib/settings"
 import { InstallAppBanner } from "@/components/install-app"
 import { UpdatedStamp } from "@/components/updated-stamp"
@@ -134,6 +135,8 @@ export default async function DashboardPage() {
   // Sales, money and stock figures are for people who work the business. A
   // system-only main admin gets their jobs and what needs them, nothing more.
   const seesBusiness = ["/sales", "/finance", "/reports", "/owner", "/inventory", "/pos"].some((href) => allowed.has(href))
+  // The till and the shop floor see today, not the month or the shop's totals.
+  const seesTotals = seesBusiness && canSeeShopTotals(data.user.role)
   const tasks = data.tasks
     .filter((task) => allowed.has(task.href.split("?")[0]))
     .map((task) => ({ ...task, urgency: URGENCY[task.href] ?? TIDY }))
@@ -268,6 +271,8 @@ export default async function DashboardPage() {
 
       {seesBusiness ? (
         <>
+      {seesTotals ? (
+        <>
       <section>
         <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">This month</h3>
         <StatGrid>
@@ -318,6 +323,8 @@ export default async function DashboardPage() {
           <DevicePie data={data.devices} />
         </div>
       </div>
+        </>
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-7">
         <div className="surface-card overflow-hidden xl:col-span-4">
@@ -367,7 +374,7 @@ export default async function DashboardPage() {
               ))}
             </div>
           </div>
-          {data.ranking.length > 1 ? (
+          {seesTotals && data.ranking.length > 1 ? (
             <div className="surface-card p-5">
               <h3 className="mb-3 font-semibold">Shop sales ranking</h3>
               <div className="space-y-2.5">

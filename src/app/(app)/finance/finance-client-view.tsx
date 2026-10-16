@@ -42,6 +42,8 @@ type LedgerEntry = {
 }
 
 type FinanceData = {
+  /** False for the till and the shop floor: the totals below are zeroed. */
+  showTotals: boolean
   revenue: number
   expenditure: number
   supplierPayments: number
@@ -145,6 +147,7 @@ export function FinanceClientView({ data }: { data: FinanceData }) {
         </div>
       </Toolbar>
 
+      {data.showTotals ? (
       <StatGrid>
         <StatCard
           // Money actually received, not invoiced: Reports' "Total sales" is invoiced.
@@ -175,6 +178,7 @@ export function FinanceClientView({ data }: { data: FinanceData }) {
           tone={data.netCashFlow >= 0 ? "success" : "danger"}
         />
       </StatGrid>
+      ) : null}
 
       <div className="grid gap-4 md:grid-cols-2">
         <button type="button" onClick={() => setLedger("CASH")} className="surface-card-interactive group p-5">
