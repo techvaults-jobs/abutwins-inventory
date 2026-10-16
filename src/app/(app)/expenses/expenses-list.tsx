@@ -10,6 +10,7 @@ import { downloadTable } from "@/lib/download-table"
 import { formatShopWhen } from "@/lib/lagos-day"
 import { statusLabel } from "@/lib/status"
 import { formatCurrency } from "@/lib/utils"
+import { FixExpenseDialog } from "./fix-expense-dialog"
 
 export type ExpenseRow = {
   id: string
@@ -24,13 +25,18 @@ export type ExpenseRow = {
 
 type ExpenseFilter = "all" | "waiting" | "approved"
 
-export function ExpensesList({ expenses }: { expenses: ExpenseRow[] }) {
+/** Cancelled by the CEO or the main admin: kept on the list at nothing. */
+const isCancelled = (row: ExpenseRow) => row.description.startsWith("Cancelled: ")
+const approvalOf = (row: ExpenseRow) => (isCancelled(row) ? "CANCELLED" : row.approvedAt ? "APPROVED" : "PENDING")
+
+export function ExpensesList({ expenses, canFix = false }: { expenses: ExpenseRow[]; canFix?: boolean }) {
   const [status, setStatus] = useState<ExpenseFilter>("all")
+  const [fixing, setFixing] = useState<ExpenseRow | null>(null)
 
   const filtered = useMemo(
     () =>
       expenses.filter((expense) => {
-        if (status === "waiting") return !expense.approvedAt
+        if (status === "waiting") return !expense.approvedAt && !isCancelled(expense)
         if (status === "approved") return Boolean(expense.approvedAt)
         return true
       }),
@@ -39,7 +45,7 @@ export function ExpensesList({ expenses }: { expenses: ExpenseRow[] }) {
   const counts = useMemo(
     () => ({
       all: expenses.length,
-      waiting: expenses.filter((expense) => !expense.approvedAt).length,
+      waiting: expenses.filter((expense) => !expense.approvedAt && !isCancelled(expense)).length,
       approved: expenses.filter((expense) => Boolean(expense.approvedAt)).length,
     }),
     [expenses]
@@ -70,7 +76,7 @@ export function ExpensesList({ expenses }: { expenses: ExpenseRow[] }) {
       id: "approval",
       header: "Approval",
       sortValue: (row) => (row.approvedAt ? 1 : 0),
-      cell: (row) => <StatusBadge value={row.approvedAt ? "APPROVED" : "PENDING"} />,
+      cell: (row) => <StatusBadge value={approvalOf(row)} />,
     },
     {
       id: "when",
@@ -83,6 +89,20 @@ export function ExpensesList({ expenses }: { expenses: ExpenseRow[] }) {
         </div>
       ),
     },
+    ...(canFix
+      ? [
+          {
+            id: "fix",
+            header: "",
+            cell: (row: ExpenseRow) =>
+              isCancelled(row) ? null : (
+                <Button type="button" variant="ghost" size="sm" onClick={() => setFixing(row)}>
+                  Fix
+                </Button>
+              ),
+          } satisfies DataColumn<ExpenseRow>,
+        ]
+      : []),
   ]
 
   const exportRows = (rows: ExpenseRow[]) => [
@@ -99,6 +119,7 @@ export function ExpensesList({ expenses }: { expenses: ExpenseRow[] }) {
   ]
 
   return (
+    <>
     <DataTable
       rows={filtered}
       columns={columns}
@@ -137,18 +158,29 @@ export function ExpensesList({ expenses }: { expenses: ExpenseRow[] }) {
         title: row.description,
         subtitle: `${statusLabel(row.category)} · ${row.shop}`,
         value: formatCurrency(row.amount),
-        badge: <StatusBadge value={row.approvedAt ? "APPROVED" : "PENDING"} />,
-        meta: <span>{formatShopWhen(row.when)}</span>,
+        badge: <StatusBadge value={approvalOf(row)} />,
+        meta: (
+          <span className="flex items-center justify-between gap-2">
+            <span>{formatShopWhen(row.when)}</span>
+            {canFix && !isCancelled(row) ? (
+              <Button type="button" variant="outline" size="sm" onClick={() => setFixing(row)}>
+                Fix
+              </Button>
+            ) : null}
+          </span>
+        ),
       })}
       footer={(rows) => (
         <tr>
           <td colSpan={2} className="text-sm">Total for {rows.length} expense{rows.length === 1 ? "" : "s"}</td>
           <td className="hidden lg:table-cell" />
           <td className="whitespace-nowrap text-right tabular-nums">{formatCurrency(rows.reduce((sum, row) => sum + row.amount, 0))}</td>
-          <td colSpan={2} />
+          <td colSpan={canFix ? 3 : 2} />
         </tr>
       )}
       empty={expenses.length === 0 ? "No expenses recorded yet." : "No expense matches this filter."}
     />
+    {canFix ? <FixExpenseDialog expense={fixing} onOpenChange={(open) => !open && setFixing(null)} /> : null}
+    </>
   )
 }

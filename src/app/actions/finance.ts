@@ -7,10 +7,10 @@ import { prisma } from "@/lib/prisma"
 import { setStock } from "@/lib/concurrency"
 import { branchFilter, canReachBranch, OTHER_SHOP, resolveWritableShopId, viewBranchFilter } from "@/lib/branch-scope"
 import { requireUser } from "@/lib/session"
-import { canApprove, canHardDelete, canManageFinance, canManageStaff, canEditLetterhead, canSeeAllBranches, canSetOpeningMoney, canSeeProfit, isSuperAdmin, scopedBranchId } from "@/lib/rbac"
+import { canApprove, canHardDelete, canManageFinance, canManageStaff, canEditLetterhead, canSeeAllBranches, canSetOpeningMoney, canSeeProfit, isShopOwner, isSuperAdmin, scopedBranchId } from "@/lib/rbac"
 import { can } from "@/lib/permissions"
 import { isLetterheadKey } from "@/lib/letterhead"
-import { generateDocNumber, money } from "@/lib/utils"
+import { formatCurrency, generateDocNumber, money } from "@/lib/utils"
 import { lineValueAfterOrderDiscount, saleTenders, sumSaleTenders } from "@/lib/sale-money"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
 import { openingStockSupplierWhere, payablePurchaseWhere, groupSupplierLedgers, purchaseBalance, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
@@ -1132,6 +1132,99 @@ export async function createExpense(formData: FormData) {
   revalidatePath("/approvals")
   return { success: true }
 }
+
+/**
+ * Fix a shop expense a member of staff typed wrong: the amount, what it was
+ * for or its kind. Or cancel one that should never have been written. The
+ * CEO's and the main admin's correction; the old figures and the reason go to
+ * Who did what.
+ *
+ * The till is counted from approved expenses, so it follows. A higher amount
+ * must still be in the till. A cancelled expense stays on the list at nothing,
+ * marked cancelled, so the trail is not lost; one still waiting for a yes is
+ * taken off Needs approval.
+ */
+export async function correctExpense(formData: FormData) {
+  const user = await requireUser()
+  if (!isShopOwner(user.role)) return { error: "Only the CEO or the main admin can fix an expense." }
+  const id = String(formData.get("id") || "")
+  const cancel = formData.get("cancel") === "on"
+  const why = String(formData.get("reason") || "").trim()
+  if (why.length < 4) return { error: "Say why the expense is being fixed, for Who did what." }
+
+  const expense = await prisma.expense.findUnique({ where: { id } })
+  if (!expense) return { error: "We could not find that expense." }
+  if (!(await canReachBranch(user, expense.branchId))) return { error: OTHER_SHOP }
+  if (expense.description.startsWith(CANCELLED_EXPENSE)) return { error: "This expense was already cancelled." }
+
+  const oldAmount = money(expense.amount)
+  const nextAmount = cancel ? 0 : money(Number(formData.get("amount")))
+  const categoryRaw = String(formData.get("category") || expense.category)
+  if (!(Object.values(ExpenseCategory) as string[]).includes(categoryRaw)) return { error: "Pick what kind of expense it was." }
+  const nextCategory = categoryRaw as ExpenseCategory
+  const typedDescription = String(formData.get("description") ?? expense.description).trim() || expense.description
+  const nextDescription = cancel ? `${CANCELLED_EXPENSE}${typedDescription}` : typedDescription
+  if (!cancel && (!Number.isFinite(nextAmount) || nextAmount <= 0)) {
+    return { error: "Type the right amount. To take the expense away, tick Cancel this expense." }
+  }
+  if (!cancel && Math.abs(nextAmount - oldAmount) < 0.005 && nextCategory === expense.category && nextDescription === expense.description) {
+    return { error: "Nothing was changed on this expense." }
+  }
+
+  // More money out of the till must be there. An approved expense already
+  // came off the till, so only the extra counts; one waiting is held aside in
+  // full, so it is checked in full without its old self.
+  const extra = expense.approvedAt ? nextAmount - oldAmount : nextAmount
+  if (extra > 0.005) {
+    const till = await assertCashAvailable(expense.branchId, extra, { ignoreExpenseId: expense.id })
+    if (!till.ok) return { error: till.error }
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.expense.update({
+      where: { id: expense.id },
+      data: { amount: nextAmount.toFixed(2), category: nextCategory, description: nextDescription },
+    })
+    // The money-out line written when it was approved follows it.
+    await tx.financeEntry.updateMany({
+      where: { reference: expense.expenseNumber, type: "EXPENSE" },
+      data: { amount: nextAmount.toFixed(2), description: nextDescription },
+    })
+    if (cancel && !expense.approvedAt) {
+      await tx.approval.updateMany({
+        where: { entityType: "Expense", entityId: { in: [expense.id, expense.expenseNumber] }, status: "PENDING" },
+        data: { status: "REJECTED", approvedBy: user.id, approvedAt: new Date() },
+      })
+    }
+    await tx.auditLog.create({
+      data: {
+        userId: user.id,
+        action: "UPDATE",
+        entityType: "Expense",
+        entityId: expense.expenseNumber,
+        oldValue: JSON.stringify({ amount: oldAmount, category: expense.category, description: expense.description }),
+        newValue: JSON.stringify({
+          amount: nextAmount,
+          category: nextCategory,
+          description: nextDescription,
+          cancelled: cancel || null,
+          why,
+          note: `Expense ${expense.expenseNumber} ${cancel ? "cancelled" : "fixed"} by ${user.name || user.email}: ${formatCurrency(oldAmount)} → ${formatCurrency(nextAmount)}.`,
+        }),
+        branchId: expense.branchId,
+        risk: "HIGH",
+      },
+    })
+  })
+  revalidatePath("/expenses")
+  revalidatePath("/finance")
+  revalidatePath("/finance/close")
+  revalidatePath("/approvals")
+  return { success: true }
+}
+
+/** How a cancelled expense's description starts. */
+const CANCELLED_EXPENSE = "Cancelled: "
 
 /**
  * The shop each approval belongs to, read from the record it is about. An

@@ -3,7 +3,7 @@ import { Plus } from "lucide-react"
 import { getExpenses } from "@/app/actions/finance"
 import { PageHeader } from "@/components/shared"
 import { Button } from "@/components/ui/button"
-import { canManageFinance } from "@/lib/rbac"
+import { canManageFinance, isShopOwner } from "@/lib/rbac"
 import { requireUser } from "@/lib/session"
 import { money } from "@/lib/utils"
 import { ExpensesList } from "./expenses-list"
@@ -28,6 +28,7 @@ export default async function ExpensesPage() {
         }
       />
       <ExpensesList
+        canFix={isShopOwner(me.role)}
         expenses={expenses.map((row) => ({
           id: row.id,
           description: row.description,

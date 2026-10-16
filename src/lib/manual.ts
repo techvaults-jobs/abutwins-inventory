@@ -220,6 +220,7 @@ const PAGES: Array<
       "Open an invoice. Read the note that this sale cannot be changed.",
       "Print the invoice. The paper has the blue header and the ab mark.",
       "If money is still due and a buyer is attached, collect the rest. That adds a payment line. Old lines stay.",
+      "PAYMENT TAKEN THE WRONG WAY (CEO and main admin): open the invoice, then Fix how a payment was taken. Pick the payment, how it was really taken (Cash, Transfer or POS) and the bank, and say why. The amount stays; the till and the bank follow. If that day was already balanced, count it again on Balance the till.",
       "If the sale was a walk-in, attach a real name before anyone starts a return.",
     ],
     watch: [
@@ -542,6 +543,7 @@ const PAGES: Array<
       "Create the expense with an amount at or under that cash, and a description.",
       "Wait on Waiting for yes.",
       "After yes, the pay-out shows in Money in & out and cash in the till drops.",
+      "EXPENSE TYPED WRONG (CEO and main admin): press Fix on the expense. Change the amount, what it was for or its kind, or tick Cancel this expense. Say why. The till follows; a cancelled expense stays on the list at nothing.",
     ],
     watch: [
       "Money does not leave until yes.",
