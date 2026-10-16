@@ -1817,102 +1817,17 @@ async function applyReturn(user: Awaited<ReturnType<typeof requireUser>>, formDa
     }
 
     if (record.outcome === "REFUND" || record.outcome === "CREDIT_NOTE") {
-      const typed = money(record.returnValue) || money(record.refundAmount) || (record.imei ? money(record.imei.product.sellingPrice) : 0)
-      // What is returned first cancels what the customer still owes on that
-      // sale; only the rest comes back as money, and never more than they paid.
-      // This used to read `Math.min(asked, salePaid || asked)`: with nothing
-      // paid, `0 || asked` refunded the full value in cash on top of wiping the
-      // debt (a ₦520,000 credit sale at Iwo Road would have paid out ₦520,000
-      // the shop never received), and on a part-paid sale it both cut the debt
-      // and paid the same value out again. Earlier returns on the same sale
-      // count too (see refundSplit), and the value is held to what is left of
-      // the invoice.
-      const earlier = sale ? await earlierReturnMoney(tx, sale.id, record.id) : { value: 0, cashOut: 0 }
-      const split = refundSplit({ asked: typed, outcome: record.outcome, sale, earlier })
-      const asked = split.value
-      const { debtRelief, cashOut } = split
-      if (asked < typed - 0.005) {
-        // A return logged before values were limited: keep the record to what
-        // the invoice could actually give back.
-        await tx.stockReturn.update({
-          where: { id: record.id },
-          data: { returnValue: asked.toFixed(2), refundAmount: asked.toFixed(2) },
-        })
-      }
-      const after = await shiftCustomerBalance(tx, record.customerId, -debtRelief)
-      // A balance below zero is money we owe the buyer (a credit note).
-      const next = money(after.currentBalance)
-      const invoiceRef = sale?.invoiceNumber ? ` on ${sale.invoiceNumber}` : ""
-      // Each line says what really happened. A return on a sale nobody paid for
-      // only clears the debt; it used to be written as a "Refund", which read as
-      // money paid out to a customer who never paid.
-      if (debtRelief > 0) {
-        await tx.ledgerEntry.create({
-          data: {
-            customerId: record.customerId,
-            type: "ADJUSTMENT",
-            amount: (-debtRelief).toFixed(2),
-            balance: next.toFixed(2),
-            reference: record.returnNumber,
-            description: `Returned: ${formatCurrency(debtRelief)} still owed${invoiceRef} cleared. No money paid out`,
-          },
-        })
-      }
-      if (cashOut > 0) {
-        await tx.ledgerEntry.create({
-          data: {
-            customerId: record.customerId,
-            type: "REFUND",
-            amount: (-cashOut).toFixed(2),
-            balance: next.toFixed(2),
-            reference: record.returnNumber,
-            description: `Refund paid to the customer by bank${invoiceRef}. Does not change what they owe`,
-          },
-        })
-      }
-      // A credit note gives back what is not cleared off the debt. A refund on
-      // a sale paid with a credit note gives that part back as credit too.
-      const creditLeft = record.outcome === "CREDIT_NOTE" ? Math.max(0, asked - debtRelief) : split.creditBack
-      if (creditLeft > 0) {
-        // The credit note takes the balance below zero: we owe them this much,
-        // and the till offers it as a way to pay on their next purchase.
-        const credited = await shiftCustomerBalance(tx, record.customerId, -creditLeft)
-        await tx.ledgerEntry.create({
-          data: {
-            customerId: record.customerId,
-            type: "CREDIT_NOTE",
-            amount: (-creditLeft).toFixed(2),
-            balance: money(credited.currentBalance).toFixed(2),
-            reference: record.returnNumber,
-            description: `Credit note for ${formatCurrency(creditLeft)}${invoiceRef}, to use on a later purchase`,
-          },
-        })
-      }
-      if (debtRelief <= 0 && cashOut <= 0 && creditLeft <= 0) {
-        await tx.ledgerEntry.create({
-          data: {
-            customerId: record.customerId,
-            type: "ADJUSTMENT",
-            amount: "0.00",
-            balance: next.toFixed(2),
-            reference: record.returnNumber,
-            description: `Returned${invoiceRef}. Nothing was owed and nothing was paid out`,
-          },
-        })
-      }
-      if (cashOut > 0) {
-        await tx.financeEntry.create({
-          data: {
-            branchId: record.branchId,
-            account: "BANK",
-            type: "EXPENSE",
-            amount: cashOut.toFixed(2),
-            reference: record.returnNumber,
-            description: `Refund to ${record.customer.name} from ${bankLabel}`,
-            bankAccountId: refundBank?.id ?? null,
-          },
-        })
-      }
+      await settleReturnMoney(tx, {
+        returnId: record.id,
+        returnNumber: record.returnNumber,
+        customerId: record.customerId,
+        customerName: record.customer.name,
+        branchId: record.branchId,
+        outcome: record.outcome,
+        typed: money(record.returnValue) || money(record.refundAmount) || (record.imei ? money(record.imei.product.sellingPrice) : 0),
+        sale,
+        refundBank: refundBank ? { id: refundBank.id, label: bankLabel } : null,
+      })
     }
 
     if (record.outcome === "REPAIR" && record.imeiId) {
@@ -2193,6 +2108,125 @@ export async function restockReturn(formData: FormData) {
 }
 
 /**
+ * The money behind a refund or a credit note: what the customer still owed on
+ * the sale is cleared first, only what they really paid can come back, by bank
+ * for a refund or as credit to spend at the till for a credit note. Shared by
+ * Apply and by a send-back put right, so both settle a return the same way.
+ */
+async function settleReturnMoney(
+  tx: Prisma.TransactionClient,
+  args: {
+    returnId: string
+    returnNumber: string
+    customerId: string
+    customerName: string
+    branchId: string
+    outcome: "REFUND" | "CREDIT_NOTE"
+    typed: number
+    sale: (NonNullable<Parameters<typeof refundSplit>[0]["sale"]> & { id: string; invoiceNumber: string }) | null
+    refundBank: { id: string; label: string } | null
+  }
+) {
+  // What is returned first cancels what the customer still owes on that
+  // sale; only the rest comes back as money, and never more than they paid.
+  // This used to read `Math.min(asked, salePaid || asked)`: with nothing
+  // paid, `0 || asked` refunded the full value in cash on top of wiping the
+  // debt (a ₦520,000 credit sale at Iwo Road would have paid out ₦520,000
+  // the shop never received), and on a part-paid sale it both cut the debt
+  // and paid the same value out again. Earlier returns on the same sale
+  // count too (see refundSplit), and the value is held to what is left of
+  // the invoice.
+  const sale = args.sale
+  const typed = args.typed
+  const earlier = sale ? await earlierReturnMoney(tx, sale.id, args.returnId) : { value: 0, cashOut: 0 }
+  const split = refundSplit({ asked: typed, outcome: args.outcome, sale, earlier })
+  const asked = split.value
+  const { debtRelief, cashOut } = split
+  if (asked < typed - 0.005) {
+    // A return logged before values were limited: keep the record to what
+    // the invoice could actually give back.
+    await tx.stockReturn.update({
+      where: { id: args.returnId },
+      data: { returnValue: asked.toFixed(2), refundAmount: asked.toFixed(2) },
+    })
+  }
+  const after = await shiftCustomerBalance(tx, args.customerId, -debtRelief)
+  // A balance below zero is money we owe the buyer (a credit note).
+  const next = money(after.currentBalance)
+  const invoiceRef = sale?.invoiceNumber ? ` on ${sale.invoiceNumber}` : ""
+  // Each line says what really happened. A return on a sale nobody paid for
+  // only clears the debt; it used to be written as a "Refund", which read as
+  // money paid out to a customer who never paid.
+  if (debtRelief > 0) {
+    await tx.ledgerEntry.create({
+      data: {
+        customerId: args.customerId,
+        type: "ADJUSTMENT",
+        amount: (-debtRelief).toFixed(2),
+        balance: next.toFixed(2),
+        reference: args.returnNumber,
+        description: `Returned: ${formatCurrency(debtRelief)} still owed${invoiceRef} cleared. No money paid out`,
+      },
+    })
+  }
+  if (cashOut > 0) {
+    await tx.ledgerEntry.create({
+      data: {
+        customerId: args.customerId,
+        type: "REFUND",
+        amount: (-cashOut).toFixed(2),
+        balance: next.toFixed(2),
+        reference: args.returnNumber,
+        description: `Refund paid to the customer by bank${invoiceRef}. Does not change what they owe`,
+      },
+    })
+  }
+  // A credit note gives back what is not cleared off the debt. A refund on
+  // a sale paid with a credit note gives that part back as credit too.
+  const creditLeft = args.outcome === "CREDIT_NOTE" ? Math.max(0, asked - debtRelief) : split.creditBack
+  if (creditLeft > 0) {
+    // The credit note takes the balance below zero: we owe them this much,
+    // and the till offers it as a way to pay on their next purchase.
+    const credited = await shiftCustomerBalance(tx, args.customerId, -creditLeft)
+    await tx.ledgerEntry.create({
+      data: {
+        customerId: args.customerId,
+        type: "CREDIT_NOTE",
+        amount: (-creditLeft).toFixed(2),
+        balance: money(credited.currentBalance).toFixed(2),
+        reference: args.returnNumber,
+        description: `Credit note for ${formatCurrency(creditLeft)}${invoiceRef}, to use on a later purchase`,
+      },
+    })
+  }
+  if (debtRelief <= 0 && cashOut <= 0 && creditLeft <= 0) {
+    await tx.ledgerEntry.create({
+      data: {
+        customerId: args.customerId,
+        type: "ADJUSTMENT",
+        amount: "0.00",
+        balance: next.toFixed(2),
+        reference: args.returnNumber,
+        description: `Returned${invoiceRef}. Nothing was owed and nothing was paid out`,
+      },
+    })
+  }
+  if (cashOut > 0) {
+    await tx.financeEntry.create({
+      data: {
+        branchId: args.branchId,
+        account: "BANK",
+        type: "EXPENSE",
+        amount: cashOut.toFixed(2),
+        reference: args.returnNumber,
+        description: `Refund to ${args.customerName} from ${args.refundBank?.label ?? "the bank"}`,
+        bankAccountId: args.refundBank?.id ?? null,
+      },
+    })
+  }
+}
+
+/**
  * A finished return saved as "Send back to the supplier" when the phone in
  * fact stayed in the shop to be sold. The CEO's and the main admin's fix:
  * everything the send-back did is undone. The phone is In shop again and
@@ -2200,9 +2234,11 @@ export async function restockReturn(formData: FormData) {
  * the credit with the supplier is taken back), and the send-back leaves the
  * supplier returns report.
  *
- * The customer got nothing on a send-back, so nothing moves for them here. The
- * return becomes a credit note worth nothing; Edit this return then records
- * what the customer really got, with the usual money checks.
+ * The customer is settled in the same step, the way Apply settles a refund
+ * or a credit note: what they still owe on the invoice is cleared first, and
+ * the rest comes back as credit or, for a refund, from a named bank. Putting
+ * the phone back without this left the invoice reading it as sold and the
+ * customer owing for a phone the shop had back.
  */
 export async function undoReturnSendBack(formData: FormData) {
   const user = await requireUser()
@@ -2212,6 +2248,11 @@ export async function undoReturnSendBack(formData: FormData) {
   const id = String(formData.get("id") || "")
   const why = String(formData.get("editReason") || "").trim()
   if (why.length < 4) return { error: "Say why the return is being changed, for Who did what." }
+  const outcomeRaw = String(formData.get("outcome") || "CREDIT_NOTE")
+  if (outcomeRaw !== "CREDIT_NOTE" && outcomeRaw !== "REFUND") return { error: "Pick Credit note or Refund." }
+  const nextOutcome = outcomeRaw as "CREDIT_NOTE" | "REFUND"
+  const typed = money(Number(formData.get("returnValue")))
+  if (!Number.isFinite(typed) || typed <= 0) return { error: "Type what the phone is worth to the customer: what it sold for." }
 
   const record = await prisma.stockReturn.findUnique({
     where: { id },
@@ -2236,19 +2277,46 @@ export async function undoReturnSendBack(formData: FormData) {
   const cost = line ? money(line.cost) : 0
   const effect = line?.moneyEffect ?? "no-supplier"
 
+  // The customer side: the same sums Apply uses.
+  const sale = record.saleId ? await prisma.sale.findUnique({ where: { id: record.saleId } }) : null
+  if (record.saleId && !sale) return { error: "We could not find the invoice behind this return." }
+  const earlier = sale ? await earlierReturnMoney(prisma, sale.id, record.id) : { value: 0, cashOut: 0 }
+  const split = refundSplit({ asked: typed, outcome: nextOutcome, sale, earlier })
+  let refundBank: { id: string; label: string } | null = null
+  if (nextOutcome === "REFUND" && split.cashOut > 0.005) {
+    const bankId = String(formData.get("bankAccountId") || "")
+    if (!bankId) return { error: "Pick the bank account the refund is paid from." }
+    const bank = await prisma.bankAccount.findFirst({ where: { id: bankId, isActive: true }, select: { id: true, bankName: true, accountNumber: true, branchId: true } })
+    if (!bank) return { error: "That bank account is no longer on the list. Pick another." }
+    if (!(await canReachBranch(user, bank.branchId))) return { error: OTHER_SHOP }
+    refundBank = { id: bank.id, label: `${bank.bankName} ${bank.accountNumber}` }
+  }
+
   try {
     await prisma.$transaction(async (tx) => {
       const sealed = await tx.stockReturn.updateMany({
         where: { id, status: "COMPLETED", outcome: "SEND_TO_SUPPLIER" },
         data: {
-          outcome: "CREDIT_NOTE",
+          outcome: nextOutcome,
           faultClass: "GOOD_STOCK",
-          returnValue: "0.00",
-          refundAmount: "0.00",
+          returnValue: split.value.toFixed(2),
+          refundAmount: split.value.toFixed(2),
           sentToSupplierAt: null,
         },
       })
       if (sealed.count !== 1) throw new ConflictError("Someone already changed this return. Refresh to see it.")
+
+      await settleReturnMoney(tx, {
+        returnId: record.id,
+        returnNumber: record.returnNumber,
+        customerId: record.customerId,
+        customerName: record.customer.name,
+        branchId: record.branchId,
+        outcome: nextOutcome,
+        typed: split.value,
+        sale,
+        refundBank,
+      })
 
       // Take back what the send-back did to the supplier's money.
       if (line && cost > 0 && effect === "bill" && line.purchaseId) {
@@ -2304,9 +2372,11 @@ export async function undoReturnSendBack(formData: FormData) {
             supplierMoney: line ? { effect, cost } : null,
           }),
           newValue: JSON.stringify({
-            outcome: "CREDIT_NOTE",
+            outcome: nextOutcome,
             faultClass: "GOOD_STOCK",
-            returnValue: 0,
+            returnValue: split.value,
+            debtCleared: split.debtRelief,
+            refundPaid: split.cashOut || null,
             imeiStatus: "IN_STOCK",
             supplierMoneyUndone: line && cost > 0 && (effect === "bill" || effect === "house-credit") ? { effect, cost } : null,
             why,
@@ -2323,6 +2393,7 @@ export async function undoReturnSendBack(formData: FormData) {
   refreshOps()
   revalidatePath("/suppliers")
   revalidatePath("/purchases")
+  revalidatePath(`/customers/${record.customerId}`)
   return { success: true }
 }
 

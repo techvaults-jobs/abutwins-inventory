@@ -672,7 +672,7 @@ function ReturnDetail({
         <EditReturn row={row} banks={banks} returnValue={returnValue} onDone={onDone} />
       ) : null}
       {canReconfirm && row.status === "COMPLETED" && row.outcome === "SEND_TO_SUPPLIER" && row.imei ? (
-        <UndoSendBack row={row} onDone={onDone} />
+        <UndoSendBack row={row} banks={banks} returnValue={returnValue} onDone={onDone} />
       ) : null}
       {offShelf(row) ? (
         <div className="space-y-2 rounded-xl border border-warning/30 bg-warning-soft/50 p-3">
@@ -699,25 +699,48 @@ function ReturnDetail({
  * The CEO's and the main admin's fix for a return saved as "Send back to the
  * supplier" when the phone stayed in the shop to be sold.
  */
-function UndoSendBack({ row, onDone }: { row: ReturnRow; onDone: () => void }) {
+function UndoSendBack({
+  row,
+  banks,
+  returnValue,
+  onDone,
+}: {
+  row: ReturnRow
+  banks: RefundBank[]
+  returnValue: number | null
+  onDone: () => void
+}) {
+  const [outcome, setOutcome] = useState("CREDIT_NOTE")
   return (
     <details className="rounded-xl border border-border p-3">
       <summary className="cursor-pointer text-sm font-semibold">It stayed in the shop, not sent to the supplier</summary>
       <p className="mt-2 text-xs text-muted-foreground">
-        Picked Send back to the supplier by mistake? This puts the phone back In shop, ready to sell, and takes the
-        send-back off the supplier: what came off their bill goes back on it. The customer got nothing on a send-back, so
-        afterwards use Edit this return to record what they got (credit note or refund).
+        Picked Send back to the supplier by mistake? This puts the phone back In shop, ready to sell, takes the send-back off
+        the supplier (what came off their bill goes back on it) and settles the customer in the same step: what they still
+        owe on the invoice is cleared first, the rest becomes credit or a refund.
       </p>
       <ActionForm
         action={undoReturnSendBack}
         submit="Put it back in the shop"
-        successMessage="Back In shop and off the supplier. Now record what the customer got under Edit this return."
+        successMessage="Back In shop, off the supplier, and the customer settled. The invoice shows it returned."
         size="sm"
         variant="outline"
         onSuccess={onDone}
         className="mt-3 space-y-2"
       >
         <input type="hidden" name="id" value={row.id} />
+        <label className="block text-sm">
+          <span className="mb-1 block text-xs font-medium text-muted-foreground">What the customer got</span>
+          <Select name="outcome" value={outcome} onChange={(event) => setOutcome(event.target.value)}>
+            <option value="CREDIT_NOTE">Credit note (clears what they owe; any rest to spend at the till)</option>
+            <option value="REFUND">Refund (clears what they owe; any rest paid back by bank)</option>
+          </Select>
+        </label>
+        {outcome === "REFUND" ? <BankPicker banks={banks} branchId={row.branchId} label="Bank the refund is paid from (if money goes back)" required={false} /> : null}
+        <label className="block text-sm">
+          <span className="mb-1 block text-xs font-medium text-muted-foreground">Value of the return (₦): what it sold for</span>
+          <Input name="returnValue" type="number" min={0} step="0.01" defaultValue={returnValue || ""} required />
+        </label>
         <label className="block text-sm">
           <span className="mb-1 block text-xs font-medium text-muted-foreground">Why you are changing it</span>
           <Input name="editReason" placeholder="Example: picked send to supplier by mistake, phone is fine to sell" required minLength={4} />
