@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react"
 import Link from "next/link"
 import { Package, Smartphone } from "lucide-react"
-import { completeReturn, correctReturnValue, restockReturn } from "@/app/actions/ops"
+import { completeReturn, correctReturnValue, restockReturn, undoReturnSendBack } from "@/app/actions/ops"
 import { ActionForm } from "@/components/action-form"
 import { StatusBadge } from "@/components/shared"
 import { DataTable, type DataColumn } from "@/components/data-table"
@@ -671,6 +671,9 @@ function ReturnDetail({
       {canReconfirm && row.status === "COMPLETED" && (row.outcome === "CREDIT_NOTE" || row.outcome === "REFUND") ? (
         <EditReturn row={row} banks={banks} returnValue={returnValue} onDone={onDone} />
       ) : null}
+      {canReconfirm && row.status === "COMPLETED" && row.outcome === "SEND_TO_SUPPLIER" && row.imei ? (
+        <UndoSendBack row={row} onDone={onDone} />
+      ) : null}
       {offShelf(row) ? (
         <div className="space-y-2 rounded-xl border border-warning/30 bg-warning-soft/50 p-3">
           <p className="text-sm">
@@ -689,6 +692,38 @@ function ReturnDetail({
         </div>
       ) : null}
     </div>
+  )
+}
+
+/**
+ * The CEO's and the main admin's fix for a return saved as "Send back to the
+ * supplier" when the phone stayed in the shop to be sold.
+ */
+function UndoSendBack({ row, onDone }: { row: ReturnRow; onDone: () => void }) {
+  return (
+    <details className="rounded-xl border border-border p-3">
+      <summary className="cursor-pointer text-sm font-semibold">It stayed in the shop, not sent to the supplier</summary>
+      <p className="mt-2 text-xs text-muted-foreground">
+        Picked Send back to the supplier by mistake? This puts the phone back In shop, ready to sell, and takes the
+        send-back off the supplier: what came off their bill goes back on it. The customer got nothing on a send-back, so
+        afterwards use Edit this return to record what they got (credit note or refund).
+      </p>
+      <ActionForm
+        action={undoReturnSendBack}
+        submit="Put it back in the shop"
+        successMessage="Back In shop and off the supplier. Now record what the customer got under Edit this return."
+        size="sm"
+        variant="outline"
+        onSuccess={onDone}
+        className="mt-3 space-y-2"
+      >
+        <input type="hidden" name="id" value={row.id} />
+        <label className="block text-sm">
+          <span className="mb-1 block text-xs font-medium text-muted-foreground">Why you are changing it</span>
+          <Input name="editReason" placeholder="Example: picked send to supplier by mistake, phone is fine to sell" required minLength={4} />
+        </label>
+      </ActionForm>
+    </details>
   )
 }
 

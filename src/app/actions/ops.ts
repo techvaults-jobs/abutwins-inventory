@@ -29,7 +29,7 @@ import { getAppSettings } from "@/lib/settings"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
 import { isOpeningStockPurchase, purchaseBalance, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
 import { isSupplierReturnableStatus, supplierReturnMoneyPlan } from "@/lib/vendor-return"
-import { recordSupplierReturnLine } from "@/lib/supplier-returns"
+import { backfillSupplierReturnLines, recordSupplierReturnLine } from "@/lib/supplier-returns"
 import { assertCashAvailable } from "@/lib/shop-cash"
 import { resolveSupplierPayChannel } from "@/lib/supplier-pay"
 import { shopPayChannel } from "@/lib/sale-money"
@@ -2189,6 +2189,140 @@ export async function restockReturn(formData: FormData) {
     return { error: shopError(error, "Could not put this return back on the shelf.") }
   }
   refreshOps()
+  return { success: true }
+}
+
+/**
+ * A finished return saved as "Send back to the supplier" when the phone in
+ * fact stayed in the shop to be sold. The CEO's and the main admin's fix:
+ * everything the send-back did is undone. The phone is In shop again and
+ * counts in Shop stock, what came off the supplier's bill goes back on it (or
+ * the credit with the supplier is taken back), and the send-back leaves the
+ * supplier returns report.
+ *
+ * The customer got nothing on a send-back, so nothing moves for them here. The
+ * return becomes a credit note worth nothing; Edit this return then records
+ * what the customer really got, with the usual money checks.
+ */
+export async function undoReturnSendBack(formData: FormData) {
+  const user = await requireUser()
+  if (!isShopOwner(user.role)) {
+    return { error: "Only the CEO or the main admin can change a finished return." }
+  }
+  const id = String(formData.get("id") || "")
+  const why = String(formData.get("editReason") || "").trim()
+  if (why.length < 4) return { error: "Say why the return is being changed, for Who did what." }
+
+  const record = await prisma.stockReturn.findUnique({
+    where: { id },
+    include: { imei: { include: { product: true } }, customer: { select: { name: true } } },
+  })
+  if (!record) return { error: "We could not find that return." }
+  if (!(await canReachBranch(user, record.branchId))) return { error: OTHER_SHOP }
+  if (record.status !== "COMPLETED" || record.outcome !== "SEND_TO_SUPPLIER") {
+    return { error: "Only a finished return that was sent back to the supplier can be changed here." }
+  }
+  if (!record.imeiId || !record.imei) return { error: "This return has no phone on it to bring back." }
+  if (record.imei.status !== "RETURNED_TO_SUPPLIER") {
+    return { error: `${record.imei.imei1} is ${record.imei.status.replace(/_/g, " ").toLowerCase()} now, so this return cannot bring it back.` }
+  }
+
+  // Send-backs from before the supplier returns report have their line
+  // written the first time it is needed.
+  await backfillSupplierReturnLines()
+  const line = await prisma.supplierReturnLine.findUnique({
+    where: { reference_imeiId: { reference: record.returnNumber, imeiId: record.imeiId } },
+  })
+  const cost = line ? money(line.cost) : 0
+  const effect = line?.moneyEffect ?? "no-supplier"
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      const sealed = await tx.stockReturn.updateMany({
+        where: { id, status: "COMPLETED", outcome: "SEND_TO_SUPPLIER" },
+        data: {
+          outcome: "CREDIT_NOTE",
+          faultClass: "GOOD_STOCK",
+          returnValue: "0.00",
+          refundAmount: "0.00",
+          sentToSupplierAt: null,
+        },
+      })
+      if (sealed.count !== 1) throw new ConflictError("Someone already changed this return. Refresh to see it.")
+
+      // Take back what the send-back did to the supplier's money.
+      if (line && cost > 0 && effect === "bill" && line.purchaseId) {
+        const bill = await tx.purchase.findUnique({ where: { id: line.purchaseId }, select: { invoiceNumber: true, returnedAmount: true } })
+        if (!bill || money(bill.returnedAmount) < cost - 0.005) {
+          throw new ConflictError("The supplier bill no longer shows this phone as sent back, so it cannot be put back on the bill.")
+        }
+        await tx.purchase.update({
+          where: { id: line.purchaseId },
+          data: { returnedAmount: { decrement: cost.toFixed(2) } },
+        })
+      } else if (line && cost > 0 && effect === "house-credit") {
+        const house = await tx.supplier.findUnique({ where: { id: line.supplierId }, select: { name: true, creditBalance: true } })
+        if (!house || money(house.creditBalance) < cost - 0.005) {
+          throw new ConflictError(
+            `The ${formatCurrency(cost)} credit with ${house?.name ?? "the supplier"} from this send-back has already been used, so it cannot be taken back here.`
+          )
+        }
+        await tx.supplier.update({
+          where: { id: line.supplierId },
+          data: { creditBalance: { decrement: cost.toFixed(2) } },
+        })
+      }
+      if (line) await tx.supplierReturnLine.delete({ where: { id: line.id } })
+
+      const back = await tx.imeiRecord.updateMany({
+        where: { id: record.imeiId!, status: "RETURNED_TO_SUPPLIER" },
+        data: {
+          status: "IN_STOCK",
+          customerId: null,
+          notes: [record.imei!.notes, `Back in the shop: ${record.returnNumber} was not sent to the supplier`].filter(Boolean).join(" · "),
+        },
+      })
+      if (back.count !== 1) throw new ConflictError(`${record.imei!.imei1} was moved by someone else. Refresh to see it.`)
+      await returnStock(tx, {
+        productId: record.imei!.productId,
+        branchId: record.branchId,
+        quantity: 1,
+        move: { kind: "RETURN_IN", reference: record.returnNumber, userId: user.id },
+      })
+
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "UPDATE",
+          entityType: "Return",
+          entityId: record.returnNumber,
+          oldValue: JSON.stringify({
+            outcome: record.outcome,
+            faultClass: record.faultClass,
+            returnValue: money(record.returnValue) || money(record.refundAmount),
+            imeiStatus: record.imei!.status,
+            supplierMoney: line ? { effect, cost } : null,
+          }),
+          newValue: JSON.stringify({
+            outcome: "CREDIT_NOTE",
+            faultClass: "GOOD_STOCK",
+            returnValue: 0,
+            imeiStatus: "IN_STOCK",
+            supplierMoneyUndone: line && cost > 0 && (effect === "bill" || effect === "house-credit") ? { effect, cost } : null,
+            why,
+            note: `Return ${record.returnNumber} (${record.customer.name}) changed by ${user.name || user.email}: ${record.imei!.imei1} stayed in the shop, not sent to the supplier.`,
+          }),
+          branchId: record.branchId,
+          risk: "HIGH",
+        },
+      })
+    })
+  } catch (error) {
+    return { error: shopError(error, "Could not change this return. Nothing was changed.") }
+  }
+  refreshOps()
+  revalidatePath("/suppliers")
+  revalidatePath("/purchases")
   return { success: true }
 }
 
