@@ -24,6 +24,7 @@ import { prisma } from "@/lib/prisma"
 import { buildPaymentTrails } from "@/lib/payment-trail"
 import { PaymentTrail } from "@/components/payment-trail"
 import { CorrectSalePrice } from "./correct-sale-price"
+import { FixPaymentMethod } from "./fix-payment-method"
 
 export default async function SaleDetailPage({
   params,
@@ -267,6 +268,27 @@ export default async function SaleDetailPage({
           <ActionForm action={reverseInvoicePayment} submit="Reverse last payment" variant="outline">
             <input type="hidden" name="saleId" value={sale.id} />
           </ActionForm>
+        </div>
+      ) : null}
+      {isShopOwner(me.role) && sale.payments.some((row) => ["CASH", "TRANSFER", "POS"].includes(row.method)) ? (
+        <div className="surface-card p-5 print:hidden">
+          <h3 className="mb-2 font-semibold">Fix how a payment was taken</h3>
+          <p className="mb-4 text-sm text-muted-foreground">
+            Cash pressed for a transfer, or the wrong bank picked. The amount stays; the till and the bank follow. Who did
+            what keeps the old way and your reason.
+          </p>
+          <FixPaymentMethod
+            banks={banks}
+            payments={sale.payments
+              .filter((row) => ["CASH", "TRANSFER", "POS"].includes(row.method))
+              .map((row) => ({
+                id: row.id,
+                amount: money(row.amount),
+                method: row.method,
+                bankAccountId: row.bankAccountId,
+                label: `${statusLabel(row.method)}${row.bankAccount ? ` · ${row.bankAccount.bankName} ${row.bankAccount.accountNumber}` : ""} · ${formatDateTime(row.paidAt)}`,
+              }))}
+          />
         </div>
       ) : null}
       {due > 0 && sale.customerId ? (

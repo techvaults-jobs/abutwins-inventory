@@ -9,7 +9,9 @@ import { requireUser } from "@/lib/session"
 import { canHardDelete, isShopOwner } from "@/lib/rbac"
 import { ALL_PERM_KEYS, CEO_ONLY_KEYS, ensureRolePermissions } from "@/lib/permissions"
 import { isOpeningStockPurchase } from "@/lib/purchase-money"
-import { UNDO_COLLECTION_NOTE } from "@/lib/shop-cash"
+import { assertCashAvailable, UNDO_COLLECTION_NOTE } from "@/lib/shop-cash"
+import { canReachBranch, OTHER_SHOP } from "@/lib/branch-scope"
+import { formatCurrency, money } from "@/lib/utils"
 
 export async function getRoleMatrix() {
   const user = await requireUser()
@@ -159,6 +161,126 @@ export async function reverseInvoicePayment(formData: FormData) {
   revalidatePath("/sales")
   revalidatePath("/finance")
   if (sale.customerId) revalidatePath(`/customers/${sale.customerId}`)
+  return { success: true }
+}
+
+const TAKEN_AS = ["CASH", "TRANSFER", "POS"] as const
+
+/**
+ * Fix how one payment on a sale was taken: the cashier pressed Cash for a
+ * transfer, Transfer for cash, or picked the wrong bank. The CEO's and the
+ * main admin's correction. The amount stays; the till, the bank and each
+ * named account follow, since they are counted from the payments.
+ *
+ * Cash moved to the bank comes out of the till, so it is refused when the till
+ * no longer holds it (already moved to the bank or paid out). A day already
+ * balanced keeps its old count until someone counts it again.
+ */
+export async function correctPaymentMethod(formData: FormData) {
+  const user = await requireUser()
+  if (!isShopOwner(user.role)) return { error: "Only the main admin or the CEO can fix how a payment was taken." }
+  const paymentId = String(formData.get("paymentId") || "")
+  const nextMethod = String(formData.get("method") || "")
+  const why = String(formData.get("reason") || "").trim()
+  if (!(TAKEN_AS as readonly string[]).includes(nextMethod)) return { error: "Pick Cash, Transfer or POS." }
+  if (why.length < 4) return { error: "Say why the payment is being fixed, for Who did what." }
+
+  const payment = await prisma.payment.findUnique({
+    where: { id: paymentId },
+    include: {
+      sale: { select: { id: true, invoiceNumber: true, branchId: true, paymentMethod: true, customerId: true } },
+      bankAccount: { select: { bankName: true, accountNumber: true } },
+    },
+  })
+  if (!payment) return { error: "We could not find that payment." }
+  if (!(await canReachBranch(user, payment.sale.branchId))) return { error: OTHER_SHOP }
+
+  let bank: { id: string; label: string } | null = null
+  if (nextMethod !== "CASH") {
+    const bankId = String(formData.get("bankAccountId") || "")
+    if (!bankId) return { error: "Pick the bank the money went into." }
+    const row = await prisma.bankAccount.findFirst({ where: { id: bankId, isActive: true }, select: { id: true, bankName: true, accountNumber: true, branchId: true } })
+    if (!row) return { error: "That bank account is no longer on the list. Pick another." }
+    if (!(await canReachBranch(user, row.branchId))) return { error: OTHER_SHOP }
+    bank = { id: row.id, label: `${row.bankName} ${row.accountNumber}` }
+  }
+  if (nextMethod === payment.method && (bank?.id ?? null) === payment.bankAccountId) {
+    return { error: "That is already how this payment was taken. Nothing was changed." }
+  }
+
+  const amount = money(payment.amount)
+  if (payment.method === "CASH" && nextMethod !== "CASH") {
+    const till = await assertCashAvailable(payment.sale.branchId, amount)
+    if (!till.ok) {
+      return {
+        error: `The till holds only ${formatCurrency(Math.max(0, till.available))} now, so ${formatCurrency(amount)} cannot come out of it to the bank. The cash was already moved to the bank or paid out: undo that first.`,
+      }
+    }
+  }
+
+  const label = (method: string, bankLabel: string | null) =>
+    method === "CASH" ? "Cash" : `${method === "POS" ? "POS" : "Transfer"}${bankLabel ? ` to ${bankLabel}` : ""}`
+  const was = label(payment.method, payment.bankAccount ? `${payment.bankAccount.bankName} ${payment.bankAccount.accountNumber}` : null)
+  const now = label(nextMethod, bank?.label ?? null)
+  const ledgerOf = (method: string) => (method === "CASH" ? "CASH" : "BANK")
+
+  await prisma.$transaction(async (tx) => {
+    await tx.payment.update({
+      where: { id: payment.id },
+      data: {
+        method: nextMethod as (typeof TAKEN_AS)[number],
+        bankAccountId: bank?.id ?? null,
+        notes: [payment.notes, `Was ${was}; fixed to ${now} by ${user.name || user.email}`].filter(Boolean).join(" · "),
+      },
+    })
+    // A sale paid one way carries that way on the sale too.
+    if (payment.sale.paymentMethod === payment.method) {
+      await tx.sale.update({ where: { id: payment.sale.id }, data: { paymentMethod: nextMethod as (typeof TAKEN_AS)[number] } })
+    }
+    // The money-in line written with this payment moves to the right ledger.
+    if (ledgerOf(payment.method) !== ledgerOf(nextMethod)) {
+      const line = await tx.financeEntry.findFirst({
+        where: {
+          reference: payment.sale.invoiceNumber,
+          type: "INCOME",
+          account: ledgerOf(payment.method),
+          amount: payment.amount,
+        },
+        orderBy: { createdAt: "asc" },
+        select: { id: true, description: true },
+      })
+      if (line) {
+        await tx.financeEntry.update({
+          where: { id: line.id },
+          data: { account: ledgerOf(nextMethod), description: `${line.description} · fixed from ${was} to ${now}` },
+        })
+      }
+    }
+    await tx.auditLog.create({
+      data: {
+        userId: user.id,
+        action: "UPDATE",
+        entityType: "Payment",
+        entityId: payment.sale.invoiceNumber,
+        oldValue: JSON.stringify({ paymentId: payment.id, amount, method: payment.method, bankAccountId: payment.bankAccountId }),
+        newValue: JSON.stringify({
+          paymentId: payment.id,
+          amount,
+          method: nextMethod,
+          bankAccountId: bank?.id ?? null,
+          why,
+          note: `${formatCurrency(amount)} on ${payment.sale.invoiceNumber} fixed by ${user.name || user.email}: ${was} → ${now}.`,
+        }),
+        branchId: payment.sale.branchId,
+        risk: "HIGH",
+      },
+    })
+  })
+  revalidatePath(`/sales/${payment.sale.id}`)
+  revalidatePath("/sales")
+  revalidatePath("/finance")
+  revalidatePath("/finance/close")
+  if (payment.sale.customerId) revalidatePath(`/customers/${payment.sale.customerId}`)
   return { success: true }
 }
 
