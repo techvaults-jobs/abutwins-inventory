@@ -312,6 +312,7 @@ function OutcomeFields({
         { value: "REFUND", label: "Refund" },
         { value: "CREDIT_NOTE", label: "Credit note" },
         { value: "REPLACEMENT", label: "Replace from our stock" },
+        { value: "RESTOCK", label: "Put back on the shelf (nothing back to the customer)" },
       ]
     : [
         { value: "REPAIR", label: "Repair" },
@@ -319,6 +320,7 @@ function OutcomeFields({
         { value: "REFUND", label: "Refund" },
         { value: "CREDIT_NOTE", label: "Credit note" },
         { value: "SEND_TO_SUPPLIER", label: "Send back to the supplier" },
+        { value: "RESTOCK", label: "Put back on the shelf (nothing back to the customer)" },
       ]
 
   return (
@@ -363,7 +365,7 @@ function OutcomeFields({
       ) : null}
 
       {/* Fault classification — not needed for refund/credit on accessories */}
-      {fullControl && (!isInvoicePath || (outcome !== "REFUND" && outcome !== "CREDIT_NOTE")) && (
+      {fullControl && outcome !== "RESTOCK" && (!isInvoicePath || (outcome !== "REFUND" && outcome !== "CREDIT_NOTE")) && (
         <div className="space-y-1.5">
           <Label htmlFor="fault-select">Condition of the returned item</Label>
           <Select id="fault-select" name="faultClass" defaultValue="GOOD_STOCK">
@@ -527,6 +529,12 @@ function OutcomeFields({
           The original invoice stays on the books.
         </p>
       )}
+      {outcome === "RESTOCK" ? (
+        <p className="rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">
+          It goes back In shop, ready to sell. What the customer still owes on the invoice is cleared; no refund or credit
+          goes out. If they paid toward it, pick Refund or Credit note instead.
+        </p>
+      ) : null}
       {outcome === "REFUND" && !isReplace ? (
         <BankSelect banks={banks} branchId={branchId} label="Pay the refund from" required={false} />
       ) : null}

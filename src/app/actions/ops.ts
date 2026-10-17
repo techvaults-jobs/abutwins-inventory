@@ -1341,19 +1341,43 @@ export async function getInStockForReplace() {
 /** The reasons a return inward from the shop floor may give. */
 const INWARD_RETURN_REASONS: ReturnReason[] = ["FAULTY", "CUSTOMER_DISSATISFACTION", "EXCHANGE"]
 
+const RESTOCK_OUTCOME = "RESTOCK"
+const RESTOCK_NOTE = "Put back on the shelf: nothing back to the customer"
+
+/**
+ * Put back on the shelf gives the customer nothing back, so it only undoes
+ * what they still owe. Anything they paid toward this value would be the
+ * shop's to give back, which is a refund or a credit note, not this.
+ */
+async function restockRefusal(
+  sale: { id: string; totalAmount: unknown; paidAmount: unknown; creditNoteUsed?: unknown },
+  value: number
+) {
+  const earlier = await earlierReturnMoney(prisma, sale.id, "")
+  const split = refundSplit({ asked: value, outcome: "CREDIT_NOTE", sale, earlier })
+  const owedBack = split.value - split.debtRelief
+  if (owedBack <= 0.005) return null
+  return `They paid toward this, so ${formatCurrency(owedBack)} of it is theirs. Pick Refund or Credit note, or lower the value to ${formatCurrency(split.debtRelief)}, what they still owe.`
+}
+
 export async function createReturn(formData: FormData) {
   const user = await requireUser()
   if (!(await can(user.role, "action.return"))) return { error: "You are not allowed to record a return. Ask the main admin." }
 
   const reason = String(formData.get("reason")) as ReturnReason
-  const outcome = String(formData.get("outcome")) as ReturnOutcome
+  // "Put back on the shelf": the phone goes back In shop and the customer gets
+  // nothing back. Saved as a credit note worth only what they still owe on the
+  // invoice, so the sale is undone and no money or credit goes out.
+  const restock = String(formData.get("outcome")) === RESTOCK_OUTCOME
+  const outcome = (restock ? "CREDIT_NOTE" : String(formData.get("outcome"))) as ReturnOutcome
   // A return goes back into the shop's sellable stock unless someone with full
   // control says otherwise. Defaulting to faulty kept returned phones (and every
   // accessory refunded by a manager, whose form has no condition box) off the
   // shelf, so returns never showed in Shop stock or on Sell now.
   let faultClass = String(formData.get("faultClass") || "GOOD_STOCK") as FaultClass
   if (!(Object.values(FaultClass) as string[]).includes(faultClass)) faultClass = "GOOD_STOCK"
-  const notesRaw = String(formData.get("notes") || "").trim()
+  if (restock) faultClass = "GOOD_STOCK"
+  const notesRaw = [restock ? RESTOCK_NOTE : null, String(formData.get("notes") || "").trim() || null].filter(Boolean).join(" · ")
   if (!(Object.values(ReturnReason) as string[]).includes(reason)) return { error: "Pick why it is coming back." }
   if (!(Object.values(ReturnOutcome) as string[]).includes(outcome)) return { error: "Pick what happens next." }
 
@@ -1435,6 +1459,10 @@ export async function createReturn(formData: FormData) {
       returnRaw !== null && String(returnRaw).trim() !== "" ? Number(returnRaw) : cap.limit
     if (!Number.isFinite(returnValue) || returnValue < 0) {
       return { error: "Enter the return item value." }
+    }
+    if (restock) {
+      const refused = await restockRefusal(saleItem.sale, returnValue)
+      if (refused) return { error: refused }
     }
     if (overLimit(returnValue, cap.limit)) {
       return {
@@ -1568,9 +1596,15 @@ export async function createReturn(formData: FormData) {
           already: { saleValue: (await returnedSoFar(prisma, { saleId: imei.sale.id })).saleValue, lineValue: 0 },
         }).limit
       : money(imei.product.sellingPrice)
-  const returnValue = returnRaw !== null && String(returnRaw).trim() !== "" ? Number(returnRaw) : soldFor
+  // With no invoice there is nothing to undo, so a phone put back on the
+  // shelf is worth nothing to the customer.
+  const returnValue = restock && !imei.sale ? 0 : returnRaw !== null && String(returnRaw).trim() !== "" ? Number(returnRaw) : soldFor
   if (!Number.isFinite(returnValue) || returnValue < 0) {
     return { error: "Enter the return item value." }
+  }
+  if (restock && imei.sale) {
+    const refused = await restockRefusal(imei.sale, returnValue)
+    if (refused) return { error: refused }
   }
   if (overLimit(returnValue, soldFor)) {
     return {

@@ -104,6 +104,12 @@ function outcomeLabel(outcome: string) {
   return outcome
 }
 
+/** Put back on the shelf is saved as a credit note with a note saying so. */
+function rowOutcomeLabel(row: { outcome: string; notes: string | null }) {
+  if (row.outcome === "CREDIT_NOTE" && row.notes?.includes("Put back on the shelf: nothing back")) return "Put back on the shelf"
+  return outcomeLabel(row.outcome)
+}
+
 function reasonLabel(reason: string) {
   if (reason === "FAULTY") return "Faulty"
   if (reason === "WARRANTY") return "Under warranty"
@@ -503,10 +509,10 @@ export function ReturnsList({
       id: "outcome",
       header: "Outcome",
       hideBelow: "lg",
-      sortValue: (row) => outcomeLabel(row.outcome),
+      sortValue: (row) => rowOutcomeLabel(row),
       cell: (row) => (
         <div>
-          <p className="whitespace-nowrap">{outcomeLabel(row.outcome)}</p>
+          <p className="whitespace-nowrap">{rowOutcomeLabel(row)}</p>
           <p className="text-xs text-muted-foreground">{reasonLabel(row.reason)}</p>
         </div>
       ),
@@ -573,7 +579,7 @@ export function ReturnsList({
           badge: <StatusBadge value={row.status} />,
           meta: (
             <>
-              <span>{outcomeLabel(row.outcome)}</span>
+              <span>{rowOutcomeLabel(row)}</span>
               <span>· {formatShopWhen(whenOf(row))}</span>
               {row.status === "APPROVED" || row.status === "PENDING" ? <span className="font-medium text-warning">· Apply the outcome</span> : null}
               {offShelf(row) ? <span className="font-medium text-warning">· Not on the shelf</span> : null}
@@ -638,7 +644,7 @@ function ReturnDetail({
           </>
         ) : null}
         <dt className="text-muted-foreground">Outcome</dt>
-        <dd className="font-medium">{outcomeLabel(row.outcome)}</dd>
+        <dd className="font-medium">{rowOutcomeLabel(row)}</dd>
         <dt className="text-muted-foreground">Reason</dt>
         <dd>{reasonLabel(row.reason)}</dd>
         {returnValue != null ? (
