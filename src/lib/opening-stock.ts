@@ -265,6 +265,15 @@ export function tabHasCostColumn(grid: string[][]) {
   return headers.name != null && headers.cost != null
 }
 
+/** Where a stock tab's header sits and its PRODUCT NAME and QTY/IMEI columns. */
+export function stockTabColumns(grid: string[][]) {
+  const at = findHeaderRow(grid)
+  if (at < 0) return null
+  const headers = mapHeaders(grid[at])
+  if (headers.name == null || headers.identity == null) return null
+  return { at, name: headers.name, identity: headers.identity }
+}
+
 /** How a workbook row names its item: units and counts point at products by this. */
 export function openingProductKey(draft: OpeningProductDraft) {
   return productKey(draft)

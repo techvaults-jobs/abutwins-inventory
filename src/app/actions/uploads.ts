@@ -9,6 +9,7 @@ import { can } from "@/lib/permissions"
 import { canSetPricesOnBill } from "@/lib/roles"
 import { readTableFile, readWorkbookGrids } from "@/lib/table-file"
 import { makeOpeningSku, openingProductKey, planOpeningStock, tabHasCostColumn } from "@/lib/opening-stock"
+import { fillFromUnitList, unitListName } from "@/lib/opening-book"
 import { planCustomers, planImeis, planStock, type CatalogItem, type ShopRef } from "@/lib/upload-plan"
 import {
   OPENING_STOCK_ALL_SHOPS,
@@ -1328,6 +1329,13 @@ async function billLinesFromGrids(grids: Array<{ sheet: string; grid: string[][]
     }
   }
 
+  // The count sheet's layout: items on one tab with QTY, every IMEI on the
+  // IMEI & SERIAL tab. That tab has no cost column, so it was dropped as a
+  // checklist and every phone on the bill came back with no IMEI. When its
+  // rows line up with a stock tab's, name for name, each IMEI is written into
+  // its row there; otherwise it goes to the one item of that name (below).
+  const { listTabs, byName } = fillFromUnitList(stockTabs, leftOut)
+
   // Read leniently so one bad row is named instead of the whole sheet being
   // refused without saying where; a bill still needs a cost on every item,
   // which is checked just below.
@@ -1360,6 +1368,37 @@ async function billLinesFromGrids(grids: Array<{ sheet: string; grid: string[][]
     unitsByKey.set(unit.productKey, byCost)
   }
   const qtyByKey = new Map(plan.quantities.map((row) => [row.productKey, row.quantity]))
+
+  // IMEIs from a list tab that does not line up row for row: each goes to the
+  // one tracked item of that name that has none on the stock tab.
+  const seen = new Set(plan.units.map((unit) => unit.identity.value))
+  const waiting = plan.products.filter(
+    (draft) => (draft.tracking === "IMEI" || draft.tracking === "SERIAL") && !unitsByKey.has(openingProductKey(draft))
+  )
+  const unclear = new Set<string>()
+  for (const unit of byName) {
+    if (!unit.identity) continue
+    const matches = waiting.filter((draft) => unitListName(draft.name) === unitListName(unit.name))
+    if (!matches.length) continue
+    if (matches.length > 1) {
+      if (!unclear.has(unitListName(unit.name))) {
+        unclear.add(unitListName(unit.name))
+        problems.push(
+          `${unit.sheet}: ${unit.name} is on the bill more than once (different specification or condition), so we cannot tell which IMEI is which. Keep the ${unit.sheet} rows in the same order as the items, one row per phone, or put each IMEI on its own row on the stock tab.`
+        )
+      }
+      continue
+    }
+    if (seen.has(unit.identity)) {
+      repeats.push(`${unit.sheet} line ${unit.line}: ${unit.identity} is on this workbook twice, so it is counted once.`)
+      continue
+    }
+    seen.add(unit.identity)
+    const key = openingProductKey(matches[0])
+    const byCost = unitsByKey.get(key) ?? new Map<number | null, string[]>()
+    byCost.set(null, [...(byCost.get(null) ?? []), unit.identity])
+    unitsByKey.set(key, byCost)
+  }
 
   const lines: BatchUploadItem[] = []
   const unknownBrands = new Set<string>()
@@ -1419,7 +1458,7 @@ async function billLinesFromGrids(grids: Array<{ sheet: string; grid: string[][]
   return {
     lines,
     notes: [
-      ...leftOut.map((tab) => `Tab ${tab.sheet} has no UNIT COST PRICE column, so it was read as a checklist and left out.`),
+      ...leftOut.filter((tab) => !listTabs.includes(tab)).map((tab) => `Tab ${tab.sheet} has no UNIT COST PRICE column, so it was read as a checklist and left out.`),
       ...repeats.slice(0, 40).map((row) => row.replace(/, so it is counted once\..*$/, ", so it is counted once.")),
     ],
     fileName,

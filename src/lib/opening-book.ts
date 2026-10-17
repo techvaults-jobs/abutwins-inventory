@@ -1,5 +1,5 @@
 import type { ProductCondition, ProductTracking } from "@prisma/client"
-import { mapOpeningCondition } from "@/lib/opening-stock"
+import { mapOpeningCondition, stockTabColumns } from "@/lib/opening-stock"
 import { keyName } from "@/lib/table-file"
 
 /**
@@ -125,6 +125,77 @@ export function cleanIdentity(raw: string) {
   const digits = value.replace(/\D/g, "")
   if (digits.length >= 14 && /^[\d\s-]+$/.test(value)) return digits
   return value
+}
+
+/**
+ * The IMEI & SERIAL tab of the count sheet, read on its own: one row per unit,
+ * by product name. Shops copy the count sheet for a supplier bill too, with
+ * the items on one tab and every IMEI on this one. A row marked NO on ON SHELF
+ * or with no number gives no identity.
+ */
+export function readUnitListTabs(sheets: Array<{ sheet: string; grid: string[][] }>) {
+  const units: Array<{ sheet: string; line: number; name: string; identity: string | null }> = []
+  for (const tab of sheets) {
+    const header = headerIndex(tab.grid, ["product_name"])
+    if (!header || header.index.identity == null || header.index.cost != null) continue
+    for (let r = header.at + 1; r < tab.grid.length; r += 1) {
+      const row = tab.grid[r]
+      const name = cellAt(row, header.index.name)
+      if (!name) continue
+      // A unit with no number, or one marked NO, keeps its place so the rows
+      // still line up with the stock tab; it gives no IMEI.
+      const identity = cleanIdentity(cellAt(row, header.index.identity))
+      const gone = /^n/i.test(cellAt(row, header.index.onShelf))
+      units.push({ sheet: tab.sheet, line: r + 1, name, identity: identity && !gone ? identity : null })
+    }
+  }
+  return units
+}
+
+export function unitListName(raw: string) {
+  return raw.trim().replace(/\s+/g, " ").toLowerCase()
+}
+
+/**
+ * A bill sheet in the count sheet's layout: items on a stock tab, every IMEI
+ * on an IMEI & SERIAL tab with no cost column. When the list's rows line up
+ * with a stock tab's, name for name, each IMEI is written into its row's
+ * QTY/IMEI cell (left alone when it already holds an IMEI or a count above 1).
+ * A list that does not line up comes back in byName, for the caller to match
+ * by item name.
+ */
+export function fillFromUnitList(
+  stockTabs: Array<{ sheet: string; grid: string[][] }>,
+  otherTabs: Array<{ sheet: string; grid: string[][] }>
+) {
+  const listTabs = otherTabs.filter((tab) => readUnitListTabs([tab]).some((unit) => unit.identity))
+  const byName: ReturnType<typeof readUnitListTabs> = []
+  for (const tab of listTabs) {
+    const units = readUnitListTabs([tab])
+    const match = stockTabs.findIndex((stock) => {
+      const cols = stockTabColumns(stock.grid)
+      if (!cols) return false
+      const names = stock.grid.slice(cols.at + 1).map((row) => row[cols.name] ?? "").filter((name) => name.trim())
+      return names.length === units.length && names.every((name, i) => unitListName(name) === unitListName(units[i].name))
+    })
+    if (match < 0) {
+      byName.push(...units)
+      continue
+    }
+    const cols = stockTabColumns(stockTabs[match].grid)!
+    let i = 0
+    const grid = stockTabs[match].grid.map((row, r) => {
+      if (r <= cols.at || !(row[cols.name] ?? "").trim()) return row
+      const unit = units[i++]
+      const cell = (row[cols.identity] ?? "").trim()
+      if (!unit.identity || (cell && cell !== "1")) return row
+      const filled = [...row]
+      filled[cols.identity] = unit.identity
+      return filled
+    })
+    stockTabs[match] = { ...stockTabs[match], grid }
+  }
+  return { listTabs, byName }
 }
 
 function number(raw: string) {
