@@ -3,10 +3,12 @@ import { Undo2 } from "lucide-react"
 import { getSupplierReturnsHistory } from "@/app/actions/supplier-returns"
 import { PageHeader } from "@/components/shared"
 import { Button } from "@/components/ui/button"
+import { requireUser } from "@/lib/session"
+import { isShopOwner } from "@/lib/rbac"
 import { ReturnsHistoryView } from "./returns-history-view"
 
 export default async function ReturnsHistoryPage() {
-  const { rows } = await getSupplierReturnsHistory()
+  const [{ rows }, me] = await Promise.all([getSupplierReturnsHistory(), requireUser()])
 
   return (
     <div className="space-y-6">
@@ -22,7 +24,7 @@ export default async function ReturnsHistoryPage() {
           </Button>
         }
       />
-      <ReturnsHistoryView rows={rows} />
+      <ReturnsHistoryView rows={rows} canUndo={isShopOwner(me.role)} />
     </div>
   )
 }

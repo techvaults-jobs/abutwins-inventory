@@ -4165,3 +4165,121 @@ export async function sendUnitsToSupplier(formData: FormData) {
   refreshOps()
   return { success: true, reference: rtv, count: records.length, supplier: houseName }
 }
+
+/**
+ * A phone put on "Send back to supplier" (RTV-…) by mistake: it never left the
+ * shop. The CEO's and the main admin's fix undoes that one unit: the phone
+ * goes back to what it was before (In shop counts in Shop stock again; Faulty
+ * or Returned stay off the shelf), what came off the supplier's bill goes back
+ * on it (or the credit with the supplier is taken back), and the line leaves
+ * Returns to suppliers. A send-back that came from a customer return is put
+ * right on the return itself.
+ */
+export async function undoSupplierSendBack(formData: FormData) {
+  const user = await requireUser()
+  if (!isShopOwner(user.role)) {
+    return { error: "Only the CEO or the main admin can change a send-back to a supplier." }
+  }
+  const id = String(formData.get("id") || "")
+  const why = String(formData.get("editReason") || "").trim()
+  if (why.length < 4) return { error: "Say why the send-back is being undone, for Who did what." }
+
+  const line = await prisma.supplierReturnLine.findUnique({
+    where: { id },
+    include: { imei: true, supplier: { select: { name: true } } },
+  })
+  if (!line) return { error: "We could not find that send-back. Refresh to see it." }
+  if (line.source !== "SEND_BACK") {
+    return { error: "This one went back from a customer return. Open the return under Returns to put it right." }
+  }
+  if (!(await canReachBranch(user, line.branchId))) return { error: OTHER_SHOP }
+  if (line.imei.status !== "RETURNED_TO_SUPPLIER") {
+    return { error: `${line.imei.imei1} is ${line.imei.status.replace(/_/g, " ").toLowerCase()} now, so this send-back cannot bring it back.` }
+  }
+
+  // What the phone was before it went: the per-unit entry the send-back
+  // wrote to Who did what holds it. Older entries without it were In shop.
+  const sentEntry = await prisma.auditLog.findFirst({
+    where: { entityType: "IMEIRecord", entityId: line.imei.imei1, newValue: { contains: `"rtv":"${line.reference}"` } },
+    orderBy: { createdAt: "desc" },
+    select: { oldValue: true },
+  })
+  const before = sentEntry?.oldValue && isSupplierReturnableStatus(sentEntry.oldValue) ? sentEntry.oldValue : "IN_STOCK"
+  const cost = money(line.cost)
+  const effect = line.moneyEffect
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      if (cost > 0 && effect === "bill" && line.purchaseId) {
+        const bill = await tx.purchase.findUnique({ where: { id: line.purchaseId }, select: { returnedAmount: true } })
+        if (!bill || money(bill.returnedAmount) < cost - 0.005) {
+          throw new ConflictError("The supplier bill no longer shows this phone as sent back, so it cannot be put back on the bill.")
+        }
+        await tx.purchase.update({
+          where: { id: line.purchaseId },
+          data: { returnedAmount: { decrement: cost.toFixed(2) } },
+        })
+      } else if (cost > 0 && effect === "house-credit") {
+        const house = await tx.supplier.findUnique({ where: { id: line.supplierId }, select: { creditBalance: true } })
+        if (!house || money(house.creditBalance) < cost - 0.005) {
+          throw new ConflictError(
+            `The ${formatCurrency(cost)} credit with ${line.supplier.name} from this send-back has already been used, so it cannot be taken back here.`
+          )
+        }
+        await tx.supplier.update({
+          where: { id: line.supplierId },
+          data: { creditBalance: { decrement: cost.toFixed(2) } },
+        })
+      }
+
+      const removed = await tx.supplierReturnLine.deleteMany({ where: { id: line.id } })
+      if (removed.count !== 1) throw new ConflictError("Someone already undid this send-back. Refresh to see it.")
+
+      const back = await tx.imeiRecord.updateMany({
+        where: { id: line.imeiId, status: "RETURNED_TO_SUPPLIER" },
+        data: {
+          status: before as "IN_STOCK" | "FAULTY" | "RETURNED",
+          notes: [line.imei.notes, `Back in the shop: ${line.reference} was not sent to ${line.supplier.name}`].filter(Boolean).join(" · "),
+        },
+      })
+      if (back.count !== 1) throw new ConflictError(`${line.imei.imei1} was moved by someone else. Refresh to see it.`)
+      if (before === "IN_STOCK") {
+        await returnStock(tx, {
+          productId: line.productId,
+          branchId: line.branchId,
+          quantity: 1,
+          move: { kind: "RETURN_IN", reference: line.reference, userId: user.id },
+        })
+      }
+
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "UPDATE",
+          entityType: "VendorReturn",
+          entityId: line.reference,
+          oldValue: JSON.stringify({
+            imei: line.imei.imei1,
+            imeiStatus: "RETURNED_TO_SUPPLIER",
+            supplierMoney: { effect, cost },
+          }),
+          newValue: JSON.stringify({
+            imei: line.imei.imei1,
+            imeiStatus: before,
+            supplierMoneyUndone: cost > 0 && (effect === "bill" || effect === "house-credit") ? { effect, cost } : null,
+            why,
+            note: `${line.reference}: ${line.imei.imei1} was not sent to ${line.supplier.name}. Undone by ${user.name || user.email}.`,
+          }),
+          branchId: line.branchId,
+          risk: "HIGH",
+        },
+      })
+    })
+  } catch (error) {
+    return { error: shopError(error, "Could not undo this send-back. Nothing was changed.") }
+  }
+  refreshOps()
+  revalidatePath("/suppliers")
+  revalidatePath("/purchases/returns-history")
+  return { success: true }
+}

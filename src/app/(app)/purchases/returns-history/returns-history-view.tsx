@@ -1,8 +1,11 @@
 "use client"
 
 import { useMemo, useState } from "react"
+import Link from "next/link"
 import { Undo2 } from "lucide-react"
 import type { SupplierReturnRow } from "@/app/actions/supplier-returns"
+import { undoSupplierSendBack } from "@/app/actions/ops"
+import { ActionForm } from "@/components/action-form"
 import { DayRangeFilter } from "@/components/day-range-filter"
 import { FilterChips } from "@/components/filter-chips"
 import {
@@ -14,12 +17,13 @@ import {
   TonePill,
 } from "@/components/shared"
 import { TableDownload } from "@/components/table-download"
+import { Input } from "@/components/ui/input"
 import { matchesDayRange, formatShopWhen } from "@/lib/lagos-day"
 import { cn, formatCurrency } from "@/lib/utils"
 
 type SourceFilter = "all" | "SEND_BACK" | "CUSTOMER_RETURN"
 
-export function ReturnsHistoryView({ rows }: { rows: SupplierReturnRow[] }) {
+export function ReturnsHistoryView({ rows, canUndo = false }: { rows: SupplierReturnRow[]; canUndo?: boolean }) {
   const [source, setSource] = useState<SourceFilter>("all")
   const [range, setRange] = useState({ from: "", to: "" })
   const [supplierFilter, setSupplierFilter] = useState("all")
@@ -271,6 +275,7 @@ export function ReturnsHistoryView({ rows }: { rows: SupplierReturnRow[] }) {
               { label: "Supplier bill", className: "hidden lg:table-cell" },
               { label: "Value",         align: "right" },
               { label: "Money",         className: "hidden lg:table-cell" },
+              ...(canUndo ? [{ label: "Sent by mistake?" }] : []),
             ]}
           >
             {filtered.map((row) => (
@@ -297,11 +302,51 @@ export function ReturnsHistoryView({ rows }: { rows: SupplierReturnRow[] }) {
                 </td>
                 <td className="text-right tabular-nums font-semibold">{formatCurrency(row.value)}</td>
                 <td className="hidden text-xs text-muted-foreground lg:table-cell">{row.effect}</td>
+                {canUndo ? (
+                  <td className="min-w-48">
+                    {row.source === "SEND_BACK" ? (
+                      <UndoSendBack row={row} />
+                    ) : (
+                      <Link href="/returns" className="text-xs font-medium text-primary hover:underline">
+                        Put right on the return
+                      </Link>
+                    )}
+                  </td>
+                ) : null}
               </tr>
             ))}
           </TableShell>
         </>
       )}
     </div>
+  )
+}
+
+/**
+ * The CEO's and the main admin's fix for a phone put on a send-back by
+ * mistake: it never left the shop.
+ */
+function UndoSendBack({ row }: { row: SupplierReturnRow }) {
+  return (
+    <details>
+      <summary className="cursor-pointer text-xs font-medium text-primary">It stayed in the shop</summary>
+      <ActionForm
+        action={undoSupplierSendBack}
+        submit="Bring it back"
+        successMessage="Back in the shop and off the supplier. What came off their bill is back on it."
+        size="sm"
+        variant="outline"
+        buttonClassName="mt-2"
+        className="mt-2 space-y-2"
+        confirmModal={{
+          title: `Undo ${row.reference} for ${row.imei}?`,
+          description: `The phone goes back to what it was before it was sent, and ${formatCurrency(row.value)} is taken off what went back to ${row.supplier}.`,
+          confirmLabel: "Bring it back",
+        }}
+      >
+        <input type="hidden" name="id" value={row.id} />
+        <Input name="editReason" placeholder="Why: picked by mistake, phone never left" required minLength={4} />
+      </ActionForm>
+    </details>
   )
 }
