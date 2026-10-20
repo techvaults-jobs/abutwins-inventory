@@ -5,6 +5,8 @@ import { Prisma, ProductTracking } from "@prisma/client"
 import { prisma } from "@/lib/prisma"
 import { watDayKey } from "@/lib/lagos-day"
 import { requireUser } from "@/lib/session"
+import { canReachBranch, OTHER_SHOP } from "@/lib/branch-scope"
+import { ConflictError, drawStock } from "@/lib/concurrency"
 import { canAddItemName, canChangeCost, canChangePrices, canHardDelete, canManageCatalog, canSeePriceListCost, PRICE_SETTER_ROLES, setsStartingPrices } from "@/lib/rbac"
 import { can } from "@/lib/permissions"
 import { shopError } from "@/lib/shop-speak"
@@ -115,8 +117,8 @@ export async function getProducts(search?: string) {
       ...(search
         ? {
             OR: [
-              { name: { contains: search } },
-              { sku: { contains: search } },
+              { name: { contains: search, mode: "insensitive" } },
+              { sku: { contains: search, mode: "insensitive" } },
             ],
           }
         : {}),
@@ -1168,6 +1170,7 @@ export async function reduceInventoryStock(formData: FormData) {
   ])
 
   if (!inv || !product) return { error: "That item is not on the shelf list for this shop." }
+  if (!(await canReachBranch(user, branchId))) return { error: OTHER_SHOP }
 
   const tracked = product.tracking === "IMEI" || product.tracking === "SERIAL"
 
@@ -1204,51 +1207,52 @@ export async function reduceInventoryStock(formData: FormData) {
       return { error: `Shop stock for ${product.name} at ${inv.branch.name} is only ${inv.quantity}. Count again.` }
     }
 
-    const nextQty = Math.max(0, inv.quantity - records.length)
-    await prisma.$transaction([
-      ...records.map((row) =>
-        prisma.imeiRecord.update({
-          where: { id: row.id },
+    // Each phone must still be In shop when it is written off, and the shelf
+    // comes down by the database, not to a figure read earlier. Setting the
+    // shelf to "what it was less these" wrote over a sale made in between, and
+    // a phone sold in between was turned from Sold into Disposed.
+    try {
+      await prisma.$transaction(async (tx) => {
+        const { count } = await tx.imeiRecord.updateMany({
+          where: { id: { in: records.map((row) => row.id) }, branchId, status: "IN_STOCK" },
           data: { status: "DISPOSED", notes: reason },
         })
-      ),
-      prisma.inventory.update({
-        where: { productId_branchId: { productId, branchId } },
-        data: { quantity: nextQty },
-      }),
-      // A write-off is a correction by hand. Before the stock ledger existed it
-      // moved the shelf and left nothing behind but an audit note.
-      prisma.stockMovement.create({
-        data: {
+        if (count !== records.length) {
+          throw new ConflictError(
+            `${records.length - count} of these phones were sold or moved while you were working. Refresh and list them again.`
+          )
+        }
+        // A write-off is a correction by hand, with its line in the stock ledger.
+        await drawStock(tx, {
           productId,
           branchId,
-          quantity: -records.length,
-          kind: "HAND_CORRECTION",
-          reference: reason,
-          userId: user.id,
-          businessDate: watDayKey(),
-        },
-      }),
-      prisma.auditLog.create({
-        data: {
-          userId: user.id,
-          action: "UPDATE",
-          entityType: "Inventory",
-          entityId: inv.id,
-          oldValue: String(inv.quantity),
-          newValue: JSON.stringify({
-            quantity: nextQty,
-            wroteOff: records.length,
-            reason,
-            numbers: records.map((row) => row.imei1),
-            shop: inv.branch.name,
-            product: product.name,
-          }),
-          branchId,
-          risk: "HIGH",
-        },
-      }),
-    ])
+          quantity: records.length,
+          label: product.name,
+          move: { kind: "HAND_CORRECTION", reference: reason, userId: user.id },
+        })
+        await tx.auditLog.create({
+          data: {
+            userId: user.id,
+            action: "UPDATE",
+            entityType: "Inventory",
+            entityId: inv.id,
+            oldValue: String(inv.quantity),
+            newValue: JSON.stringify({
+              quantity: Math.max(0, inv.quantity - records.length),
+              wroteOff: records.length,
+              reason,
+              numbers: records.map((row) => row.imei1),
+              shop: inv.branch.name,
+              product: product.name,
+            }),
+            branchId,
+            risk: "HIGH",
+          },
+        })
+      })
+    } catch (error) {
+      return { error: shopError(error, "Could not write these off. Nothing was changed.") }
+    }
 
     revalidatePath("/products")
     revalidatePath("/inventory")
@@ -1263,43 +1267,40 @@ export async function reduceInventoryStock(formData: FormData) {
     return { error: `You cannot reduce by ${reduceBy}. ${inv.branch.name} only has ${inv.quantity} on the shelf.` }
   }
 
-  const nextQty = Math.max(0, inv.quantity - reduceBy)
+  if (!Number.isInteger(reduceBy)) return { error: "Type a whole number of pieces." }
 
-  await prisma.$transaction([
-    prisma.inventory.update({
-      where: { productId_branchId: { productId, branchId } },
-      data: { quantity: nextQty },
-    }),
-    prisma.stockMovement.create({
-      data: {
+  // Down by the database, never below zero (see the phones above).
+  try {
+    await prisma.$transaction(async (tx) => {
+      await drawStock(tx, {
         productId,
         branchId,
-        quantity: -reduceBy,
-        kind: "HAND_CORRECTION",
-        reference: reason,
-        userId: user.id,
-        businessDate: watDayKey(),
-      },
-    }),
-    prisma.auditLog.create({
-      data: {
-        userId: user.id,
-        action: "UPDATE",
-        entityType: "Inventory",
-        entityId: inv.id,
-        oldValue: String(inv.quantity),
-        newValue: JSON.stringify({
-          quantity: nextQty,
-          reducedBy: reduceBy,
-          reason,
-          shop: inv.branch.name,
-          product: product.name,
-        }),
-        branchId,
-        risk: "HIGH",
-      },
-    }),
-  ])
+        quantity: reduceBy,
+        label: product.name,
+        move: { kind: "HAND_CORRECTION", reference: reason, userId: user.id },
+      })
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "UPDATE",
+          entityType: "Inventory",
+          entityId: inv.id,
+          oldValue: String(inv.quantity),
+          newValue: JSON.stringify({
+            quantity: Math.max(0, inv.quantity - reduceBy),
+            reducedBy: reduceBy,
+            reason,
+            shop: inv.branch.name,
+            product: product.name,
+          }),
+          branchId,
+          risk: "HIGH",
+        },
+      })
+    })
+  } catch (error) {
+    return { error: shopError(error, "Could not reduce this stock. Nothing was changed.") }
+  }
 
   revalidatePath("/products")
   revalidatePath("/inventory")

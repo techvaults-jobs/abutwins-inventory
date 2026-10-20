@@ -82,7 +82,7 @@ export function ActionForm({
   onCancel,
   cancelLabel = "Cancel",
 }: {
-  action: (formData: FormData) => Promise<{ error?: string; success?: boolean; redirectTo?: string } | void>
+  action: (formData: FormData) => Promise<{ error?: string; success?: boolean; message?: string; redirectTo?: string } | void>
   children: ReactNode
   submit?: string
   /** What the button says while the shop waits, e.g. "Completing this sale". */
@@ -134,7 +134,10 @@ export function ActionForm({
       return
     }
 
-    toast.success(successMessage)
+    // What the action says it did wins over the form's stock wording. A delete
+    // that only hid an item with history, or money taken with change to hand
+    // back, used to show plain "Saved".
+    toast.success(result && "message" in result && result.message ? result.message : successMessage)
     onSuccess?.()
     if (result && "redirectTo" in result && result.redirectTo) {
       router.push(result.redirectTo)

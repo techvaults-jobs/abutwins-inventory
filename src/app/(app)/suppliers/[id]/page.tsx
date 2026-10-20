@@ -1,6 +1,9 @@
 import Link from "next/link"
 import { notFound } from "next/navigation"
-import { getSupplier, getSupplierOpening } from "@/app/actions/parties"
+import { getSupplier, getSupplierOpening, removeSupplier, updateSupplier } from "@/app/actions/parties"
+import { EditDetailsButton } from "@/components/edit-details-button"
+import { canHardDelete } from "@/lib/rbac"
+import { requireUser } from "@/lib/session"
 import { SupplierOpeningCard } from "./supplier-opening-card"
 import { PageHeader, StatCard, StatGrid, StatusBadge } from "@/components/shared"
 import { formatCurrency, formatDate, money } from "@/lib/utils"
@@ -16,6 +19,14 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
   const supplier = await getSupplier(id)
   if (!supplier) notFound()
   const opening = await getSupplierOpening(id)
+  const me = await requireUser()
+  // Only a house added by mistake, with nothing on record, can be removed.
+  const removable =
+    canHardDelete(me.role) &&
+    Math.abs(money(supplier.creditBalance)) < 0.005 &&
+    supplier.purchases.length === 0 &&
+    supplier.imeiRecords.length === 0 &&
+    !supplier.openingBills.length
 
   const totalPurchased = supplier.purchases.reduce((sum, row) => sum + money(row.totalAmount), 0)
   const totalPaid = supplier.purchases.reduce((sum, row) => sum + money(row.paidAmount), 0)
@@ -42,6 +53,33 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
         backHref="/suppliers"
         title={supplier.name}
         description={`${supplier.kind === "NEIGHBOR" ? "Neighboring shop" : "Supplier"} · ${[supplier.city, supplier.country].filter(Boolean).join(", ") || "Where they are is not set"} · ${supplier.phone}${supplier.contactPerson ? ` · ${supplier.contactPerson}` : ""}`}
+        actions={
+          <EditDetailsButton
+            id={supplier.id}
+            title={`Edit details: ${supplier.name}`}
+            description="Put right a name, phone or contact typed wrong. Their bills and balance are not changed here."
+            save={updateSupplier}
+            remove={removable ? { action: removeSupplier, what: supplier.name } : undefined}
+            fields={[
+              { name: "name", label: "Name", value: supplier.name, required: true },
+              { name: "phone", label: "Phone", value: supplier.phone, type: "tel" },
+              { name: "contactPerson", label: "Contact person", value: supplier.contactPerson ?? "" },
+              { name: "email", label: "Email", value: supplier.email ?? "", type: "email" },
+              { name: "city", label: "City", value: supplier.city ?? "" },
+              { name: "country", label: "Country", value: supplier.country ?? "" },
+              {
+                name: "kind",
+                label: "Kind",
+                value: supplier.kind,
+                options: [
+                  { value: "SUPPLIER", label: "Supplier" },
+                  { value: "NEIGHBOR", label: "Neighboring shop" },
+                ],
+              },
+              { name: "address", label: "Address", value: supplier.address ?? "", wide: true },
+            ]}
+          />
+        }
       />
 
       {opening && !supplier.name.toLowerCase().includes("opening stock") ? (

@@ -232,19 +232,19 @@ const purchaseInclude = {
 function purchaseSearchWhere(q: string) {
   return {
     OR: [
-      { invoiceNumber: { contains: q } },
-      { originCity: { contains: q } },
-      { originCountry: { contains: q } },
-      { notes: { contains: q } },
-      { supplier: { name: { contains: q } } },
-      { items: { some: { product: { OR: [{ name: { contains: q } }, { sku: { contains: q } }] } } } },
+      { invoiceNumber: { contains: q, mode: "insensitive" as const } },
+      { originCity: { contains: q, mode: "insensitive" as const } },
+      { originCountry: { contains: q, mode: "insensitive" as const } },
+      { notes: { contains: q, mode: "insensitive" as const } },
+      { supplier: { name: { contains: q, mode: "insensitive" as const } } },
+      { items: { some: { product: { OR: [{ name: { contains: q, mode: "insensitive" as const } }, { sku: { contains: q, mode: "insensitive" as const } }] } } } },
       {
         imeiRecords: {
           some: {
             OR: [
-              { imei1: { contains: q } },
-              { imei2: { contains: q } },
-              { serialNumber: { contains: q } },
+              { imei1: { contains: q, mode: "insensitive" as const } },
+              { imei2: { contains: q, mode: "insensitive" as const } },
+              { serialNumber: { contains: q, mode: "insensitive" as const } },
             ],
           },
         },
@@ -650,6 +650,13 @@ export async function payPurchase(formData: FormData) {
     return { error: "This supplier bill is already fully paid." }
   }
   const sent = Math.min(amount, due)
+  // Cash comes out of the till, so it must be there, as for a shop bill. A
+  // cash payment to a supplier used to be let through on an empty till and
+  // left the till below zero.
+  if (channel.account === "CASH") {
+    const cashGate = await assertCashAvailable(purchase.branchId, sent)
+    if (!cashGate.ok) return { error: cashGate.error }
+  }
   const payRef = generateDocNumber("SPAY")
 
   try {
@@ -1274,7 +1281,7 @@ export async function findSaleByInvoice(invoiceNumber: string) {
     // Try a case-insensitive partial match to help with minor typos
     const partial = await prisma.sale.findFirst({
       where: {
-        invoiceNumber: { contains: cleaned },
+        invoiceNumber: { contains: cleaned, mode: "insensitive" },
         status: "COMPLETED",
         ...(branchId ? { branchId } : {}),
       },
@@ -1848,6 +1855,20 @@ async function applyReturn(user: Awaited<ReturnType<typeof requireUser>>, formDa
     })
     if (sealed.count !== 1) {
       throw new ConflictError(`${record.returnNumber} was already completed by someone else. Refresh to see it.`)
+    }
+    // The phone must still be out with the customer (or waiting on a return
+    // logged before returns applied themselves). Two saves of one phone's
+    // return each passed the "already has an open return" check before either
+    // was written, and both applied: the refund went out twice and the phone
+    // went back on the shelf twice.
+    if (record.imeiId) {
+      const stillOut = await tx.imeiRecord.updateMany({
+        where: { id: record.imeiId, status: { in: ["SOLD", "RETURNED"] } },
+        data: { updatedAt: new Date() },
+      })
+      if (stillOut.count !== 1) {
+        throw new ConflictError(`${record.imei?.imei1 ?? "This phone"} has already come back on another return. Refresh to see it.`)
+      }
     }
 
     if (record.outcome === "REFUND" || record.outcome === "CREDIT_NOTE") {
@@ -2706,47 +2727,59 @@ export async function createSwap(formData: FormData) {
   const swapInLabel = [oldBrand, oldName, oldStorage, shopConditionLabel(condition), oldColor].filter(Boolean).join(" · ")
 
   // Hold only: swap-in stays off the shelf, shop device stays In shop until approval.
-  const incoming = await prisma.imeiRecord.create({
-    data: {
-      ...unitIdentityColumns({ kind: oldIdentityKind, imei1: oldDeviceId, imei2: oldImei2 }),
-      productId: oldProductId,
-      branchId,
-      customerId: customer.id,
-      status: "RECEIVED",
-      cosmeticGrade: condition,
-      conditionNotes: [oldColor ? `Colour ${oldColor}` : null, oldConditionNotes].filter(Boolean).join(" · ") || null,
-      notes: `Swap Deal waiting for approval · ${swapInLabel || shopConditionLabel(condition)} · swap value ${tradeValue}`,
-    },
-  })
+  // The customer's phone, the deal and its request for yes are written
+  // together. When the deal failed after the phone was written, the phone
+  // stayed on the system with no deal, and every retry was refused as
+  // "already on this system".
+  let swap: { id: string; swapNumber: string }
+  try {
+    swap = await prisma.$transaction(async (tx) => {
+      const incoming = await tx.imeiRecord.create({
+        data: {
+          ...unitIdentityColumns({ kind: oldIdentityKind, imei1: oldDeviceId, imei2: oldImei2 }),
+          productId: oldProductId,
+          branchId,
+          customerId: customer.id,
+          status: "RECEIVED",
+          cosmeticGrade: condition,
+          conditionNotes: [oldColor ? `Colour ${oldColor}` : null, oldConditionNotes].filter(Boolean).join(" · ") || null,
+          notes: `Swap Deal waiting for approval · ${swapInLabel || shopConditionLabel(condition)} · swap value ${tradeValue}`,
+        },
+      })
 
-  const swap = await prisma.swap.create({
-    data: {
-      swapNumber: generateDocNumber("SWP"),
-      customerId: customer.id,
-      oldImeiId: incoming.id,
-      oldDeviceCondition: condition,
-      tradeValue: tradeValue.toFixed(2),
-      newProductId: newImei.productId,
-      newProductPrice: givenValue.toFixed(2),
-      newImeiId: newImei.id,
-      balanceAmount: balance.toFixed(2),
-      branchId,
-      userId: user.id,
-      status: "PENDING",
-      notes: String(formData.get("notes") || "") || null,
-    },
-  })
-  await prisma.approval.create({
-    data: {
-      type: "SWAP",
-      entityId: swap.id,
-      entityType: "Swap",
-      requestedBy: user.id,
-      reason: `${swap.swapNumber}: ${swapInLabel ? `${swapInLabel} (${oldDeviceId}) ` : ""}swap-in ₦${tradeValue} · given ₦${givenValue} · ${
-        balance > 0 ? `Receivable ₦${balance}` : balance < 0 ? `Payable ₦${Math.abs(balance)}` : "Even"
-      } · ${newImei.product.name}`,
-    },
-  })
+      const created = await tx.swap.create({
+        data: {
+          swapNumber: generateDocNumber("SWP"),
+          customerId: customer.id,
+          oldImeiId: incoming.id,
+          oldDeviceCondition: condition,
+          tradeValue: tradeValue.toFixed(2),
+          newProductId: newImei.productId,
+          newProductPrice: givenValue.toFixed(2),
+          newImeiId: newImei.id,
+          balanceAmount: balance.toFixed(2),
+          branchId,
+          userId: user.id,
+          status: "PENDING",
+          notes: String(formData.get("notes") || "") || null,
+        },
+      })
+      await tx.approval.create({
+        data: {
+          type: "SWAP",
+          entityId: created.id,
+          entityType: "Swap",
+          requestedBy: user.id,
+          reason: `${created.swapNumber}: ${swapInLabel ? `${swapInLabel} (${oldDeviceId}) ` : ""}swap-in ₦${tradeValue} · given ₦${givenValue} · ${
+            balance > 0 ? `Receivable ₦${balance}` : balance < 0 ? `Payable ₦${Math.abs(balance)}` : "Even"
+          } · ${newImei.product.name}`,
+        },
+      })
+      return created
+    })
+  } catch (error) {
+    return { error: shopError(error, "Could not save this Swap Deal. Nothing was saved; try again.") }
+  }
   const managers = await prisma.user.findMany({
     where: { role: { in: ["CEO", "BRANCH_MANAGER", "SUPER_ADMIN"] }, isActive: true },
   })
@@ -3212,6 +3245,9 @@ export async function advanceRepair(formData: FormData) {
       }
       if (status === "DELIVERED" && repair.customerId && nextCost > 0 && repair.status !== "DELIVERED") {
         const after = await shiftCustomerBalance(tx, repair.customerId, nextCost)
+        // The charge goes on the customer's account; the money is counted when
+        // it is collected. A cash line was also written here as if the cash had
+        // already been paid, while the customer was put down as owing it.
         await tx.ledgerEntry.create({
           data: {
             customerId: repair.customerId,
@@ -3220,16 +3256,6 @@ export async function advanceRepair(formData: FormData) {
             balance: money(after.currentBalance).toFixed(2),
             reference: repair.repairNumber,
             description: `Repair ${repair.repairNumber} · ${repair.imei.product.name}`,
-          },
-        })
-        await tx.financeEntry.create({
-          data: {
-            branchId: repair.branchId,
-            account: "CASH",
-            type: "INCOME",
-            amount: nextCost.toFixed(2),
-            reference: repair.repairNumber,
-            description: `Repair charge ${repair.repairNumber}`,
           },
         })
       }
@@ -3571,10 +3597,27 @@ async function submitTransfer(formData: FormData): Promise<TransferOutcome> {
     select: { productId: true, quantity: true },
   })
   const heldByProduct = new Map(sendingStock.map((row) => [row.productId, row.quantity]))
+  // Pieces on a transfer still waiting for the other shop stay on this shelf
+  // until it is accepted, but they are already promised. The same cords could
+  // be put on a second transfer, and the second acceptance then failed.
+  const promised = accessoryQty.size
+    ? await prisma.transferItem.groupBy({
+        by: ["productId"],
+        where: { productId: { in: [...accessoryQty.keys()] }, transfer: { fromBranchId, status: "PENDING" } },
+        _sum: { quantity: true },
+      })
+    : []
+  const promisedByProduct = new Map(promised.map((row) => [row.productId, row._sum.quantity ?? 0]))
   for (const [productId, quantity] of qtyByProduct) {
-    if ((heldByProduct.get(productId) ?? 0) < quantity) {
+    const held = heldByProduct.get(productId) ?? 0
+    const onTransfers = promisedByProduct.get(productId) ?? 0
+    if (held - onTransfers < quantity) {
       const product = products.find((row) => row.id === productId)
-      return { error: `${product?.name ?? "This item"} does not have ${quantity} In shop at the sending shop.` }
+      return {
+        error: onTransfers
+          ? `${product?.name ?? "This item"}: ${held} at the sending shop, ${onTransfers} already on transfers waiting for the other shop. Only ${Math.max(0, held - onTransfers)} can be sent.`
+          : `${product?.name ?? "This item"} does not have ${quantity} In shop at the sending shop.`,
+      }
     }
   }
 

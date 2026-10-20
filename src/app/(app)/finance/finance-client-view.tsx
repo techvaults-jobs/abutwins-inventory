@@ -61,6 +61,7 @@ type FinanceData = {
   canRemoveBank: boolean
   canDeposit: boolean
   cashToBank: number
+  cashHeldForBills: number
   supplierPaidNoBank?: number
   canNameSupplierBanks?: boolean
   shops: OpeningCashShop[]
@@ -201,6 +202,12 @@ export function FinanceClientView({ data }: { data: FinanceData }) {
             <span className="text-xs text-muted-foreground">Balance now</span>
             <span className="text-2xl font-semibold num">{formatCurrency(data.cashAccount.balance)}</span>
           </div>
+          {data.cashHeldForBills > 0 ? (
+            <p className="mt-2 text-left text-xs text-muted-foreground">
+              {formatCurrency(data.cashHeldForBills)} held for shop bills waiting for yes ·{" "}
+              {formatCurrency(Math.max(0, data.cashAccount.balance - data.cashHeldForBills))} free for new bills
+            </p>
+          ) : null}
         </button>
 
         <button type="button" onClick={() => setLedger("BANK")} className="surface-card-interactive group p-5">

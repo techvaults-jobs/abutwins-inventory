@@ -14,6 +14,7 @@ import { sumSaleTenders } from "@/lib/sale-money"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
 import { payablePurchaseWhere, groupSupplierLedgers } from "@/lib/purchase-money"
 import { receiptsInWindow } from "@/lib/receipts"
+import { supplierPaidInWindow } from "@/lib/supplier-pay"
 import { customersOwing } from "@/lib/owed"
 import { healDuplicateDayCloses } from "@/lib/day-close-heal"
 
@@ -85,22 +86,11 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
         where: { ...shopWhere, date: { gte: prior.start, lt: prior.end }, approvedAt: { not: null } },
         _sum: { amount: true },
       }),
-      prisma.purchase.aggregate({
-        where: {
-          ...shopWhere,
-          createdAt: { gte: window.start, lt: window.end },
-          ...payablePurchaseWhere,
-        },
-        _sum: { paidAmount: true },
-      }),
-      prisma.purchase.aggregate({
-        where: {
-          ...shopWhere,
-          createdAt: { gte: prior.start, lt: prior.end },
-          ...payablePurchaseWhere,
-        },
-        _sum: { paidAmount: true },
-      }),
+      // Sent to suppliers by the day the money left, less undone payments, as
+      // on Home. This used to add up what was paid on bills *created* in the
+      // window, so a payment on last month's bill never showed in this one.
+      supplierPaidInWindow({ branchId: shopId || null, start: window.start, end: window.end }),
+      supplierPaidInWindow({ branchId: shopId || null, start: prior.start, end: prior.end }),
       shopId
         ? prisma.dayClose.findMany({
             where: {
@@ -170,8 +160,8 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
   const then = { ...sumSales(priorSales), methodSum: receiptsThen.total, cash: receiptsThen.cash, transfer: receiptsThen.transfer, pos: receiptsThen.pos }
   const expenseNow = money(expenses._sum.amount)
   const expenseThen = money(priorExpenses._sum.amount)
-  const paidNow = money(purchases._sum.paidAmount)
-  const paidThen = money(priorPurchases._sum.paidAmount)
+  const paidNow = purchases
+  const paidThen = priorPurchases
   const change = (current: number, previous: number) => {
     if (!previous) return { value: current ? "New" : "0", amount: current - previous, up: current >= previous }
     const pct = ((current - previous) / previous) * 100
@@ -183,6 +173,13 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
     soldOn.set(key, (soldOn.get(key) ?? 0) + 1)
   }
   const closedOn = new Set(recentCloses.map((row) => row.businessDate || watDayKey(row.closeDate)))
+  // What was sold on each day of the stretch, the figure Balance the till
+  // shows for that day (see the closes below).
+  const soldValueOn = new Map<string, number>()
+  for (const sale of sales) {
+    const key = watDayKey(sale.saleDate)
+    soldValueOn.set(key, (soldValueOn.get(key) ?? 0) + money(sale.totalAmount))
+  }
   const shop = shops.find((row) => row.id === shopId)
 
   const supplierLedgers = groupSupplierLedgers(
@@ -441,14 +438,14 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
     })),
     closes: closes.map((row) => {
       const expectedCash = money(row.expectedCash)
-      const transferTotal = money(row.transferTotal)
-      const posTotal = money(row.posTotal)
-      const creditTotal = money(row.creditTotal)
+      const day = row.businessDate || watDayKey(row.closeDate)
       return {
         id: row.id,
-        day: row.businessDate || watDayKey(row.closeDate),
+        day,
         staff: row.user.name,
-        totalSales: expectedCash + transferTotal + posTotal + creditTotal,
+        // Cash + bank + credit counted money taken on older sales as this
+        // day's sales; the day's own sales are what Balance the till shows.
+        totalSales: soldValueOn.get(day) ?? 0,
         expected: expectedCash,
         counted: money(row.countedCash),
         variance: money(row.variance),

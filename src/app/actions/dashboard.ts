@@ -3,11 +3,12 @@
 import { prisma } from "@/lib/prisma"
 import { viewBranchFilter } from "@/lib/branch-scope"
 import { requireUser } from "@/lib/session"
-import { canSeeCost, scopedBranchId } from "@/lib/rbac"
+import { canSeeAllBranches, canSeeCost, scopedBranchId } from "@/lib/rbac"
 import { isShopOwner } from "@/lib/permissions"
 import { money } from "@/lib/utils"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
-import { payablePurchaseWhere, groupSupplierLedgers, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
+import { payablePurchaseWhere, groupSupplierLedgers } from "@/lib/purchase-money"
+import { supplierPaidInWindow } from "@/lib/supplier-pay"
 import { getUnclosedBusinessDays } from "@/app/actions/day-close"
 import { getParkedWatch } from "@/app/actions/parked"
 import { getAppSettings } from "@/lib/settings"
@@ -36,15 +37,6 @@ export async function getDashboardData() {
   const lastMonth = shopPreviousWindow(thisMonth.from, "month")
   const inThisMonth = { gte: thisMonth.start, lt: thisMonth.end }
   const inLastMonth = { gte: lastMonth.start, lt: lastMonth.end }
-  // Money sent to suppliers by the day it left, from the money ledger. The
-  // amount paid on bills *created* this month missed payments on older bills
-  // and counted later payments on this month's bills in the wrong month.
-  const supplierPaidWhere = (createdAt: { gte: Date; lt: Date }) => ({
-    ...(branchId ? { branchId } : {}),
-    type: "EXPENSE" as const,
-    description: { startsWith: SUPPLIER_PAYMENT_NOTE },
-    createdAt,
-  })
 
   const [
     sales,
@@ -92,7 +84,10 @@ export async function getDashboardData() {
     // Money in by the day it arrived, the same rule as Reports and the till.
     receiptsInWindow({ branchId, start: thisMonth.start, end: thisMonth.end }),
     receiptsInWindow({ branchId, start: lastMonth.start, end: lastMonth.end }),
-    prisma.financeEntry.aggregate({ where: supplierPaidWhere(inThisMonth), _sum: { amount: true } }),
+    // Money sent to suppliers by the day it left, less undone payments. The
+    // amount paid on bills *created* this month missed payments on older bills
+    // and counted later payments on this month's bills in the wrong month.
+    supplierPaidInWindow({ branchId, start: thisMonth.start, end: thisMonth.end }),
     prisma.customer.aggregate({
       where: branchId ? { branchId } : {},
       _sum: { currentBalance: true },
@@ -192,10 +187,8 @@ export async function getDashboardData() {
   const thisExp = money(expenses._sum.amount)
   const prevExp = money(lastExpenses._sum.amount)
   const received = paymentsIn.total
-  const sent = money(purchasesPaid._sum.amount) + thisExp
-  const lastSent = money(
-    (await prisma.financeEntry.aggregate({ where: supplierPaidWhere(inLastMonth), _sum: { amount: true } }))._sum.amount
-  ) + prevExp
+  const sent = purchasesPaid + thisExp
+  const lastSent = (await supplierPaidInWindow({ branchId, start: lastMonth.start, end: lastMonth.end })) + prevExp
 
   // One pass to index the catalogue, then every figure below is a map lookup
   // instead of a nested query result.
@@ -258,7 +251,9 @@ export async function getDashboardData() {
   )
 
   const revenueById = new Map(revenueByBranch.map((row) => [row.branchId, money(row._sum.totalAmount)]))
-  const ranking = branches
+  // Every shop's takings side by side is for those who may see every shop. A
+  // shop manager's Home showed the other shops' sales here.
+  const ranking = (await canSeeAllBranches(user.role) ? branches : [])
     .map((branch) => ({
       name: branch.name,
       revenue: revenueById.get(branch.id) ?? 0,

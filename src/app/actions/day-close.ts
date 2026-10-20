@@ -8,6 +8,7 @@ import { requireUser } from "@/lib/session"
 import { recentWatDays, watBounds, watDayKey } from "@/lib/lagos-day"
 import { money } from "@/lib/utils"
 import { saleTenders } from "@/lib/sale-money"
+import { offInvoiceMoneyInWhere } from "@/lib/shop-cash"
 import { canReachBranch, viewBranchFilter } from "@/lib/branch-scope"
 import { healDuplicateDayCloses } from "@/lib/day-close-heal"
 
@@ -92,6 +93,8 @@ export async function getDayClosePreview(branchId?: string, businessDate?: strin
         amount: number
       }>,
       onOlderSalesTotal: 0,
+      otherMoneyIn: [] as Array<{ reference: string; what: string; method: string; amount: number }>,
+      otherMoneyInTotal: 0,
       alreadyClosed: false,
       closedRecord: null as null | {
         id: string
@@ -121,7 +124,7 @@ export async function getDayClosePreview(branchId?: string, businessDate?: strin
   ])
   const day = businessDate && businessDate.length === 10 ? businessDate : watDayKey()
   const { start, end } = watBounds(day)
-  const [sales, moneyIn, existing] = await Promise.all([
+  const [sales, moneyIn, existing, offInvoice] = await Promise.all([
     prisma.sale.findMany({
       where: {
         status: "COMPLETED",
@@ -161,6 +164,19 @@ export async function getDayClosePreview(branchId?: string, businessDate?: strin
           include: { user: { select: { id: true, name: true, email: true, role: true, branchId: true } } },
         })
       : Promise.resolve(null),
+    // Customer money handed over with no sale payment behind it: an opening
+    // balance or repair charge paid on account, or the extra on a dearer
+    // replacement. It is in the drawer, so the count must expect it.
+    prisma.financeEntry.findMany({
+      where: {
+        ...(shopId ? { branchId: shopId } : {}),
+        account: { in: ["CASH", "BANK"] },
+        createdAt: { gte: start, lt: end },
+        ...offInvoiceMoneyInWhere,
+      },
+      select: { amount: true, account: true, reference: true, description: true },
+      orderBy: { createdAt: "asc" },
+    }),
   ])
 
   const totalSales = sales.reduce((sum, sale) => sum + money(sale.totalAmount), 0)
@@ -199,8 +215,17 @@ export async function getDayClosePreview(branchId?: string, businessDate?: strin
     { cash: 0, transfer: 0, pos: 0, unknown: 0 }
   )
 
-  const expectedCash = tillMix.cash + legacy.cash
-  const transferTotal = tillMix.transfer + legacy.transfer
+  const otherMoneyIn = offInvoice.map((row) => ({
+    reference: row.reference ?? "",
+    what: row.description ?? "",
+    method: row.account === "CASH" ? "CASH" : "TRANSFER",
+    amount: money(row.amount),
+  }))
+  const otherCash = otherMoneyIn.filter((row) => row.method === "CASH").reduce((sum, row) => sum + row.amount, 0)
+  const otherBank = otherMoneyIn.filter((row) => row.method !== "CASH").reduce((sum, row) => sum + row.amount, 0)
+
+  const expectedCash = tillMix.cash + legacy.cash + otherCash
+  const transferTotal = tillMix.transfer + legacy.transfer + otherBank
   const posTotal = tillMix.pos + legacy.pos + legacy.unknown
 
   // Money taken today on goods that left on an earlier day. Shown on its own so
@@ -253,6 +278,9 @@ export async function getDayClosePreview(branchId?: string, businessDate?: strin
     /** Money taken today on goods that left on an earlier day. */
     onOlderSales,
     onOlderSalesTotal,
+    /** Money taken today on no sale: collected on account, or paid on a replacement. */
+    otherMoneyIn,
+    otherMoneyInTotal: otherCash + otherBank,
     alreadyClosed: Boolean(existing),
     closedRecord: existing
       ? {
@@ -380,6 +408,32 @@ export async function closeDay(formData: FormData) {
   }
 }
 
+/**
+ * What each shop sold on each day, the same figure as "Total sales for the
+ * day" on Balance the till. Closed days used to show cash + bank + credit as
+ * their total sales, which counts money taken that day on older sales and
+ * leaves out credit notes, so the list disagreed with the day it opened.
+ */
+async function salesTotalsByShopDay(days: Array<{ branchId: string; day: string }>) {
+  const out = new Map<string, number>()
+  const valid = days.filter((row) => row.day.length === 10)
+  if (!valid.length) return out
+  const sorted = valid.map((row) => row.day).sort()
+  const sales = await prisma.sale.findMany({
+    where: {
+      status: "COMPLETED",
+      branchId: { in: [...new Set(valid.map((row) => row.branchId))] },
+      saleDate: { gte: watBounds(sorted[0]).start, lt: watBounds(sorted[sorted.length - 1]).end },
+    },
+    select: { branchId: true, saleDate: true, totalAmount: true },
+  })
+  for (const sale of sales) {
+    const key = `${sale.branchId}:${watDayKey(sale.saleDate)}`
+    out.set(key, (out.get(key) ?? 0) + money(sale.totalAmount))
+  }
+  return out
+}
+
 export async function getDayCloses(requestedBranchId?: string) {
   const user = await requireUser()
   if (!(await can(user.role, "view.finance"))) return []
@@ -390,12 +444,15 @@ export async function getDayCloses(requestedBranchId?: string) {
     orderBy: { closeDate: "desc" },
     take: 40,
   })
+  const salesByDay = await salesTotalsByShopDay(
+    rows.map((row) => ({ branchId: row.branchId, day: row.businessDate || watDayKey(row.closeDate) }))
+  )
   return rows.map((row) => {
     const expectedCash = money(row.expectedCash)
     const transferTotal = money(row.transferTotal)
     const posTotal = money(row.posTotal)
     const creditTotal = money(row.creditTotal)
-    const totalSales = expectedCash + transferTotal + posTotal + creditTotal
+    const totalSales = salesByDay.get(`${row.branchId}:${row.businessDate || watDayKey(row.closeDate)}`) ?? 0
     return {
       id: row.id,
       branch: row.branch.name,

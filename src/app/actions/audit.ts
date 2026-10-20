@@ -50,12 +50,12 @@ function whereFrom(filters: AuditFilters) {
     ...(filters.q
       ? {
           OR: [
-            { entityId: { contains: filters.q } },
-            { entityType: { contains: filters.q } },
-            { newValue: { contains: filters.q } },
-            { path: { contains: filters.q } },
-            { user: { name: { contains: filters.q } } },
-            { user: { email: { contains: filters.q } } },
+            { entityId: { contains: filters.q, mode: "insensitive" as const } },
+            { entityType: { contains: filters.q, mode: "insensitive" as const } },
+            { newValue: { contains: filters.q, mode: "insensitive" as const } },
+            { path: { contains: filters.q, mode: "insensitive" as const } },
+            { user: { name: { contains: filters.q, mode: "insensitive" as const } } },
+            { user: { email: { contains: filters.q, mode: "insensitive" as const } } },
           ],
         }
       : {}),

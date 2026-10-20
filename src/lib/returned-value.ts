@@ -1,4 +1,5 @@
 import type { Prisma, PrismaClient } from "@prisma/client"
+import { returnQtyOf } from "@/lib/return-limits"
 import { money } from "@/lib/utils"
 
 type Db = PrismaClient | Prisma.TransactionClient
@@ -42,11 +43,31 @@ export function dueAfterReturns(sale: { totalAmount: unknown; paidAmount: unknow
 export async function returnedSaleLineIds(db: Db) {
   const rows = await db.stockReturn.findMany({
     where: { status: "COMPLETED", outcome: { in: [...MONEY_OUTCOMES] } },
-    select: { saleItemId: true, imeiId: true, saleId: true },
+    select: { saleItemId: true, imeiId: true, saleId: true, quantity: true, notes: true },
   })
+  // Pieces back per line. Two cords back off a line of five leaves three sold.
+  const qtyBySaleItem = new Map<string, number>()
+  for (const row of rows) {
+    if (!row.saleItemId) continue
+    qtyBySaleItem.set(row.saleItemId, (qtyBySaleItem.get(row.saleItemId) ?? 0) + returnQtyOf(row))
+  }
   return {
     saleItemIds: new Set(rows.map((row) => row.saleItemId).filter((id): id is string => Boolean(id))),
+    qtyBySaleItem,
     // Older returns name the phone rather than the line.
     imeiOnSale: new Set(rows.filter((row) => row.imeiId && row.saleId).map((row) => `${row.saleId}:${row.imeiId}`)),
   }
+}
+
+/**
+ * How many pieces of a sale line are still sold once finished refunds and
+ * credit notes are taken off: 0 for a line that came back in full.
+ */
+export function piecesStillSold(
+  returned: Awaited<ReturnType<typeof returnedSaleLineIds>>,
+  saleId: string,
+  item: { id: string; imeiId: string | null; quantity: number }
+) {
+  if (item.imeiId && returned.imeiOnSale.has(`${saleId}:${item.imeiId}`)) return 0
+  return Math.max(0, item.quantity - (returned.qtyBySaleItem.get(item.id) ?? 0))
 }

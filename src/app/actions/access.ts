@@ -4,11 +4,11 @@ import { UserRole } from "@prisma/client"
 import { SUPPLIER_PAYMENT_UNDO_NOTE } from "@/lib/supplier-pay"
 import { revalidatePath } from "next/cache"
 import { prisma } from "@/lib/prisma"
-import { shiftCustomerBalance } from "@/lib/concurrency"
+import { ConflictError, shiftCustomerBalance } from "@/lib/concurrency"
 import { requireUser } from "@/lib/session"
 import { canHardDelete, isShopOwner } from "@/lib/rbac"
 import { ALL_PERM_KEYS, CEO_ONLY_KEYS, ensureRolePermissions } from "@/lib/permissions"
-import { isOpeningStockPurchase } from "@/lib/purchase-money"
+import { isOpeningStockPurchase, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
 import { assertCashAvailable, UNDO_COLLECTION_NOTE } from "@/lib/shop-cash"
 import { canReachBranch, OTHER_SHOP } from "@/lib/branch-scope"
 import { formatCurrency, money } from "@/lib/utils"
@@ -301,48 +301,69 @@ export async function reverseSupplierPayment(formData: FormData) {
 
   // The newest payment on this bill that has not been undone already. Each
   // undo names the payment it reversed, so undoing twice walks back through
-  // the payments instead of reversing the same one again.
+  // the payments instead of reversing the same one again. Pay supplier writes
+  // the bill number first in the description; a payment on upload, a bank
+  // named later and an undo carry it as the reference. Any description that
+  // merely contained the number used to match, which caught other bills whose
+  // number began the same way.
   const moves = await prisma.financeEntry.findMany({
-    where: { description: { contains: purchase.invoiceNumber } },
+    where: {
+      OR: [
+        { type: "EXPENSE", description: { startsWith: `${SUPPLIER_PAYMENT_NOTE}${purchase.invoiceNumber} ` } },
+        { type: "EXPENSE", account: "SUPPLIER_PAYMENTS", reference: purchase.invoiceNumber },
+        { type: "INCOME", reference: purchase.invoiceNumber, description: { startsWith: SUPPLIER_PAYMENT_UNDO_NOTE } },
+      ],
+    },
     orderBy: { createdAt: "desc" },
   })
   const undone = moves.filter((row) => row.type === "INCOME").map((row) => row.description ?? "").join(" ")
-  const last =
-    moves.find((row) => row.type === "EXPENSE" && !undone.includes(`payment ${row.id}`)) ??
-    moves[0] ??
-    null
+  const last = moves.find((row) => row.type === "EXPENSE" && !undone.includes(`payment ${row.id}`)) ?? null
   const amount = last ? Number(last.amount) : paid
   const undo = Math.min(amount, paid)
+  // Cash paid to a supplier came out of the till, so undoing it puts it back
+  // in the till. It used to go back to the bank whatever way it left: the
+  // till stayed short by the payment and the bank read high by the same.
+  const backTo = last?.account === "CASH" ? "CASH" : "BANK"
 
-  await prisma.$transaction(async (tx) => {
-    await tx.purchase.update({
-      where: { id: purchase.id },
-      data: { paidAmount: (paid - undo).toFixed(2) },
+  try {
+    await prisma.$transaction(async (tx) => {
+      // The database takes it off, so an undo landing while someone pays this
+      // bill cannot wipe that payment out.
+      const after = await tx.purchase.update({
+        where: { id: purchase.id },
+        data: { paidAmount: { decrement: undo } },
+        select: { paidAmount: true },
+      })
+      if (money(after.paidAmount) < -0.005) {
+        throw new ConflictError("This payment was already undone by someone else. Open the bill again to see what is paid.")
+      }
+      await tx.financeEntry.create({
+        data: {
+          branchId: purchase.branchId,
+          account: backTo,
+          // Back onto the same bank account the payment left, when it named one.
+          bankAccountId: backTo === "BANK" ? last?.bankAccountId ?? null : null,
+          type: "INCOME",
+          amount: undo.toFixed(2),
+          reference: purchase.invoiceNumber,
+          description: `${SUPPLIER_PAYMENT_UNDO_NOTE} on ${purchase.invoiceNumber}${last ? ` · payment ${last.id}` : ""}`,
+        },
+      })
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "DELETE",
+          entityType: "PurchasePayment",
+          entityId: purchase.invoiceNumber,
+          oldValue: String(undo),
+          newValue: JSON.stringify({ reversed: undo, backTo: backTo === "CASH" ? "the till" : "the bank" }),
+          branchId: purchase.branchId,
+        },
+      })
     })
-    await tx.financeEntry.create({
-      data: {
-        branchId: purchase.branchId,
-        account: "BANK",
-        // Back onto the same bank account the payment left, when it named one.
-        bankAccountId: last?.type === "EXPENSE" ? last.bankAccountId : null,
-        type: "INCOME",
-        amount: undo.toFixed(2),
-        reference: purchase.invoiceNumber,
-        description: `${SUPPLIER_PAYMENT_UNDO_NOTE} on ${purchase.invoiceNumber}${last?.type === "EXPENSE" ? ` · payment ${last.id}` : ""}`,
-      },
-    })
-    await tx.auditLog.create({
-      data: {
-        userId: user.id,
-        action: "DELETE",
-        entityType: "PurchasePayment",
-        entityId: purchase.invoiceNumber,
-        oldValue: String(undo),
-        newValue: "REVERSED",
-        branchId: purchase.branchId,
-      },
-    })
-  })
+  } catch (error) {
+    return { error: error instanceof ConflictError ? error.message : "Could not undo this payment. Nothing was changed." }
+  }
   revalidatePath(`/purchases/${purchase.id}`)
   revalidatePath("/purchases")
   revalidatePath("/finance")

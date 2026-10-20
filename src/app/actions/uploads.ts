@@ -30,6 +30,7 @@ import { resolveWritableShopId, viewBranchFilter } from "@/lib/branch-scope"
 import { canSeeAllBranches } from "@/lib/rbac"
 import { purchaseBalance, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
 import { listPayingBanks, resolveSupplierPayChannel } from "@/lib/supplier-pay"
+import { assertCashAvailable } from "@/lib/shop-cash"
 
 /**
  * Loading the shop system from a sheet or by hand.
@@ -1828,6 +1829,12 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
         ? payChannel.error
         : "Say how you paid the supplier: by transfer (and from which bank) or in cash.",
     }
+  }
+  // Cash paid now comes out of the till, so it must be there: the rule a shop
+  // bill, a deposit and a Swap Deal pay-out already follow.
+  if (payChannel && payChannel.account === "CASH") {
+    const cashGate = await assertCashAvailable(shop.id, amountPaid)
+    if (!cashGate.ok) return { error: cashGate.error }
   }
   const balanceOwed = Math.max(0, payable - amountPaid)
   const fullyPaid = billAfter.payable > 0 && balanceOwed <= 0.005

@@ -22,10 +22,18 @@ import {
   displayBankName,
   listedBankClash,
 } from "@/lib/opening-money"
-import { assertCashAvailable, isUndoneCollection } from "@/lib/shop-cash"
-import { dueAfterReturns, returnedSaleLineIds, returnedValueBySale } from "@/lib/returned-value"
+import {
+  assertCashAvailable,
+  cashSupplierUndoWhere,
+  isSaidNoBill,
+  isUndoneCollection,
+  offInvoiceMoneyInWhere,
+  saidNoBillKeys,
+} from "@/lib/shop-cash"
+import { dueAfterReturns, piecesStillSold, returnedSaleLineIds, returnedValueBySale } from "@/lib/returned-value"
 import { receiptsInWindow } from "@/lib/receipts"
 import { customersOwing } from "@/lib/owed"
+import { displayPartyName, partyNameKey } from "@/lib/party-key"
 
 function emptyFinance() {
   return {
@@ -48,6 +56,7 @@ function emptyFinance() {
     canRemoveBank: false,
     canDeposit: false,
     cashToBank: 0,
+    cashHeldForBills: 0,
     supplierPaidNoBank: 0,
     canNameSupplierBanks: false,
     shops: [] as OpeningCashShop[],
@@ -186,14 +195,26 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
   // Supplier payments made in cash already leave the till as a cash pay-out
   // (see otherCashOuts below). Taking every supplier payment off the bank as
   // well counted a cash payment twice: once from the till, once from the bank.
-  const cashToSupplierRows = await prisma.financeEntry.findMany({
-    where: { ...where, account: "CASH", type: "EXPENSE", description: { startsWith: SUPPLIER_PAYMENT_NOTE } },
-    select: { amount: true, description: true },
-  })
+  const [cashToSupplierRows, cashSupplierUndos] = await Promise.all([
+    prisma.financeEntry.findMany({
+      where: { ...where, account: "CASH", type: "EXPENSE", description: { startsWith: SUPPLIER_PAYMENT_NOTE } },
+      select: { amount: true, description: true },
+    }),
+    prisma.financeEntry.findMany({
+      where: { ...where, ...cashSupplierUndoWhere },
+      select: { amount: true, reference: true },
+    }),
+  ])
   const cashToSupplierByBill = new Map<string, number>()
   for (const row of cashToSupplierRows) {
     const invoice = (row.description ?? "").slice(SUPPLIER_PAYMENT_NOTE.length).split(" ")[0]
     cashToSupplierByBill.set(invoice, (cashToSupplierByBill.get(invoice) ?? 0) + money(row.amount))
+  }
+  // A cash payment undone is cash no longer paid on that bill; without this
+  // the rest of what is paid on it read as less bank money than it was.
+  for (const row of cashSupplierUndos) {
+    const invoice = row.reference ?? ""
+    cashToSupplierByBill.set(invoice, (cashToSupplierByBill.get(invoice) ?? 0) - money(row.amount))
   }
   const bankToSupplier = (po: { invoiceNumber: string; paidAmount: unknown }) =>
     Math.max(0, money(po.paidAmount) - (cashToSupplierByBill.get(po.invoiceNumber) ?? 0))
@@ -435,6 +456,41 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
     })
   }
 
+  // Money that came in with no payment on a sale behind it (see
+  // offInvoiceMoneyInWhere), and cash paid to a supplier then undone.
+  const otherMoneyIn = await prisma.financeEntry.findMany({
+    where: { ...where, account: { in: ["CASH", "BANK"] }, OR: [offInvoiceMoneyInWhere, cashSupplierUndoWhere] },
+    include: { branch: { select: { name: true } } },
+    orderBy: { createdAt: "desc" },
+  })
+  let otherCashIn = 0
+  let otherBankIn = 0
+  const otherInByBank = new Map<string, number>()
+  for (const entry of otherMoneyIn) {
+    const amount = money(entry.amount)
+    const line = {
+      id: `in-${entry.id}`,
+      date: entry.createdAt,
+      branch: entry.branch.name,
+      type: "IN" as const,
+      category: entry.description?.startsWith(SUPPLIER_PAYMENT_UNDO_NOTE)
+        ? "Supplier payment undone"
+        : entry.reference?.startsWith("RTN-")
+          ? "Paid on a replacement"
+          : "Collected on account",
+      description: entry.description || entry.reference || "Money in",
+      amount,
+    }
+    if (entry.account === "CASH") {
+      otherCashIn += amount
+      cashEntries.push(line)
+    } else {
+      otherBankIn += amount
+      if (entry.bankAccountId) otherInByBank.set(entry.bankAccountId, (otherInByBank.get(entry.bankAccountId) ?? 0) + amount)
+      bankEntries.push(line)
+    }
+  }
+
   for (const po of purchases) {
     if (bankToSupplier(po) > 0) {
       bankEntries.push({
@@ -462,7 +518,7 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
     accountNumber: row.accountNumber,
     accountName: row.accountName,
     openingBalance: money(row.openingBalance),
-    salesReceived: salesByBank.get(row.id) ?? 0,
+    salesReceived: (salesByBank.get(row.id) ?? 0) + (otherInByBank.get(row.id) ?? 0),
     depositsReceived: depositsByBank.get(row.id) ?? 0,
     refundsPaid: refundsByBank.get(row.id) ?? 0,
     supplierPaid: Math.max(0, supplierPaidByBank.get(row.id) ?? 0),
@@ -504,8 +560,14 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
   cashEntries.sort((a, b) => b.date.getTime() - a.date.getTime())
   bankEntries.sort((a, b) => b.date.getTime() - a.date.getTime())
 
-  const cashBalance = openingCash + cashRevenue - expenditure - otherCashOut - cashToBank
-  const bankBalance = openingBank + bankRevenue - supplierPaymentsByBank + depositsIn - refundsOut
+  const cashBalance = openingCash + cashRevenue + otherCashIn - expenditure - otherCashOut - cashToBank
+  // Still in the till, but held for bills waiting for yes: Ask for a shop bill
+  // offers the balance less this, so both screens show it.
+  const saidNo = await saidNoBillKeys()
+  const cashHeldForBills = expenses
+    .filter((e) => !e.approvedAt && !isSaidNoBill(e, saidNo))
+    .reduce((sum, e) => sum + money(e.amount), 0)
+  const bankBalance = openingBank + bankRevenue + otherBankIn - supplierPaymentsByBank + depositsIn - refundsOut
 
   const seenHouses = new Set(purchases.map((row) => row.supplierId))
   const ledgers = groupSupplierLedgers([
@@ -562,6 +624,7 @@ export async function getFinance({ withLedger = false }: { withLedger?: boolean 
     canRemoveBank: canHardDelete(user.role),
     canDeposit: await can(user.role, "action.deposit"),
     cashToBank,
+    cashHeldForBills,
     supplierPaidNoBank,
     canNameSupplierBanks: await canManageFinance(user.role),
     shops: openingCashShops,
@@ -578,11 +641,15 @@ export async function getExpenses() {
   const user = await requireUser()
   if (!(await can(user.role, "view.finance")) && !(await can(user.role, "view.expenses"))) return []
   const branchId = await viewBranchFilter(user)
-  return prisma.expense.findMany({
-    where: branchId ? { branchId } : {},
-    include: { branch: { select: { name: true, code: true } } },
-    orderBy: { date: "desc" },
-  })
+  const [rows, saidNo] = await Promise.all([
+    prisma.expense.findMany({
+      where: branchId ? { branchId } : {},
+      include: { branch: { select: { name: true, code: true } } },
+      orderBy: { date: "desc" },
+    }),
+    saidNoBillKeys(),
+  ])
+  return rows.map((row) => ({ ...row, saidNo: !row.approvedAt && isSaidNoBill(row, saidNo) }))
 }
 
 /** The day-by-day lines behind one balance, fetched when its ledger opens. */
@@ -858,7 +925,9 @@ export async function getBankAccountLedger(bankAccountId: string) {
   for (const payment of payments) {
     entries.push({
       id: `payment-${payment.id}`,
-      date: payment.sale.saleDate,
+      // The day the money landed, not the day of the sale: a debt paid weeks
+      // later sat in the statement weeks too early.
+      date: payment.paidAt,
       type: "IN",
       category: "Sale received",
       description: `${payment.sale.invoiceNumber} · ${payment.sale.customer?.name ?? "Walk-in"}`,
@@ -882,6 +951,23 @@ export async function getBankAccountLedger(bankAccountId: string) {
       description: `${deposit.depositNumber} · cash from ${deposit.branch.name}${deposit.slipNumber ? ` · slip ${deposit.slipNumber}` : ""}`,
       amount: money(deposit.amount),
       reference: deposit.slipNumber,
+    })
+  }
+
+  // Customer money into this account with no sale payment behind it
+  const otherIn = await prisma.financeEntry.findMany({
+    where: { bankAccountId, account: "BANK", ...offInvoiceMoneyInWhere },
+    orderBy: { createdAt: "desc" },
+  })
+  for (const entry of otherIn) {
+    entries.push({
+      id: `in-${entry.id}`,
+      date: entry.createdAt,
+      type: "IN",
+      category: entry.reference?.startsWith("RTN-") ? "Paid on a replacement" : "Collected on account",
+      description: entry.description || entry.reference || "Money in",
+      amount: money(entry.amount),
+      reference: entry.reference,
     })
   }
 
@@ -1102,30 +1188,38 @@ export async function createExpense(formData: FormData) {
   const shopGate = await resolveWritableShopId(user, String(formData.get("branchId") || user.branchId || ""))
   if ("error" in shopGate) return { error: shopGate.error }
   const branchId = shopGate.shopId
-  if (amount <= 0) return { error: "Type the amount and pick the shop." }
+  if (!Number.isFinite(amount) || amount <= 0) return { error: "Type the amount and pick the shop." }
+  // A missing kind used to reach the database as the word "null" and fail
+  // with a server error instead of a message.
+  const category = String(formData.get("category") || "")
+  if (!(Object.values(ExpenseCategory) as string[]).includes(category)) return { error: "Pick what kind of bill it is." }
 
   const cashGate = await assertCashAvailable(branchId, amount)
   if (!cashGate.ok) return { error: cashGate.error }
 
-  const expense = await prisma.expense.create({
-    data: {
-      expenseNumber: generateDocNumber("EXP"),
-      branchId,
-      userId: user.id,
-      category: String(formData.get("category")) as ExpenseCategory,
-      amount: amount.toFixed(2),
-      description: String(formData.get("description") || "Expense"),
-      notes: String(formData.get("notes") || "") || null,
-    },
-  })
-  await prisma.approval.create({
-    data: {
-      type: "EXPENSE",
-      entityId: expense.expenseNumber,
-      entityType: "Expense",
-      requestedBy: user.id,
-      reason: expense.description,
-    },
+  // The bill and its request for yes are written together: a bill with no
+  // request could never be approved, and still held its cash aside.
+  await prisma.$transaction(async (tx) => {
+    const expense = await tx.expense.create({
+      data: {
+        expenseNumber: generateDocNumber("EXP"),
+        branchId,
+        userId: user.id,
+        category: category as ExpenseCategory,
+        amount: money(amount).toFixed(2),
+        description: String(formData.get("description") || "Expense"),
+        notes: String(formData.get("notes") || "") || null,
+      },
+    })
+    await tx.approval.create({
+      data: {
+        type: "EXPENSE",
+        entityId: expense.expenseNumber,
+        entityType: "Expense",
+        requestedBy: user.id,
+        reason: expense.description,
+      },
+    })
   })
   revalidatePath("/expenses")
   revalidatePath("/finance")
@@ -1156,6 +1250,9 @@ export async function correctExpense(formData: FormData) {
   if (!expense) return { error: "We could not find that expense." }
   if (!(await canReachBranch(user, expense.branchId))) return { error: OTHER_SHOP }
   if (expense.description.startsWith(CANCELLED_EXPENSE)) return { error: "This expense was already cancelled." }
+  if (!expense.approvedAt && isSaidNoBill(expense, await saidNoBillKeys())) {
+    return { error: "A manager said no to this bill. Ask for a new shop bill instead." }
+  }
 
   const oldAmount = money(expense.amount)
   const nextAmount = cancel ? 0 : money(Number(formData.get("amount")))
@@ -1314,10 +1411,13 @@ export async function decideApproval(id: string, status: "APPROVED" | "REJECTED"
     }
   }
 
-  await prisma.approval.update({
-    where: { id },
+  // Only one decision lands. Two managers pressing yes at the same moment both
+  // got past the check at the top, and each went on to post the money.
+  const claimed = await prisma.approval.updateMany({
+    where: { id, status: "PENDING" },
     data: { status, approvedBy: user.id, approvedAt: new Date() },
   })
+  if (claimed.count !== 1) return { error: "Somebody has already decided on this one." }
 
   if (approval.entityType === "Return" || approval.type === "RETURN") {
     const record = await prisma.stockReturn.findFirst({
@@ -1342,25 +1442,29 @@ export async function decideApproval(id: string, status: "APPROVED" | "REJECTED"
       where: { OR: [{ id: approval.entityId }, { expenseNumber: approval.entityId }] },
     })
     if (expense && status === "APPROVED") {
-      await prisma.expense.update({
-        where: { id: expense.id },
-        data: { approvedBy: user.id, approvedAt: new Date() },
-      })
-      const alreadyPosted = await prisma.financeEntry.findFirst({
-        where: { reference: expense.expenseNumber },
-      })
-      if (!alreadyPosted) {
-        await prisma.financeEntry.create({
-          data: {
-            branchId: expense.branchId,
-            account: "CASH",
-            type: "EXPENSE",
-            amount: expense.amount,
-            reference: expense.expenseNumber,
-            description: expense.description,
-          },
+      // The bill and its money-out line are written together, once.
+      await prisma.$transaction(async (tx) => {
+        const marked = await tx.expense.updateMany({
+          where: { id: expense.id, approvedAt: null },
+          data: { approvedBy: user.id, approvedAt: new Date() },
         })
-      }
+        if (marked.count !== 1) return
+        const alreadyPosted = await tx.financeEntry.findFirst({
+          where: { reference: expense.expenseNumber },
+        })
+        if (!alreadyPosted) {
+          await tx.financeEntry.create({
+            data: {
+              branchId: expense.branchId,
+              account: "CASH",
+              type: "EXPENSE",
+              amount: expense.amount,
+              reference: expense.expenseNumber,
+              description: expense.description,
+            },
+          })
+        }
+      })
     }
   }
 
@@ -1370,12 +1474,24 @@ export async function decideApproval(id: string, status: "APPROVED" | "REJECTED"
       include: { items: true },
     })
     if (recon) {
-      if (status === "APPROVED") {
+      // The count and the shelves it sets move together, or not at all: a
+      // failure half way left some shelves set and the count still waiting.
+      await prisma.$transaction(async (tx) => {
+        const decided = await tx.reconciliation.updateMany({
+          where: { id: recon.id, status: { notIn: ["APPROVED", "REJECTED"] } },
+          data: {
+            status: status === "APPROVED" ? "APPROVED" : "REJECTED",
+            approvedBy: user.id,
+            approvedAt: new Date(),
+            completedAt: new Date(),
+          },
+        })
+        if (decided.count !== 1 || status !== "APPROVED") return
         for (const item of recon.items) {
           // A count says what the shelf is, so the ledger line is the difference
           // against the shelf as it stands now, not the variance worked out on
           // the day of the count — the shelf may have moved since.
-          await setStock(prisma, {
+          await setStock(tx, {
             productId: item.productId,
             branchId: recon.branchId,
             quantity: item.countedQty,
@@ -1387,16 +1503,7 @@ export async function decideApproval(id: string, status: "APPROVED" | "REJECTED"
             },
           })
         }
-      }
-      await prisma.reconciliation.update({
-        where: { id: recon.id },
-        data: {
-          status: status === "APPROVED" ? "APPROVED" : "REJECTED",
-          approvedBy: user.id,
-          approvedAt: new Date(),
-          completedAt: new Date(),
-        },
-      })
+      }, { timeout: 60_000 })
     }
   }
 
@@ -2016,75 +2123,96 @@ export async function getReportData(
       select: { id: true, name: true, creditBalance: true },
     }),
   ])
-  const creditors = purchases
-    .map((row) => {
-      const bal = purchaseBalance(row)
-      return {
-        id: row.id,
-        invoiceNumber: row.invoiceNumber,
-        supplier: row.supplier.name,
-        supplierId: row.supplierId,
-        branch: row.branch.code,
-        total: money(row.totalAmount),
-        paid: money(row.paidAmount),
-        owed: bal.owed,
-        surplus: bal.surplus,
-        sentBack: bal.sentBack,
-        creditBalance: money(row.supplier.creditBalance),
-      }
-    })
-    .filter((row) => row.owed > 0)
-  const supplierCredits = [
-    ...purchases
-      .map((row) => {
-        const bal = purchaseBalance(row)
-        return {
-          id: row.id,
-          invoiceNumber: row.invoiceNumber,
-          supplier: row.supplier.name,
-          supplierId: row.supplierId,
-          branch: row.branch.code,
-          total: money(row.totalAmount),
-          paid: money(row.paidAmount),
-          owed: bal.surplus,
-        }
-      })
-      .filter((row) => row.owed > 0),
-    ...groupSupplierLedgers(
-      purchases.map((row) => ({
+  // Supplier money house by house, netted the way Home, Money in & out and
+  // Check the books net it (groupSupplierLedgers). Bills were listed one by
+  // one here, so a house owed on one bill and in credit on another (or holding
+  // send-back credit) read as owed in full: Reports' "still owed to
+  // suppliers" came out higher than the same figure on Home. Each house still
+  // shows its bills; a closing line takes off what the netting takes off, so
+  // the house adds up to what it really comes to.
+  type SupplierRow = {
+    id: string
+    invoiceNumber: string
+    supplier: string
+    supplierId: string
+    branch: string
+    total: number
+    paid: number
+    owed: number
+  }
+  const houseKey = (name: string, id: string) => partyNameKey(name) || displayPartyName(name) || id
+  const houses = new Map<string, { bills: typeof purchases; credit: Array<{ id: string; name: string; creditBalance: unknown }> }>()
+  for (const bill of purchases) {
+    const key = houseKey(bill.supplier.name, bill.supplierId)
+    const house = houses.get(key) ?? { bills: [], credit: [] }
+    house.bills.push(bill)
+    houses.set(key, house)
+  }
+  for (const row of creditHouses) {
+    if (purchases.some((bill) => bill.supplierId === row.id)) continue
+    const key = houseKey(row.name, row.id)
+    const house = houses.get(key) ?? { bills: [], credit: [] }
+    house.credit.push(row)
+    houses.set(key, house)
+  }
+  const creditors: SupplierRow[] = []
+  const supplierCredits: SupplierRow[] = []
+  for (const house of houses.values()) {
+    const [ledger] = groupSupplierLedgers([
+      ...house.bills.map((row) => ({
         supplierId: row.supplierId,
         supplierName: row.supplier.name,
         creditBalance: row.supplier.creditBalance,
+        totalAmount: row.totalAmount,
+        paidAmount: row.paidAmount,
+        returnedAmount: row.returnedAmount,
+        shippingFee: row.shippingFee,
+      })),
+      ...house.credit.map((row) => ({
+        supplierId: row.id,
+        supplierName: row.name,
+        creditBalance: row.creditBalance,
         totalAmount: 0,
         paidAmount: 0,
         returnedAmount: 0,
         shippingFee: 0,
-      }))
-    )
-      .filter((house) => house.extraCredit > 0 && house.surplus > 0)
-      .map((house) => ({
-        id: `${house.id}-credit`,
-        invoiceNumber: "Send-back surplus",
-        supplier: house.name,
-        supplierId: house.id,
-        branch: "",
-        total: 0,
-        paid: 0,
-        owed: house.extraCredit,
       })),
-    ...creditHouses
-      .filter((row) => !purchases.some((bill) => bill.supplierId === row.id))
-      .map((row) => ({
-        id: `${row.id}-credit`,
-        invoiceNumber: "Send-back surplus",
-        supplier: row.name,
-        supplierId: row.id,
-        branch: "",
-        total: 0,
-        paid: 0,
-        owed: money(row.creditBalance),
-      })),
-  ]
+    ])
+    if (!ledger) continue
+    const billRows = house.bills.map((row) => ({ row, bal: purchaseBalance(row) }))
+    const base = (row: (typeof purchases)[number], owed: number): SupplierRow => ({
+      id: row.id,
+      invoiceNumber: row.invoiceNumber,
+      supplier: row.supplier.name,
+      supplierId: row.supplierId,
+      branch: row.branch.code,
+      total: money(row.totalAmount),
+      paid: money(row.paidAmount),
+      owed,
+    })
+    const closing = (suffix: string, invoiceNumber: string, owed: number): SupplierRow => ({
+      id: `${ledger.id}-${suffix}`,
+      invoiceNumber,
+      supplier: ledger.name,
+      supplierId: ledger.id,
+      branch: "",
+      total: 0,
+      paid: 0,
+      owed,
+    })
+    if (ledger.owed > 0.005) {
+      const rows = billRows.filter(({ bal }) => bal.owed > 0).map(({ row, bal }) => base(row, bal.owed))
+      const listed = rows.reduce((sum, row) => sum + row.owed, 0)
+      if (listed - ledger.owed > 0.005) rows.push(closing("netted", "Less send-backs and bills paid over", ledger.owed - listed))
+      creditors.push(...rows)
+    } else if (ledger.surplus > 0.005) {
+      const rows = billRows.filter(({ bal }) => bal.surplus > 0).map(({ row, bal }) => base(row, bal.surplus))
+      if (ledger.extraCredit > 0) rows.push(closing("credit", "Send-back surplus", ledger.extraCredit))
+      const listed = rows.reduce((sum, row) => sum + row.owed, 0)
+      if (listed - ledger.surplus > 0.005) rows.push(closing("netted", "Less bills still owed", ledger.surplus - listed))
+      supplierCredits.push(...rows)
+    }
+  }
   const priorMix = sumSaleTenders(priorSales)
   // Money in by the day it arrived, like Balance the till: debts collected in
   // the period count, and a later payment on a period sale does not.
@@ -2309,22 +2437,24 @@ export async function getProfitData() {
     returnedSaleLineIds(prisma),
   ])
 
-  // A line that came back for a refund or a credit note made no sale in the
-  // end: the phone is back on the shelf. It stays on the invoice, not here.
-  const wasReturned = (saleId: string, item: { id: string; imeiId: string | null }) =>
-    returned.saleItemIds.has(item.id) || (item.imeiId ? returned.imeiOnSale.has(`${saleId}:${item.imeiId}`) : false)
-
+  // What came back for a refund or a credit note made no sale in the end: it
+  // is back on the shelf. It stays on the invoice, not here. A line that came
+  // back in part keeps the pieces still sold; the whole line used to drop out,
+  // so two cords returned off a line of five took the profit on all five.
   const shopLines = sales.flatMap((sale) =>
-    sale.items.filter((item) => !wasReturned(sale.id, item)).map((item) => {
+    sale.items.flatMap((item) => {
+      const kept = piecesStillSold(returned, sale.id, item)
+      if (kept <= 0) return []
+      const share = kept / item.quantity
       // The cost copied onto the line on the day it sold. Sales written before
       // that field existed carry 0, so those fall back to the item's cost today
       // — the old behaviour, and the reason their profit could move on its own.
       const unitCost = money(item.costPrice) || money(item.product.costPrice)
-      const cost = unitCost * item.quantity
+      const cost = unitCost * kept
       // What the line really fetched once the whole-order discount is shared out.
-      const sell = lineValueAfterOrderDiscount(item.totalPrice, sale)
+      const sell = lineValueAfterOrderDiscount(item.totalPrice, sale) * share
       const list = money(item.listPrice)
-      return {
+      return [{
         id: item.id,
         invoice: sale.invoiceNumber,
         saleId: sale.id,
@@ -2333,7 +2463,7 @@ export async function getProfitData() {
         storage: item.product.storage,
         condition: item.product.condition,
         color: item.product.color,
-        quantity: item.quantity,
+        quantity: kept,
         sell,
         cost,
         profit: sell - cost,
@@ -2343,7 +2473,7 @@ export async function getProfitData() {
         discount: money(item.discount),
         priceReason: item.priceReason,
         date: sale.saleDate,
-      }
+      }]
     })
   )
 

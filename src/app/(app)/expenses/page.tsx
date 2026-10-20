@@ -37,6 +37,7 @@ export default async function ExpensesPage() {
           amount: money(row.amount),
           when: (row.createdAt ?? row.date).toISOString(),
           approvedAt: row.approvedAt?.toISOString() ?? null,
+          saidNo: row.saidNo,
           shop: row.branch.name ?? row.branch.code,
         }))}
       />

@@ -21,9 +21,9 @@ export async function globalSearch(query: string) {
       where: {
         ...branchFilter,
         OR: [
-          { imei1: { contains: q } },
-          { imei2: { contains: q } },
-          { serialNumber: { contains: q } },
+          { imei1: { contains: q, mode: "insensitive" } },
+          { imei2: { contains: q, mode: "insensitive" } },
+          { serialNumber: { contains: q, mode: "insensitive" } },
         ],
       },
       include: { product: true, branch: true, purchase: { select: { invoiceNumber: true } } },
@@ -32,21 +32,21 @@ export async function globalSearch(query: string) {
     views.has("view.customers") ? prisma.customer.findMany({
       where: {
         ...branchFilter,
-        OR: [{ name: { contains: q } }, { phone: { contains: q } }],
+        OR: [{ name: { contains: q, mode: "insensitive" } }, { phone: { contains: q, mode: "insensitive" } }],
       },
       take: 5,
     }) : [],
     views.has("view.sales") ? prisma.sale.findMany({
       where: {
         ...branchFilter,
-        OR: [{ invoiceNumber: { contains: q } }],
+        OR: [{ invoiceNumber: { contains: q, mode: "insensitive" } }],
       },
       include: { customer: true },
       take: 5,
     }) : [],
     views.has("view.products") ? prisma.product.findMany({
       where: {
-        OR: [{ name: { contains: q } }, { sku: { contains: q } }],
+        OR: [{ name: { contains: q, mode: "insensitive" } }, { sku: { contains: q, mode: "insensitive" } }],
       },
       take: 5,
     }) : [],
@@ -54,16 +54,16 @@ export async function globalSearch(query: string) {
       where: {
         ...branchFilter,
         OR: [
-          { invoiceNumber: { contains: q } },
-          { supplier: { name: { contains: q } } },
-          { items: { some: { product: { OR: [{ name: { contains: q } }, { sku: { contains: q } }] } } } },
+          { invoiceNumber: { contains: q, mode: "insensitive" } },
+          { supplier: { name: { contains: q, mode: "insensitive" } } },
+          { items: { some: { product: { OR: [{ name: { contains: q, mode: "insensitive" } }, { sku: { contains: q, mode: "insensitive" } }] } } } },
           {
             imeiRecords: {
               some: {
                 OR: [
-                  { imei1: { contains: q } },
-                  { imei2: { contains: q } },
-                  { serialNumber: { contains: q } },
+                  { imei1: { contains: q, mode: "insensitive" } },
+                  { imei2: { contains: q, mode: "insensitive" } },
+                  { serialNumber: { contains: q, mode: "insensitive" } },
                 ],
               },
             },
@@ -75,7 +75,7 @@ export async function globalSearch(query: string) {
     }) : [],
     views.has("view.transfers") ? prisma.stockTransfer.findMany({
       where: {
-        transferNumber: { contains: q },
+        transferNumber: { contains: q, mode: "insensitive" },
         ...(user.branchId && !allBranches
           ? { OR: [{ fromBranchId: user.branchId }, { toBranchId: user.branchId }] }
           : {}),
@@ -85,7 +85,7 @@ export async function globalSearch(query: string) {
     views.has("view.repairs") ? prisma.repair.findMany({
       where: {
         ...branchFilter,
-        OR: [{ repairNumber: { contains: q } }, { imei: { imei1: { contains: q } } }],
+        OR: [{ repairNumber: { contains: q, mode: "insensitive" } }, { imei: { imei1: { contains: q, mode: "insensitive" } } }],
       },
       include: { imei: true },
       take: 4,

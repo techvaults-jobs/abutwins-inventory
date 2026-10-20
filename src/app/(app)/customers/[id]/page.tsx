@@ -1,8 +1,9 @@
 import { notFound } from "next/navigation"
 import { balanceMeaning, formatSignedBalance } from "@/lib/balance-sign"
-import { getCustomer, getCustomerOpening } from "@/app/actions/parties"
+import { getCustomer, getCustomerOpening, removeCustomer, updateCustomer } from "@/app/actions/parties"
 import { collectPayment } from "@/app/actions/sales"
 import { ActionForm } from "@/components/action-form"
+import { EditDetailsButton } from "@/components/edit-details-button"
 import { CollectMoneyFields } from "@/components/collect-money-fields"
 import { PageHeader, StatusBadge } from "@/components/shared"
 import { formatCurrency, formatDate, money } from "@/lib/utils"
@@ -11,12 +12,21 @@ import { statusLabel } from "@/lib/status"
 import { prisma } from "@/lib/prisma"
 import { dueAfterReturns, returnedValueBySale } from "@/lib/returned-value"
 import { cn } from "@/lib/utils"
+import { canApprove, canHardDelete, isShopOwner } from "@/lib/rbac"
+import { requireUser } from "@/lib/session"
 import { OpeningBalanceCard } from "./opening-balance-card"
 
 export default async function CustomerDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
   const [customer, opening] = await Promise.all([getCustomer(id), getCustomerOpening(id)])
   if (!customer || !opening) notFound()
+  const me = await requireUser()
+  const mayChangeLimit = isShopOwner(me.role) || (await canApprove(me.role))
+  // Only someone added by mistake, with nothing on record, can be removed.
+  const removable =
+    canHardDelete(me.role) &&
+    Math.abs(money(customer.currentBalance)) < 0.005 &&
+    [customer.sales, customer.ledgerEntries, customer.returns, customer.swaps, customer.imeiRecords].every((rows) => rows.length === 0)
   const banks = await prisma.bankAccount.findMany({
     where: { isActive: true, branchId: customer.branchId },
     orderBy: [{ bankName: "asc" }, { accountNumber: "asc" }],
@@ -58,7 +68,35 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
 
   return (
     <div className="space-y-6">
-      <PageHeader backHref="/customers" title={customer.name} description={`${customer.phone} · ${customer.branch.name}`} />
+      <PageHeader
+        backHref="/customers"
+        title={customer.name}
+        description={`${customer.phone} · ${customer.branch.name}`}
+        actions={
+          <EditDetailsButton
+            id={customer.id}
+            title={`Edit details: ${customer.name}`}
+            description="Put right a name, phone or address typed wrong. What they owe is not changed here."
+            save={updateCustomer}
+            remove={removable ? { action: removeCustomer, what: customer.name } : undefined}
+            fields={[
+              { name: "name", label: "Name", value: customer.name, required: true },
+              { name: "phone", label: "Phone", value: customer.phone, type: "tel", required: true },
+              { name: "email", label: "Email", value: customer.email ?? "", type: "email" },
+              {
+                name: "creditLimit",
+                label: "Credit limit (₦)",
+                value: String(money(customer.creditLimit)),
+                type: "number",
+                locked: !mayChangeLimit,
+                hint: mayChangeLimit ? undefined : "A manager, the CEO or the main admin sets this.",
+              },
+              { name: "address", label: "Address", value: customer.address ?? "", wide: true },
+              { name: "notes", label: "Notes", value: customer.notes ?? "", wide: true },
+            ]}
+          />
+        }
+      />
       <div className="grid gap-4 md:grid-cols-3">
         <div className="space-y-4">
           <div className="surface-card p-5">

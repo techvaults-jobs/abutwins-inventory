@@ -89,9 +89,9 @@ function imeiListWhere(branchId: string | null | undefined, search?: string, sta
       ...(search
         ? {
             OR: [
-              { imei1: { contains: search } },
-              { imei2: { contains: search } },
-              { serialNumber: { contains: search } },
+              { imei1: { contains: search, mode: "insensitive" } },
+              { imei2: { contains: search, mode: "insensitive" } },
+              { serialNumber: { contains: search, mode: "insensitive" } },
               { product: { name: { contains: search, mode: "insensitive" } } },
               // "256GB", "Blue" and the like find the phones that carry them.
               { product: { storage: { contains: search, mode: "insensitive" } } },

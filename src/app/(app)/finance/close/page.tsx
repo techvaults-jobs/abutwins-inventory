@@ -201,6 +201,31 @@ export default async function DayClosePage({
         </details>
       ) : null}
 
+      {preview.otherMoneyInTotal > 0 ? (
+        <details className="rounded-lg border border-border bg-muted/40 px-4 py-2.5 text-xs">
+          <summary className="flex cursor-pointer items-center justify-between gap-3">
+            <span className="text-muted-foreground">
+              Also taken today on no sale (paid on account, or on a replacement):
+            </span>
+            <span className="font-bold tabular-nums text-sm">{formatCurrency(preview.otherMoneyInTotal)}</span>
+          </summary>
+          <ul className="mt-2 space-y-1 text-muted-foreground">
+            {preview.otherMoneyIn.slice(0, 12).map((row, index) => (
+              <li key={`${row.reference}-${index}`} className="flex justify-between gap-3">
+                <span>
+                  {row.what || row.reference} · {row.method === "CASH" ? "cash" : "bank"}
+                </span>
+                <span className="tabular-nums">{formatCurrency(row.amount)}</span>
+              </li>
+            ))}
+            {preview.otherMoneyIn.length > 12 ? <li>and {preview.otherMoneyIn.length - 12} more</li> : null}
+          </ul>
+          <p className="mt-2 text-muted-foreground">
+            This money is in the cash and bank figures above. It is not part of today&apos;s sales figure.
+          </p>
+        </details>
+      ) : null}
+
       {/* Till Count Form or Closed Notice */}
       {preview.alreadyClosed ? (
         <div className="surface-card p-6 border-success/30 bg-success-soft">

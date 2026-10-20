@@ -15,6 +15,7 @@ import { markParkedPosted } from "@/app/actions/parked"
 import { isBlockedFromSell } from "@/lib/phone-look"
 import { reservedTransferImeiSet, reservedSwapImeiSet } from "@/app/actions/ops"
 import { shopPayChannel } from "@/lib/sale-money"
+import { ON_ACCOUNT_NOTE } from "@/lib/shop-cash"
 import { belowCost, blindTillPrices, discountOff, sellFloor, type PriceBasis } from "@/lib/pricing"
 import { readPriceApproval } from "@/lib/price-approval"
 import { dueAfterReturns, returnedValueBySale } from "@/lib/returned-value"
@@ -313,13 +314,13 @@ export async function searchTillStock(query: string, branchId?: string) {
         AND: [{ OR: [{ cosmeticGrade: null }, { cosmeticGrade: { not: "FAULTY" } }] }],
         product: { condition: { not: "FAULTY" } },
         OR: [
-          { imei1: { contains: imeiDigits } },
-          { serialNumber: { contains: cleaned } },
-          { product: { name: { contains: cleaned } } },
-          { product: { storage: { contains: cleaned } } },
-          { product: { color: { contains: cleaned } } },
-          { product: { brand: { name: { contains: cleaned } } } },
-          { product: { category: { name: { contains: cleaned } } } },
+          { imei1: { contains: imeiDigits, mode: "insensitive" } },
+          { serialNumber: { contains: cleaned, mode: "insensitive" } },
+          { product: { name: { contains: cleaned, mode: "insensitive" } } },
+          { product: { storage: { contains: cleaned, mode: "insensitive" } } },
+          { product: { color: { contains: cleaned, mode: "insensitive" } } },
+          { product: { brand: { name: { contains: cleaned, mode: "insensitive" } } } },
+          { product: { category: { name: { contains: cleaned, mode: "insensitive" } } } },
         ],
       },
       include: { product: { include: { brand: true, category: true } } },
@@ -333,12 +334,12 @@ export async function searchTillStock(query: string, branchId?: string) {
         condition: { not: "FAULTY" },
         inventory: { some: { branchId: shop, quantity: { gt: 0 } } },
         OR: [
-          { name: { contains: cleaned } },
-          { sku: { contains: cleaned } },
-          { brand: { name: { contains: cleaned } } },
-          { category: { name: { contains: cleaned } } },
-          { storage: { contains: cleaned } },
-          { color: { contains: cleaned } },
+          { name: { contains: cleaned, mode: "insensitive" } },
+          { sku: { contains: cleaned, mode: "insensitive" } },
+          { brand: { name: { contains: cleaned, mode: "insensitive" } } },
+          { category: { name: { contains: cleaned, mode: "insensitive" } } },
+          { storage: { contains: cleaned, mode: "insensitive" } },
+          { color: { contains: cleaned, mode: "insensitive" } },
         ],
       },
       include: {
@@ -1270,6 +1271,15 @@ export async function collectPayment(formData: FormData) {
         bankAccountId = bank.id
       }
 
+      // A transfer cannot be handed back over the counter. Bank money past what
+      // is owed used to be cut down without a word: the bank statement showed
+      // all of it and the books only the debt.
+      const bankIn = tenders.filter((row) => row.method === "TRANSFER").reduce((sum, row) => sum + row.amount, 0)
+      if (bankIn > owing + 0.005) {
+        throw new ConflictError(
+          `${customer.name} owes ${formatCurrency(owing)}. ${formatCurrency(bankIn)} by bank is more than that, and bank money cannot be handed back as change. Record ${formatCurrency(owing)} by bank here and pay the rest back to them by bank.`
+        )
+      }
       const collected = Math.min(amount, owing)
       // Scale tenders down if they typed more than still owed.
       let leftToTake = collected
@@ -1303,19 +1313,6 @@ export async function collectPayment(formData: FormData) {
           description: "Money collected on the customer account. Nothing on the invoice was changed",
         },
       })
-      for (const row of applied) {
-        await tx.financeEntry.create({
-          data: {
-            branchId: customer.branchId,
-            account: row.method === "CASH" ? "CASH" : "BANK",
-            type: "INCOME",
-            amount: row.amount.toFixed(2),
-            reference: payRef,
-            description: `Money collected from ${customer.name}`,
-          },
-        })
-      }
-
       // Peel cash then bank across open invoices so each payment line keeps its channel.
       const pool = applied.map((row) => ({ ...row }))
       const openSales = await tx.sale.findMany({
@@ -1359,6 +1356,43 @@ export async function collectPayment(formData: FormData) {
         }
       }
 
+      // The money-in lines. What paid invoices is already counted from the
+      // payments above. What no invoice was waiting for (an opening balance,
+      // a repair charge, a return's balance) has no payment, so it gets its
+      // own line, which the till, the bank and money-in read. It used to be
+      // written like the rest and read by none of them: the shop had the cash
+      // and the books did not.
+      for (const row of applied) {
+        const unplaced = money(pool.find((left) => left.method === row.method)?.amount ?? 0)
+        const placed = money(row.amount - unplaced)
+        const account = row.method === "CASH" ? "CASH" : "BANK"
+        if (placed > 0) {
+          await tx.financeEntry.create({
+            data: {
+              branchId: customer.branchId,
+              account,
+              type: "INCOME",
+              amount: placed.toFixed(2),
+              reference: payRef,
+              description: `Money collected from ${customer.name}`,
+            },
+          })
+        }
+        if (unplaced > 0) {
+          await tx.financeEntry.create({
+            data: {
+              branchId: customer.branchId,
+              account,
+              bankAccountId: account === "BANK" ? bankAccountId : null,
+              type: "INCOME",
+              amount: unplaced.toFixed(2),
+              reference: payRef,
+              description: `${ON_ACCOUNT_NOTE}${customer.name}${row.method === "TRANSFER" && paymentReference ? ` · ref ${paymentReference}` : ""}`,
+            },
+          })
+        }
+      }
+
       await tx.auditLog.create({
         data: {
           userId: user.id,
@@ -1369,6 +1403,7 @@ export async function collectPayment(formData: FormData) {
           branchId: customer.branchId,
         },
       })
+      return { collected }
     })
   )
 
@@ -1379,7 +1414,15 @@ export async function collectPayment(formData: FormData) {
   revalidatePath("/finance")
   revalidatePath("/sales")
   revalidatePath("/dashboard")
-  return { success: true }
+  return { success: true, message: takenMessage(posted.data.collected, amount) }
+}
+
+/** What the cashier is told: what was recorded, and any cash to hand back. */
+function takenMessage(collected: number, typed: number) {
+  const change = money(typed - collected)
+  return change > 0.005
+    ? `${formatCurrency(collected)} recorded, all that was owed. Hand back ${formatCurrency(change)} change.`
+    : `${formatCurrency(collected)} recorded.`
 }
 
 export async function collectInvoicePayment(formData: FormData) {
@@ -1448,6 +1491,13 @@ export async function collectInvoicePayment(formData: FormData) {
       if (due <= 0) {
         throw new ConflictError(`${sale.invoiceNumber} was settled while you were typing. Nothing is owed on it now.`)
       }
+      // Bank money past what is owed cannot be handed back as change (see collectPayment).
+      const bankIn = tenders.filter((row) => row.method === "TRANSFER").reduce((sum, row) => sum + row.amount, 0)
+      if (bankIn > due + 0.005) {
+        throw new ConflictError(
+          `${formatCurrency(due)} is owed on ${sale.invoiceNumber}. ${formatCurrency(bankIn)} by bank is more than that, and bank money cannot be handed back as change. Record ${formatCurrency(due)} by bank here and pay the rest back to the buyer by bank.`
+        )
+      }
       const collected = Math.min(amount, due)
       let leftToTake = collected
       const applied: Array<{ method: "CASH" | "TRANSFER"; amount: number }> = []
@@ -1492,7 +1542,10 @@ export async function collectInvoicePayment(formData: FormData) {
       }
       if (sale.customerId) {
         const after = await shiftCustomerBalance(tx, sale.customerId, -collected)
-        const next = Math.max(0, money(after.currentBalance))
+        // The statement line carries the real balance. Held at zero, a buyer
+        // with a credit note read as owing nothing while the account said
+        // we owed them, and the statement stopped adding up.
+        const next = money(after.currentBalance)
         await tx.ledgerEntry.create({
           data: {
             customerId: sale.customerId,
@@ -1514,6 +1567,7 @@ export async function collectInvoicePayment(formData: FormData) {
           branchId: sale.branchId,
         },
       })
+      return { collected }
     })
   )
 
@@ -1524,7 +1578,7 @@ export async function collectInvoicePayment(formData: FormData) {
   if (sale.customerId) revalidatePath(`/customers/${sale.customerId}`)
   revalidatePath("/finance")
   revalidatePath("/dashboard")
-  return { success: true }
+  return { success: true, message: takenMessage(posted.data.collected, amount) }
 }
 
 export async function attachSaleCustomer(formData: FormData) {
@@ -1808,8 +1862,10 @@ export async function correctSaleLinePrice(formData: FormData) {
           priceReason: `Corrected: ${reason}`,
         },
       })
-      await tx.sale.update({
-        where: { id: sale.id },
+      // Only over the figures read above. Money collected on this invoice, or
+      // another line corrected, in the meantime would otherwise be written over.
+      const rewritten = await tx.sale.updateMany({
+        where: { id: sale.id, subtotal: sale.subtotal, totalAmount: sale.totalAmount, paidAmount: sale.paidAmount },
         data: {
           subtotal: subtotal.toFixed(2),
           totalAmount: total.toFixed(2),
@@ -1817,6 +1873,9 @@ export async function correctSaleLinePrice(formData: FormData) {
           paymentMethod: nextMethod,
         },
       })
+      if (rewritten.count !== 1) {
+        throw new ConflictError(`${sale.invoiceNumber} changed while you were correcting it. Open it again and redo the correction.`)
+      }
       if (paymentFix) {
         await tx.payment.update({ where: { id: paymentFix.id }, data: { amount: paymentFix.to.toFixed(2) } })
         const entry = await tx.financeEntry.findFirst({

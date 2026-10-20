@@ -20,6 +20,8 @@ export type ExpenseRow = {
   amount: number
   when: string
   approvedAt: string | null
+  /** A manager said no: it never waits for yes again. */
+  saidNo: boolean
   shop: string
 }
 
@@ -27,7 +29,9 @@ type ExpenseFilter = "all" | "waiting" | "approved"
 
 /** Cancelled by the CEO or the main admin: kept on the list at nothing. */
 const isCancelled = (row: ExpenseRow) => row.description.startsWith("Cancelled: ")
-const approvalOf = (row: ExpenseRow) => (isCancelled(row) ? "CANCELLED" : row.approvedAt ? "APPROVED" : "PENDING")
+const approvalOf = (row: ExpenseRow) =>
+  isCancelled(row) ? "CANCELLED" : row.approvedAt ? "APPROVED" : row.saidNo ? "REJECTED" : "PENDING"
+const isWaiting = (row: ExpenseRow) => !row.approvedAt && !row.saidNo && !isCancelled(row)
 
 export function ExpensesList({ expenses, canFix = false }: { expenses: ExpenseRow[]; canFix?: boolean }) {
   const [status, setStatus] = useState<ExpenseFilter>("all")
@@ -36,7 +40,7 @@ export function ExpensesList({ expenses, canFix = false }: { expenses: ExpenseRo
   const filtered = useMemo(
     () =>
       expenses.filter((expense) => {
-        if (status === "waiting") return !expense.approvedAt && !isCancelled(expense)
+        if (status === "waiting") return isWaiting(expense)
         if (status === "approved") return Boolean(expense.approvedAt)
         return true
       }),
@@ -45,7 +49,7 @@ export function ExpensesList({ expenses, canFix = false }: { expenses: ExpenseRo
   const counts = useMemo(
     () => ({
       all: expenses.length,
-      waiting: expenses.filter((expense) => !expense.approvedAt && !isCancelled(expense)).length,
+      waiting: expenses.filter(isWaiting).length,
       approved: expenses.filter((expense) => Boolean(expense.approvedAt)).length,
     }),
     [expenses]
@@ -95,7 +99,7 @@ export function ExpensesList({ expenses, canFix = false }: { expenses: ExpenseRo
             id: "fix",
             header: "",
             cell: (row: ExpenseRow) =>
-              isCancelled(row) ? null : (
+              isCancelled(row) || row.saidNo ? null : (
                 <Button type="button" variant="ghost" size="sm" onClick={() => setFixing(row)}>
                   Fix
                 </Button>
@@ -113,7 +117,7 @@ export function ExpensesList({ expenses, canFix = false }: { expenses: ExpenseRo
       statusLabel(row.category),
       row.shop,
       row.amount,
-      row.approvedAt ? formatShopWhen(row.approvedAt) : "Waiting",
+      row.approvedAt ? formatShopWhen(row.approvedAt) : row.saidNo ? "No" : "Waiting",
       formatShopWhen(row.when),
     ]),
   ]
@@ -162,7 +166,7 @@ export function ExpensesList({ expenses, canFix = false }: { expenses: ExpenseRo
         meta: (
           <span className="flex items-center justify-between gap-2">
             <span>{formatShopWhen(row.when)}</span>
-            {canFix && !isCancelled(row) ? (
+            {canFix && !isCancelled(row) && !row.saidNo ? (
               <Button type="button" variant="outline" size="sm" onClick={() => setFixing(row)}>
                 Fix
               </Button>

@@ -3,9 +3,10 @@
 import { formatSignedBalance } from "@/lib/balance-sign"
 import { revalidatePath } from "next/cache"
 import { prisma } from "@/lib/prisma"
-import { canReachBranch, resolveWritableShopId, scopeRecord, viewBranchFilter } from "@/lib/branch-scope"
+import { canReachBranch, OTHER_SHOP, resolveWritableShopId, scopeRecord, viewBranchFilter } from "@/lib/branch-scope"
 import { requireUser } from "@/lib/session"
-import { canSetOpeningMoney, isShopOwner } from "@/lib/rbac"
+import { canApprove, canHardDelete, canManageFinance, canSell, canSetOpeningMoney, isShopOwner } from "@/lib/rbac"
+import { shopError } from "@/lib/shop-speak"
 import { ConflictError, settle, shiftCustomerBalance } from "@/lib/concurrency"
 import { can } from "@/lib/permissions"
 import { displayPartyName } from "@/lib/party-key"
@@ -23,7 +24,7 @@ export async function getCustomers(search?: string) {
     where: {
       ...(branchId ? { branchId } : {}),
       ...(search
-        ? { OR: [{ name: { contains: search } }, { phone: { contains: search } }] }
+        ? { OR: [{ name: { contains: search, mode: "insensitive" } }, { phone: { contains: search, mode: "insensitive" } }] }
         : {}),
     },
     include: {
@@ -82,34 +83,38 @@ export async function createCustomer(formData: FormData) {
   const exists = await prisma.customer.findUnique({ where: { phone } })
   if (exists) return { error: "A customer with this phone number is already on the system." }
 
-  const customer = await prisma.customer.create({
-    data: {
-      name,
-      phone,
-      email: String(formData.get("email") || "") || null,
-      address: String(formData.get("address") || "") || null,
-      branchId,
-      creditLimit: creditLimit.toFixed(2),
-      currentBalance: openingBalance.toFixed(2),
-      notes: String(formData.get("notes") || "") || null,
-    },
-  })
-
-  if (Math.abs(openingBalance) > 0.005) {
-    await prisma.ledgerEntry.create({
+  // The customer and their opening line are written together, so a balance
+  // never stands without the statement line that explains it.
+  const customer = await prisma.$transaction(async (tx) => {
+    const created = await tx.customer.create({
       data: {
-        customerId: customer.id,
-        type: "ADJUSTMENT",
-        amount: openingBalance.toFixed(2),
-        balance: openingBalance.toFixed(2),
-        reference: generateDocNumber(OPENING_REF_PREFIX),
-        description:
-          openingBalance > 0
-            ? "Opening balance. Money this buyer already owed when the shops started on this software."
-            : "Opening balance. Money we already owed this buyer when the shops started on this software.",
+        name,
+        phone,
+        email: String(formData.get("email") || "") || null,
+        address: String(formData.get("address") || "") || null,
+        branchId,
+        creditLimit: creditLimit.toFixed(2),
+        currentBalance: openingBalance.toFixed(2),
+        notes: String(formData.get("notes") || "") || null,
       },
     })
-  }
+    if (Math.abs(openingBalance) > 0.005) {
+      await tx.ledgerEntry.create({
+        data: {
+          customerId: created.id,
+          type: "ADJUSTMENT",
+          amount: openingBalance.toFixed(2),
+          balance: openingBalance.toFixed(2),
+          reference: generateDocNumber(OPENING_REF_PREFIX),
+          description:
+            openingBalance > 0
+              ? "Opening balance. Money this buyer already owed when the shops started on this software."
+              : "Opening balance. Money we already owed this buyer when the shops started on this software.",
+        },
+      })
+    }
+    return created
+  })
 
   revalidatePath("/customers")
   revalidatePath("/pos")
@@ -117,6 +122,140 @@ export async function createCustomer(formData: FormData) {
   revalidatePath("/finance")
   revalidatePath("/reports")
   return { success: true, id: customer.id }
+}
+
+/**
+ * Put right a customer's name, phone, email, address or notes. A phone typed
+ * wrong used to stay wrong for good: there was no edit, and the right number
+ * could not be added either, because a phone belongs to one customer only.
+ *
+ * Their balance is never touched here (see setCustomerOpeningBalance). The
+ * credit limit decides how much they may take on credit, so only a manager,
+ * the CEO or the main admin may change it.
+ */
+export async function updateCustomer(formData: FormData) {
+  const user = await requireUser()
+  if (!(await canSell(user.role)) && !(await canManageFinance(user.role))) {
+    return { error: "You are not allowed to change customer details. Ask the main admin." }
+  }
+  const id = String(formData.get("id") || "")
+  const name = String(formData.get("name") ?? "").trim()
+  const phone = String(formData.get("phone") ?? "").trim()
+  if (!id) return { error: "Customer missing. Open their page again." }
+  if (!name || !phone) return { error: "Type the name and phone." }
+
+  const existing = await prisma.customer.findUnique({ where: { id } })
+  if (!existing) return { error: "We could not find that customer." }
+  if (!(await canReachBranch(user, existing.branchId))) return { error: OTHER_SHOP }
+
+  if (phone !== existing.phone) {
+    const taken = await prisma.customer.findUnique({ where: { phone }, select: { name: true } })
+    if (taken) return { error: `That phone number already belongs to ${taken.name}.` }
+  }
+
+  const limitRaw = String(formData.get("creditLimit") ?? "").trim()
+  let creditLimit = money(existing.creditLimit)
+  if (limitRaw !== "" && Math.abs(Number(limitRaw) - creditLimit) > 0.005) {
+    if (!isShopOwner(user.role) && !(await canApprove(user.role))) {
+      return { error: "Only a manager, the CEO or the main admin can change a credit limit." }
+    }
+    const wanted = Number(limitRaw)
+    if (!Number.isFinite(wanted) || wanted < 0) return { error: "The credit limit must be 0 or more." }
+    creditLimit = Math.round(wanted * 100) / 100
+  }
+
+  const before = {
+    name: existing.name,
+    phone: existing.phone,
+    email: existing.email,
+    address: existing.address,
+    notes: existing.notes,
+    creditLimit: money(existing.creditLimit),
+  }
+  const after = {
+    name,
+    phone,
+    email: String(formData.get("email") || "").trim() || null,
+    address: String(formData.get("address") || "").trim() || null,
+    notes: String(formData.get("notes") || "").trim() || null,
+    creditLimit,
+  }
+  const changed = (Object.keys(after) as Array<keyof typeof after>).filter(
+    (key) => String(before[key] ?? "") !== String(after[key] ?? "")
+  )
+  if (!changed.length) return { success: true, message: "Nothing changed." }
+
+  try {
+    await prisma.$transaction([
+      prisma.customer.update({ where: { id }, data: { ...after, creditLimit: creditLimit.toFixed(2) } }),
+      prisma.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "UPDATE",
+          entityType: "Customer",
+          entityId: id,
+          oldValue: JSON.stringify(Object.fromEntries(changed.map((key) => [key, before[key]]))),
+          newValue: JSON.stringify({
+            ...Object.fromEntries(changed.map((key) => [key, after[key]])),
+            note: `Customer details changed: ${name}. Changed: ${changed.join(", ")}.`,
+          }),
+          branchId: existing.branchId,
+          risk: changed.includes("creditLimit") || changed.includes("phone") ? "MEDIUM" : "LOW",
+        },
+      }),
+    ])
+  } catch (error) {
+    // Two people saving the same new phone at once: the database keeps one.
+    return { error: shopError(error, "Could not save these details. Nothing was changed.") }
+  }
+
+  revalidatePath(`/customers/${id}`)
+  revalidatePath("/customers")
+  revalidatePath("/pos")
+  revalidatePath("/sales")
+  return { success: true, message: `${name}: details saved.` }
+}
+
+/**
+ * Take a customer added by mistake off the system. Only one with no sales,
+ * statement lines, returns, swaps, repairs or phones on record, so no figure
+ * anywhere can change. A customer with history stays.
+ */
+export async function removeCustomer(formData: FormData) {
+  const user = await requireUser()
+  if (!canHardDelete(user.role)) return { error: "Only the CEO or the main admin can remove a customer." }
+  const id = String(formData.get("id") || "")
+  const customer = await prisma.customer.findUnique({
+    where: { id },
+    include: { _count: { select: { sales: true, ledgerEntries: true, returns: true, swaps: true, repairs: true, imeiRecords: true } } },
+  })
+  if (!customer) return { error: "We could not find that customer." }
+  if (!(await canReachBranch(user, customer.branchId))) return { error: OTHER_SHOP }
+  const history = Object.values(customer._count).some((count) => count > 0)
+  if (history || Math.abs(money(customer.currentBalance)) > 0.005) {
+    return { error: `${customer.name} has sales or money on record, so they stay on the system. Correct their details instead.` }
+  }
+  try {
+    await prisma.$transaction([
+      prisma.customer.delete({ where: { id } }),
+      prisma.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "DELETE",
+          entityType: "Customer",
+          entityId: `${customer.name} (${customer.phone})`,
+          oldValue: JSON.stringify({ name: customer.name, phone: customer.phone, email: customer.email, address: customer.address }),
+          newValue: JSON.stringify({ note: `Removed ${customer.name} (${customer.phone}), added by mistake. They had no sales or money on record.` }),
+          branchId: customer.branchId,
+        },
+      }),
+    ])
+  } catch (error) {
+    return { error: shopError(error, "Could not remove this customer. Nothing was changed.") }
+  }
+  revalidatePath("/customers")
+  revalidatePath("/pos")
+  return { success: true, message: `${customer.name} removed.`, redirectTo: "/customers" }
 }
 
 /** Ledger lines that make up a customer's opening balance: the first one and every correction. */
@@ -462,6 +601,128 @@ export async function createSupplier(formData: FormData) {
   revalidatePath("/reports")
   revalidatePath("/purchases")
   return { success: true }
+}
+
+/** Who may change a supplier's details: the jobs that buy from them or pay them. */
+async function mayEditSuppliers(role: Parameters<typeof can>[0]) {
+  if (isShopOwner(role)) return true
+  const keys = ["action.upload", "action.intake", "action.incoming", "action.finance"]
+  return (await Promise.all(keys.map((key) => can(role, key)))).some(Boolean)
+}
+
+/**
+ * Put right a supplier's name, phone and contact details. There was no edit:
+ * a misspelt name or a wrong number stayed on every bill for good.
+ *
+ * An opening stock name is not a supplier we owe (see payablePurchaseWhere),
+ * so a rename may not move a house into or out of that group: its bills would
+ * suddenly count as owed, or stop counting.
+ */
+export async function updateSupplier(formData: FormData) {
+  const user = await requireUser()
+  if (!(await mayEditSuppliers(user.role))) return { error: "You are not allowed to change supplier details. Ask the main admin." }
+  const id = String(formData.get("id") || "")
+  const name = displayPartyName(String(formData.get("name") ?? ""))
+  const phone = String(formData.get("phone") ?? "").trim()
+  if (!id) return { error: "Supplier missing. Open their page again." }
+  const existing = await prisma.supplier.findUnique({ where: { id } })
+  if (!existing) return { error: "We could not find that supplier." }
+  const openingStock = isOpeningStockSupplierName(existing.name)
+  if (!name || (!phone && !openingStock)) return { error: "Name and phone are required." }
+  if (isOpeningStockSupplierName(name) !== openingStock) {
+    return {
+      error: openingStock
+        ? "This name holds opening stock. Keep opening stock in its name, so its value is never counted as owed."
+        : "A supplier's name cannot say opening stock: its bills would stop counting as owed. Pick another name.",
+    }
+  }
+  const clash = await findDuplicateSupplier({ name, phone, ignoreId: id })
+  if (clash) return clash
+
+  const before = {
+    name: existing.name,
+    phone: existing.phone,
+    contactPerson: existing.contactPerson,
+    email: existing.email,
+    address: existing.address,
+    country: existing.country,
+    city: existing.city,
+    kind: existing.kind,
+  }
+  const after = {
+    name,
+    phone: phone || existing.phone,
+    contactPerson: String(formData.get("contactPerson") || "").trim() || null,
+    email: String(formData.get("email") || "").trim() || null,
+    address: String(formData.get("address") || "").trim() || null,
+    country: String(formData.get("country") || "").trim() || null,
+    city: String(formData.get("city") || "").trim() || null,
+    kind: (String(formData.get("kind") || existing.kind) === "NEIGHBOR" ? "NEIGHBOR" : "SUPPLIER") as SupplierKind,
+  }
+  const changed = (Object.keys(after) as Array<keyof typeof after>).filter(
+    (key) => String(before[key] ?? "") !== String(after[key] ?? "")
+  )
+  if (!changed.length) return { success: true, message: "Nothing changed." }
+
+  await prisma.$transaction([
+    prisma.supplier.update({ where: { id }, data: after }),
+    prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        action: "UPDATE",
+        entityType: "Supplier",
+        entityId: id,
+        oldValue: JSON.stringify(Object.fromEntries(changed.map((key) => [key, before[key]]))),
+        newValue: JSON.stringify({
+          ...Object.fromEntries(changed.map((key) => [key, after[key]])),
+          note: `Supplier details changed: ${name}. Changed: ${changed.join(", ")}.`,
+        }),
+        branchId: user.branchId,
+        risk: changed.includes("name") ? "MEDIUM" : "LOW",
+      },
+    }),
+  ])
+
+  revalidatePath(`/suppliers/${id}`)
+  revalidatePath("/suppliers")
+  revalidatePath("/purchases")
+  return { success: true, message: `${name}: details saved.` }
+}
+
+/**
+ * Take a supplier added by mistake off the system: only one with no bills,
+ * phones, incoming goods or send-backs, and no credit with us.
+ */
+export async function removeSupplier(formData: FormData) {
+  const user = await requireUser()
+  if (!canHardDelete(user.role)) return { error: "Only the CEO or the main admin can remove a supplier." }
+  const id = String(formData.get("id") || "")
+  const supplier = await prisma.supplier.findUnique({
+    where: { id },
+    include: { _count: { select: { purchases: true, imeiRecords: true, incomingLots: true, stockReturns: true, supplierReturnLines: true } } },
+  })
+  if (!supplier) return { error: "We could not find that supplier." }
+  const history = Object.values(supplier._count).some((count) => count > 0)
+  if (history || Math.abs(money(supplier.creditBalance)) > 0.005) {
+    return { error: `${supplier.name} has bills or goods on record, so they stay on the system. Correct their details instead.` }
+  }
+  await prisma.$transaction([
+    prisma.supplier.delete({ where: { id } }),
+    prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        action: "DELETE",
+        entityType: "Supplier",
+        entityId: `${supplier.name} (${supplier.phone})`,
+        oldValue: JSON.stringify({ name: supplier.name, phone: supplier.phone, email: supplier.email, city: supplier.city }),
+        newValue: JSON.stringify({ note: `Removed ${supplier.name}, added by mistake. They had no bills or goods on record.` }),
+        branchId: user.branchId,
+      },
+    }),
+  ])
+  revalidatePath("/suppliers")
+  revalidatePath("/purchases")
+  return { success: true, message: `${supplier.name} removed.`, redirectTo: "/suppliers" }
 }
 
 /** Opening bills: money we owed a house before this software. */

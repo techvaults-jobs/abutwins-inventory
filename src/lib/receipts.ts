@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma"
+import { ON_ACCOUNT_NOTE, offInvoiceMoneyInWhere } from "@/lib/shop-cash"
 import { money } from "@/lib/utils"
 
 /**
@@ -16,7 +17,7 @@ import { money } from "@/lib/utils"
  */
 export async function receiptsInWindow(args: { branchId?: string | null; start: Date; end: Date }) {
   const shop = args.branchId ? { branchId: args.branchId } : {}
-  const [payments, legacy] = await Promise.all([
+  const [payments, legacy, offInvoice] = await Promise.all([
     prisma.payment.findMany({
       where: { paidAt: { gte: args.start, lt: args.end }, sale: { status: "COMPLETED", ...shop } },
       select: { amount: true, method: true, sale: { select: { saleDate: true } } },
@@ -30,6 +31,11 @@ export async function receiptsInWindow(args: { branchId?: string | null; start: 
         payments: { none: {} },
       },
       select: { paidAmount: true, creditNoteUsed: true, paymentMethod: true },
+    }),
+    // Customer money with no sale payment behind it (see offInvoiceMoneyInWhere).
+    prisma.financeEntry.findMany({
+      where: { ...shop, account: { in: ["CASH", "BANK"] }, createdAt: { gte: args.start, lt: args.end }, ...offInvoiceMoneyInWhere },
+      select: { amount: true, account: true, description: true },
     }),
   ])
 
@@ -55,6 +61,14 @@ export async function receiptsInWindow(args: { branchId?: string | null; start: 
     if (amount <= 0.005) continue
     onPeriodSales += amount
     add(row.paymentMethod, amount)
+  }
+  for (const row of offInvoice) {
+    const amount = money(row.amount)
+    // Collected on account is an old debt paid; the extra on a replacement is
+    // today's dealing, like a sale.
+    if (row.description?.startsWith(ON_ACCOUNT_NOTE)) debtsCollected += amount
+    else onPeriodSales += amount
+    add(row.account === "CASH" ? "CASH" : "TRANSFER", amount)
   }
   return { total: onPeriodSales + debtsCollected, onPeriodSales, debtsCollected, cash, transfer, pos, bank: transfer + pos }
 }

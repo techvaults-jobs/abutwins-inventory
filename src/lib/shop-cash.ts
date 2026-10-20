@@ -1,6 +1,41 @@
+import type { Prisma } from "@prisma/client"
 import { prisma } from "@/lib/prisma"
 import { sumSaleTenders } from "@/lib/sale-money"
+import { SUPPLIER_PAYMENT_UNDO_NOTE } from "@/lib/supplier-pay"
 import { money } from "@/lib/utils"
+
+/**
+ * How money collected on a customer's account is written when no invoice was
+ * waiting for it: an opening balance from before this software, a repair
+ * charge, or a return's balance. The part that pays invoices becomes payments
+ * on those invoices; this part has no invoice, so it is its own line.
+ */
+export const ON_ACCOUNT_NOTE = "Collected on account, on no invoice: "
+
+/**
+ * Customer money that came in with no payment on a sale behind it: the extra
+ * paid on a replacement that costs more (written against the return number),
+ * and money collected on account that no invoice was waiting for.
+ *
+ * Every till, bank and money-in figure is built from payments on sales, so
+ * this money used to reach none of them: Iwo Road's till read short by every
+ * opening balance a customer paid off in cash.
+ */
+export const offInvoiceMoneyInWhere: Prisma.FinanceEntryWhereInput = {
+  type: "INCOME",
+  OR: [{ reference: { startsWith: "RTN-" } }, { description: { startsWith: ON_ACCOUNT_NOTE } }],
+}
+
+/**
+ * A supplier payment made in cash, undone. The payment's own line still reads
+ * as cash out, so the till takes this back in. (An undone bank payment needs
+ * nothing: the bank is worked out from what is still paid on the bill.)
+ */
+export const cashSupplierUndoWhere: Prisma.FinanceEntryWhereInput = {
+  type: "INCOME",
+  account: "CASH",
+  description: { startsWith: SUPPLIER_PAYMENT_UNDO_NOTE },
+}
 
 /**
  * Cash sitting in one shop till on the books:
@@ -24,7 +59,7 @@ export function isUndoneCollection(entry: { description?: string | null }) {
 }
 
 export async function shopCashOnHand(branchId: string) {
-  const [branch, sales, approvedExpenses, expenseNumbers, cashPayOuts, deposits] = await Promise.all([
+  const [branch, sales, approvedExpenses, expenseNumbers, cashPayOuts, deposits, cashBack] = await Promise.all([
     prisma.branch.findUnique({
       where: { id: branchId },
       select: { openingCash: true, name: true },
@@ -55,9 +90,13 @@ export async function shopCashOnHand(branchId: string) {
       where: { branchId, undoneAt: null },
       _sum: { amount: true },
     }),
+    prisma.financeEntry.aggregate({
+      where: { branchId, account: "CASH", OR: [offInvoiceMoneyInWhere, cashSupplierUndoWhere] },
+      _sum: { amount: true },
+    }),
   ])
 
-  const cashIn = sumSaleTenders(sales).cash
+  const cashIn = sumSaleTenders(sales).cash + money(cashBack._sum.amount)
   const expenseOut = money(approvedExpenses._sum.amount)
   const expenseRefs = new Set(expenseNumbers.map((row) => row.expenseNumber))
   const otherOut = cashPayOuts.reduce((sum, row) => {
@@ -78,6 +117,41 @@ export async function shopCashOnHand(branchId: string) {
   }
 }
 
+/**
+ * Shop bills a manager said no to. A bill has no status of its own: saying no
+ * only marks its approval, so the bill keeps an empty approvedAt and looked
+ * like it was still waiting for yes. Each one held its cash aside for ever:
+ * Ask for a shop bill read ₦145,500 at Iwo Road while Money in & out read
+ * ₦153,500. Holds the bill's number and id, as an approval may name either.
+ */
+export async function saidNoBillKeys() {
+  const rows = await prisma.approval.findMany({
+    where: { status: "REJECTED", OR: [{ type: "EXPENSE" }, { entityType: "Expense" }] },
+    select: { entityId: true },
+  })
+  return new Set(rows.map((row) => row.entityId))
+}
+
+export function isSaidNoBill(bill: { id: string; expenseNumber: string }, saidNo: Set<string>) {
+  return saidNo.has(bill.id) || saidNo.has(bill.expenseNumber)
+}
+
+/** Cash held aside in one shop for bills still waiting for yes. */
+export async function cashHeldForBills(branchId: string, options?: { ignoreExpenseId?: string }) {
+  const [waiting, saidNo] = await Promise.all([
+    prisma.expense.findMany({
+      where: {
+        branchId,
+        approvedAt: null,
+        ...(options?.ignoreExpenseId ? { id: { not: options.ignoreExpenseId } } : {}),
+      },
+      select: { id: true, expenseNumber: true, amount: true },
+    }),
+    saidNoBillKeys(),
+  ])
+  return waiting.reduce((sum, bill) => (isSaidNoBill(bill, saidNo) ? sum : sum + money(bill.amount)), 0)
+}
+
 /** Refuse a cash pay-out that would push the till below zero. */
 export async function assertCashAvailable(
   branchId: string,
@@ -86,16 +160,7 @@ export async function assertCashAvailable(
 ) {
   const want = money(amount)
   if (want <= 0) return { ok: true as const, available: 0 }
-  const till = await shopCashOnHand(branchId)
-  const pending = await prisma.expense.aggregate({
-    where: {
-      branchId,
-      approvedAt: null,
-      ...(options?.ignoreExpenseId ? { id: { not: options.ignoreExpenseId } } : {}),
-    },
-    _sum: { amount: true },
-  })
-  const reserved = money(pending._sum.amount)
+  const [till, reserved] = await Promise.all([shopCashOnHand(branchId), cashHeldForBills(branchId, options)])
   const free = till.available - reserved
   if (want <= free + 0.005) {
     return { ok: true as const, available: free }

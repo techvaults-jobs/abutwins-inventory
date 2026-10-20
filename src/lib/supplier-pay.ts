@@ -1,6 +1,8 @@
 import type { UserRole } from "@prisma/client"
 import { canReachBranch, viewBranchFilter } from "@/lib/branch-scope"
 import { prisma } from "@/lib/prisma"
+import { SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
+import { money } from "@/lib/utils"
 
 type Payer = { id: string; role: UserRole; branchId: string | null }
 
@@ -12,6 +14,31 @@ export type PayingBank = { id: string; label: string; branchId: string }
 
 /** How an undone supplier payment is written in the money ledger. */
 export const SUPPLIER_PAYMENT_UNDO_NOTE = "Undid a payment to the supplier"
+
+/**
+ * Money sent to suppliers in a window, by the day it left, less payments
+ * undone in that window. Home and Check the books both read this.
+ *
+ * Home used to count every payment and never take an undone one back off,
+ * and Check the books added up what was paid on bills *created* in the
+ * window, so the two screens disagreed about the same month's money out.
+ * Lines naming the bank for money already paid are not payments and stay out.
+ */
+export async function supplierPaidInWindow(args: { branchId?: string | null; start: Date; end: Date }) {
+  const shop = args.branchId ? { branchId: args.branchId } : {}
+  const createdAt = { gte: args.start, lt: args.end }
+  const [paid, undone] = await Promise.all([
+    prisma.financeEntry.aggregate({
+      where: { ...shop, createdAt, type: "EXPENSE", description: { startsWith: SUPPLIER_PAYMENT_NOTE } },
+      _sum: { amount: true },
+    }),
+    prisma.financeEntry.aggregate({
+      where: { ...shop, createdAt, type: "INCOME", description: { startsWith: SUPPLIER_PAYMENT_UNDO_NOTE } },
+      _sum: { amount: true },
+    }),
+  ])
+  return Math.max(0, money(paid._sum.amount) - money(undone._sum.amount))
+}
 
 export function bankLabel(bank: { bankName: string; accountNumber: string; accountName?: string | null }) {
   return `${bank.bankName} ${bank.accountNumber}${bank.accountName ? ` · ${bank.accountName}` : ""}`
