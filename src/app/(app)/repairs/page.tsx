@@ -6,6 +6,7 @@ import { getRepairs } from "@/app/actions/ops"
 import { PageHeader } from "@/components/shared"
 import { Button } from "@/components/ui/button"
 import { can } from "@/lib/permissions"
+import { isShopOwner } from "@/lib/rbac"
 import { requireUser } from "@/lib/session"
 import { RepairsList } from "./repairs-list"
 
@@ -31,6 +32,7 @@ export default async function RepairsPage({ searchParams }: { searchParams: Prom
         />
         <RepairsList
           initialStatus={status}
+          canCancel={isShopOwner(user.role)}
           // Only what the list shows. Passing the whole row sent the staff
           // member's login record, password hash included, to the browser.
           rows={rows.map((row) => ({

@@ -154,20 +154,23 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
           <div className="space-y-3 text-sm">
             {customer.sales.map((sale) => {
               const back = returned.get(sale.id) ?? 0
-              const due = dueAfterReturns(sale, back)
+              const cancelled = sale.status === "CANCELLED"
+              const due = cancelled ? 0 : dueAfterReturns(sale, back)
               const fullyReturned = back > 0 && back >= money(sale.totalAmount) - 0.005
               return (
               <div key={sale.id} className="flex items-start justify-between gap-3 border-b border-border/70 pb-3 last:border-0 last:pb-0">
                 <div className="min-w-0">
                   <a href={`/sales/${sale.id}`} className="whitespace-nowrap font-medium text-primary hover:underline">{sale.invoiceNumber}</a>
                   <div className="mt-1">
-                    <StatusBadge value={fullyReturned ? "RETURNED" : due > 0.005 ? "DUE" : "SETTLED"} />
+                    <StatusBadge value={cancelled ? "CANCELLED" : fullyReturned ? "RETURNED" : due > 0.005 ? "DUE" : "SETTLED"} />
                   </div>
                 </div>
                 <div className="shrink-0 text-right tabular-nums">
                   <p className="font-medium">{formatCurrency(money(sale.totalAmount))}</p>
                   {back > 0 ? <p className="text-xs text-muted-foreground">Returned {formatCurrency(back)}</p> : null}
-                  {due > 0.005 ? (
+                  {cancelled ? (
+                    <p className="text-xs text-muted-foreground">Cancelled, not counted</p>
+                  ) : due > 0.005 ? (
                     <p className="text-xs text-warning">Still {formatCurrency(due)}</p>
                   ) : fullyReturned && money(sale.paidAmount) <= 0 ? (
                     <p className="text-xs text-success">Nothing owed</p>

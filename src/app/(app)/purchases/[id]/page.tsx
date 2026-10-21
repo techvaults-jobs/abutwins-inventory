@@ -1,6 +1,8 @@
 import Link from "next/link"
 import { notFound } from "next/navigation"
 import { reverseSupplierPayment } from "@/app/actions/access"
+import { cancelSupplierBill } from "@/app/actions/corrections"
+import { CancelRecordCard } from "@/components/cancel-record-card"
 import { bookPurchaseAsComing } from "@/app/actions/incoming"
 import { getPurchase, receivePurchaseImeis, setPurchaseShippingFee } from "@/app/actions/ops"
 import { listPayingBanks } from "@/lib/supplier-pay"
@@ -51,7 +53,8 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
   // way. It is received there, whole, not unit by unit from this page.
   const waitingLot = purchase.incomingLots.find((lot) => lot.status === "COMING" || lot.status === "PENDING_APPROVAL")
   const receivedOnGoodsOnTheWay = purchase.source === "UPLOAD_STOCK" && Boolean(waitingLot)
-  const due = isOpening ? 0 : billMoney.owed
+  const cancelNote = (purchase.notes ?? "").split("\n").reverse().find((line) => line.startsWith("Cancelled by ")) ?? null
+  const due = isOpening || purchase.status === "CANCELLED" ? 0 : billMoney.owed
   const payingBanks = due > 0 ? await listPayingBanks(me) : []
   const surplus = isOpening ? 0 : billMoney.surplus
   const step = isOpening
@@ -516,7 +519,12 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
           </ActionForm>
         </div>
       ) : null}
-      {isOpening ? null : due > 0 ? (
+      {purchase.status === "CANCELLED" ? (
+        <div className="rounded-lg border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">
+          <p className="font-semibold">This bill was cancelled. It is not owed and its goods are off the shelf.</p>
+          {cancelNote ? <p className="mt-1">{cancelNote}</p> : null}
+        </div>
+      ) : isOpening ? null : due > 0 ? (
         <div className="surface-card p-5">
           <h3 className="mb-2 font-semibold">Pay supplier</h3>
           <p className="mb-4 text-sm text-muted-foreground">
@@ -539,6 +547,23 @@ export default async function PurchaseDetailPage({ params }: { params: Promise<{
             <input type="hidden" name="id" value={purchase.id} />
           </ActionForm>
         </div>
+      ) : null}
+      {!isOpening && isShopOwner(me.role) && purchase.status !== "CANCELLED" ? (
+        <CancelRecordCard
+          action={cancelSupplierBill}
+          idName="id"
+          id={purchase.id}
+          title="Cancel this bill"
+          description="For a bill booked by mistake: the wrong supplier, loaded twice, or goods that never came. Undo any payment on it first. Once cancelled, the right bill can load the same IMEIs again."
+          submit="Cancel this bill"
+          confirmTitle={`Cancel ${purchase.invoiceNumber}?`}
+          impact={[
+            "Everything this bill put on the shelf comes off; its IMEIs leave the system.",
+            "Goods still marked coming on it stop coming.",
+            `${purchase.supplier.name} is no longer owed for it.`,
+            "Refused if any of its goods were sold, moved or sent back.",
+          ]}
+        />
       ) : null}
     </div>
   )

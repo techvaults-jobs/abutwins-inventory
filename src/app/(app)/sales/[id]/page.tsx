@@ -1,6 +1,8 @@
 import Link from "next/link"
 import { notFound } from "next/navigation"
 import { reverseInvoicePayment } from "@/app/actions/access"
+import { cancelSale } from "@/app/actions/corrections"
+import { CancelRecordCard } from "@/components/cancel-record-card"
 import { attachSaleCustomer, collectInvoicePayment, getSale } from "@/app/actions/sales"
 import { getAppSettings } from "@/lib/settings"
 import { letterheadFromSettings } from "@/lib/letterhead"
@@ -46,7 +48,9 @@ export default async function SaleDetailPage({
   ])
   const returned = returnedBySale.get(sale.id) ?? 0
   const paymentSteps = trails.get(sale.id) ?? []
-  const due = dueAfterReturns(sale, returned)
+  const cancelled = sale.status === "CANCELLED"
+  const cancelNote = cancelled ? (sale.notes ?? "").split("\n").reverse().find((line) => line.startsWith("Cancelled by ")) ?? null : null
+  const due = cancelled ? 0 : dueAfterReturns(sale, returned)
   const brand = letterheadFromSettings(settings)
   const branchCustomers = customers.filter(
     (row) => row.branchId === sale.branchId && !row.name.toLowerCase().includes("walk-in")
@@ -137,9 +141,16 @@ export default async function SaleDetailPage({
           </div>
         }
       />
-      <div className="rounded-lg border border-warning/30 bg-warning-soft px-4 py-3 text-sm text-warning print:hidden">
-        Staff cannot edit items, IMEIs, or prices on this sale. Collect any remaining money below. Only the CEO or the main admin can correct a price typed wrong.
-      </div>
+      {cancelled ? (
+        <div className="rounded-lg border border-danger/30 bg-danger-soft px-4 py-3 text-sm text-danger">
+          <p className="font-semibold">This sale was cancelled. It is not counted anywhere.</p>
+          {cancelNote ? <p className="mt-1">{cancelNote}</p> : null}
+        </div>
+      ) : (
+        <div className="rounded-lg border border-warning/30 bg-warning-soft px-4 py-3 text-sm text-warning print:hidden">
+          Staff cannot edit items, IMEIs, or prices on this sale. Collect any remaining money below. Only the CEO or the main admin can correct a price or cancel the sale.
+        </div>
+      )}
       <div className="grid gap-4 md:grid-cols-3 print:hidden">
         <div className="surface-card p-5">
           <p className="text-sm text-muted-foreground">Customer</p>
@@ -224,7 +235,7 @@ export default async function SaleDetailPage({
         </div>
         <PaymentTrail steps={paymentSteps} total={money(sale.totalAmount)} returned={returned} />
       </div>
-      {!sale.customerId ? (
+      {!sale.customerId && !cancelled ? (
         <div className="surface-card p-5 print:hidden">
           <h3 className="mb-2 font-semibold">Attach named buyer</h3>
           <p className="mb-3 text-sm text-muted-foreground">Warranty and returns need a name. Items and prices stay as they are.</p>
@@ -290,6 +301,25 @@ export default async function SaleDetailPage({
               }))}
           />
         </div>
+      ) : null}
+      {isShopOwner(me.role) && sale.status === "COMPLETED" ? (
+        <CancelRecordCard
+          action={cancelSale}
+          idName="saleId"
+          id={sale.id}
+          title="Cancel this sale"
+          description="For a sale typed by mistake: the wrong items, the wrong buyer, or rung up twice. To take back only some items, use a return instead."
+          submit="Cancel this sale"
+          confirmTitle={`Cancel ${sale.invoiceNumber}?`}
+          impact={[
+            "Every item goes back on the shelf; phones go back to In shop.",
+            sale.payments.length
+              ? `${formatCurrency(sale.payments.reduce((sum, row) => sum + money(row.amount), 0))} paid on it comes off the till and the bank. Hand it back to the buyer.`
+              : "No money was taken on it.",
+            sale.customer ? `${sale.customer.name}'s balance loses this sale.` : "No buyer balance changes.",
+            "The invoice stays on Sales, marked Cancelled.",
+          ]}
+        />
       ) : null}
       {due > 0 && sale.customerId ? (
         <div className="surface-card p-5 print:hidden">

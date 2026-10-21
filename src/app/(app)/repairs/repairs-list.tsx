@@ -3,6 +3,8 @@
 import { useMemo, useState } from "react"
 import Link from "next/link"
 import { advanceRepair } from "@/app/actions/ops"
+import { cancelRepair } from "@/app/actions/corrections"
+import { CancelRecordCard } from "@/components/cancel-record-card"
 import { ActionForm } from "@/components/action-form"
 import { StatusBadge } from "@/components/shared"
 import { DataTable, type DataColumn } from "@/components/data-table"
@@ -36,8 +38,11 @@ const REPAIR_FILTERS = ["all", "PENDING", "DIAGNOSING", "WAITING_PARTS", "REPAIR
 export function RepairsList({
   rows,
   initialStatus,
+  canCancel = false,
 }: {
   rows: RepairRow[]
+  /** The CEO and the main admin can cancel a job opened by mistake. */
+  canCancel?: boolean
   /** ?status= from the address bar. */
   initialStatus?: string
 }) {
@@ -171,6 +176,30 @@ export function RepairsList({
                   <Input name="repairCost" type="number" placeholder="Repair cost" defaultValue={open.repairCost ? String(open.repairCost) : ""} />
                   <Textarea name="diagnosis" placeholder="What you found wrong with this phone" defaultValue={open.diagnosis ?? ""} />
                 </ActionForm>
+              ) : null}
+              {canCancel && open.status !== "CANCELLED" ? (
+                <CancelRecordCard
+                  bare
+                  action={async (formData) => {
+                    const result = await cancelRepair(formData)
+                    if (result && "success" in result && result.success) setOpen(null)
+                    return result
+                  }}
+                  idName="id"
+                  id={open.id}
+                  title="Cancel this repair"
+                  description="For a job opened by mistake, or one the customer called off."
+                  submit="Cancel this repair"
+                  confirmTitle={`Cancel ${open.repairNumber}?`}
+                  impact={[
+                    open.customer
+                      ? "The phone goes back to the customer's record as sold."
+                      : "The shop phone goes back on the shelf, In shop.",
+                    open.status === "DELIVERED" && open.customer && open.repairCost
+                      ? `${formatCurrency(open.repairCost)} charged to ${open.customer.name} comes off their account.`
+                      : "No charge was put on anyone's account.",
+                  ]}
+                />
               ) : null}
             </div>
           </SheetContent>

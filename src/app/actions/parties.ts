@@ -38,7 +38,7 @@ export async function getCustomers(search?: string) {
   const totals = customers.length
     ? await prisma.sale.groupBy({
         by: ["customerId"],
-        where: { customerId: { in: customers.map((row) => row.id) } },
+        where: { customerId: { in: customers.map((row) => row.id) }, status: "COMPLETED" },
         _sum: { totalAmount: true, paidAmount: true },
       })
     : []

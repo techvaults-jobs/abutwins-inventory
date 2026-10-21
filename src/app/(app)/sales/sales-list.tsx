@@ -45,6 +45,8 @@ type PayFilter = "all" | "paid" | "part" | "unpaid"
 
 /** Still due on a sale after what came back: the same rule as Customers and Reports. */
 function saleDue(sale: SaleRow) {
+  // A cancelled sale is owed by nobody.
+  if (sale.status === "CANCELLED") return 0
   return Math.max(0, sale.totalAmount - sale.paidAmount - sale.returned)
 }
 
@@ -173,6 +175,8 @@ export function SalesList({ sales }: { sales: SaleRow[] }) {
     () =>
       visible.reduce(
         (acc, sale) => {
+          // Shown on the list, marked Cancelled, but never added up.
+          if (sale.status === "CANCELLED") return acc
           acc.sales += sale.totalAmount
           acc.paid += sale.paidAmount
           acc.returned += sale.returned

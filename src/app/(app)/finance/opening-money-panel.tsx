@@ -4,6 +4,8 @@ import Link from "next/link"
 import { useState } from "react"
 import { ArrowDownLeft, ArrowUpRight, ChevronRight } from "lucide-react"
 import { ActionForm } from "@/components/action-form"
+import { EditDetailsButton } from "@/components/edit-details-button"
+import { fixBankDetails } from "@/app/actions/corrections"
 import { DrilldownModal } from "@/components/drilldown-modal"
 import { SectionCard } from "@/components/shared"
 import { Input } from "@/components/ui/input"
@@ -206,6 +208,19 @@ export function OpeningMoneyPanel({
                               className="w-40"
                             />
                           </ActionForm>
+                          {canRemoveBank ? (
+                            <EditDetailsButton
+                              id={row.id}
+                              title={`Fix ${row.bankName} ${row.accountNumber}`}
+                              description="For a bank name or account number typed wrong. Every payment already on this account stays on it."
+                              fields={[
+                                { name: "bankName", label: "Bank", value: row.bankName, required: true },
+                                { name: "accountNumber", label: "Account number", value: row.accountNumber, required: true },
+                                { name: "accountName", label: "Account name", value: row.accountName ?? "", wide: true },
+                              ]}
+                              save={fixBankDetails}
+                            />
+                          ) : null}
                           {canRemoveBank ? (
                           <ActionForm
                             action={takeBankOffTheBooks}
