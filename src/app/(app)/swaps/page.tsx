@@ -21,7 +21,7 @@ export default async function SwapsPage({ searchParams }: { searchParams: Promis
     <div className="space-y-6">
       <PageHeader
         title="Swap Deal"
-        description="Old device in, shop device out. Values, balance, approval, then stock moves."
+        description="Old device in, shop device out. Values and balance, then save: stock moves and the invoice is written at once, with no approval."
         actions={
           <Button asChild>
             <Link href="/swaps/new">

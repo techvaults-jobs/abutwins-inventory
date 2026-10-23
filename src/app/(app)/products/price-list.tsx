@@ -65,6 +65,10 @@ export function ProductPriceList({
   const [query, setQuery] = useState(initialQuery)
   const [ticked, setTicked] = useState<Record<string, boolean>>({})
   const [prices, setPrices] = useState<Record<string, string>>({})
+  // New cost per ticked item. Price setters see the cost, so they change it
+  // here too, many items at once, as they do the selling price.
+  const [costs, setCosts] = useState<Record<string, string>>({})
+  const editCost = canPrice && showCost
   const [reason, setReason] = useState("")
   const [busy, setBusy] = useState(false)
   const [managingProduct, setManagingProduct] = useState<PriceRow | null>(null)
@@ -78,6 +82,7 @@ export function ProductPriceList({
   const [exactCategory, setExactCategory] = useState("ALL")
   const [bulkMode, setBulkMode] = useState<"set" | "percent">("percent")
   const [bulkValue, setBulkValue] = useState("")
+  const [bulkTarget, setBulkTarget] = useState<"sell" | "cost">("sell")
 
   const searched = useMemo(() => {
     const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
@@ -138,39 +143,56 @@ export function ProductPriceList({
         }
         return copy
       })
+      if (editCost) {
+        setCosts((prev) => {
+          const copy = { ...prev }
+          for (const product of rows) {
+            if (copy[product.id] == null || copy[product.id] === "") copy[product.id] = String(product.costPrice)
+          }
+          return copy
+        })
+      }
     }
   }
 
-  /** Put one new price, or the same % change, on every ticked item. */
+  /** Put one new price, or the same % change, on every ticked item: the selling price or the cost. */
   function applyBulk() {
     const value = Number(bulkValue)
-    if (!Number.isFinite(value) || (bulkMode === "set" && value <= 0)) {
-      toast.error(bulkMode === "set" ? "Type the new selling price." : "Type a percentage, such as -5 or 10.")
+    const onCost = editCost && bulkTarget === "cost"
+    const what = onCost ? "cost" : "selling price"
+    if (!Number.isFinite(value) || (bulkMode === "set" && (onCost ? value < 0 : value <= 0))) {
+      toast.error(bulkMode === "set" ? `Type the new ${what}.` : "Type a percentage, such as -5 or 10.")
       return
     }
     if (!selected.length) {
       toast.error("Tick the items first.")
       return
     }
-    setPrices((prev) => {
+    const write = onCost ? setCosts : setPrices
+    write((prev) => {
       const copy = { ...prev }
       for (const product of selected) {
-        const next = bulkMode === "set" ? value : Math.round(product.sellingPrice * (1 + value / 100))
-        copy[product.id] = String(Math.max(1, next))
+        const from = onCost ? product.costPrice : product.sellingPrice
+        const next = bulkMode === "set" ? value : Math.round(from * (1 + value / 100))
+        copy[product.id] = String(Math.max(onCost ? 0 : 1, next))
       }
       return copy
     })
     toast.success(
       bulkMode === "set"
-        ? `New price typed on ${selected.length} item${selected.length === 1 ? "" : "s"}. Check them, then save.`
-        : `${value > 0 ? "+" : ""}${value}% typed on ${selected.length} item${selected.length === 1 ? "" : "s"}. Check them, then save.`
+        ? `New ${what} typed on ${selected.length} item${selected.length === 1 ? "" : "s"}. Check them, then save.`
+        : `${value > 0 ? "+" : ""}${value}% on the ${what} of ${selected.length} item${selected.length === 1 ? "" : "s"}. Check them, then save.`
     )
   }
 
-  function setTick(id: string, next: boolean, currentPrice: number) {
+  function setTick(product: PriceRow, next: boolean) {
+    const id = product.id
     setTicked((prev) => ({ ...prev, [id]: next }))
     if (next) {
-      setPrices((prev) => (prev[id] == null || prev[id] === "" ? { ...prev, [id]: String(currentPrice) } : prev))
+      setPrices((prev) => (prev[id] == null || prev[id] === "" ? { ...prev, [id]: String(product.sellingPrice) } : prev))
+      if (editCost) {
+        setCosts((prev) => (prev[id] == null || prev[id] === "" ? { ...prev, [id]: String(product.costPrice) } : prev))
+      }
     }
   }
 
@@ -181,14 +203,20 @@ export function ProductPriceList({
       toast.error("Tick the items whose selling price you want to change.")
       return
     }
-    const changes: Array<{ id: string; sellingPrice: number }> = []
+    const changes: Array<{ id: string; sellingPrice: number; costPrice?: number }> = []
     for (const product of selected) {
       const sellingPrice = Number(prices[product.id])
       if (!Number.isFinite(sellingPrice) || sellingPrice <= 0) {
         toast.error(`Type a selling price for ${product.name}.`)
         return
       }
-      changes.push({ id: product.id, sellingPrice })
+      const costTyped = editCost ? String(costs[product.id] ?? "").trim() : ""
+      const costPrice = costTyped === "" ? undefined : Number(costTyped)
+      if (costPrice != null && (!Number.isFinite(costPrice) || costPrice < 0)) {
+        toast.error(`Type a cost of 0 or more for ${product.name}.`)
+        return
+      }
+      changes.push({ id: product.id, sellingPrice, ...(costPrice != null && costPrice !== product.costPrice ? { costPrice } : {}) })
     }
     if (changes.length > 200) {
       toast.error("You can change up to 200 prices in one save.")
@@ -206,9 +234,10 @@ export function ProductPriceList({
       return
     }
     const count = outcome.updated ?? changes.length
-    toast.success(count === 1 ? "1 selling price saved." : `${count} selling prices saved.`)
+    toast.success(count === 1 ? "Prices saved on 1 item." : `Prices saved on ${count} items.`)
     setTicked({})
     setPrices({})
+    setCosts({})
     setReason("")
     router.refresh()
   }
@@ -289,7 +318,7 @@ export function ProductPriceList({
                   type="checkbox"
                   className="mt-1 h-5 w-5 shrink-0"
                   checked={chosen}
-                  onChange={(event) => setTick(product.id, event.target.checked, product.sellingPrice)}
+                  onChange={(event) => setTick(product, event.target.checked)}
                   aria-label={`Select ${product.name}`}
                 />
               ) : null}
@@ -317,6 +346,18 @@ export function ProductPriceList({
                       onChange={(event) => setPrices((prev) => ({ ...prev, [product.id]: event.target.value }))}
                       placeholder="New sell price"
                       aria-label={`New sell price for ${product.name}`}
+                    />
+                  ) : null}
+                  {editCost && chosen ? (
+                    <Input
+                      type="number"
+                      min={0}
+                      step={1}
+                      className="h-9 flex-1"
+                      value={costs[product.id] ?? ""}
+                      onChange={(event) => setCosts((prev) => ({ ...prev, [product.id]: event.target.value }))}
+                      placeholder="New cost"
+                      aria-label={`New cost for ${product.name}`}
                     />
                   ) : null}
                   {canEdit ? (
@@ -347,6 +388,7 @@ export function ProductPriceList({
               <th className="px-4 py-3">How it looks</th>
               <th className="px-4 py-3">{showCost ? "Cost / lowest / sell" : "Lowest / sell"}</th>
               {canPrice ? <th className="px-4 py-3">New sell price</th> : null}
+              {editCost ? <th className="px-4 py-3">New cost</th> : null}
               <th className="px-4 py-3">Warranty</th>
               <th className="px-4 py-3">Units</th>
               {canEdit || pricesOnly ? <th className="px-4 py-3 text-right">Actions</th> : null}
@@ -363,7 +405,7 @@ export function ProductPriceList({
                         type="checkbox"
                         className="h-5 w-5"
                         checked={chosen}
-                        onChange={(event) => setTick(product.id, event.target.checked, product.sellingPrice)}
+                        onChange={(event) => setTick(product, event.target.checked)}
                         aria-label={`Select ${product.name}`}
                       />
                     </td>
@@ -396,6 +438,20 @@ export function ProductPriceList({
                         onChange={(event) => setPrices((prev) => ({ ...prev, [product.id]: event.target.value }))}
                         placeholder="New sell price"
                         aria-label={`New sell price for ${product.name}`}
+                      />
+                    </td>
+                  ) : null}
+                  {editCost ? (
+                    <td className="px-4 py-3">
+                      <Input
+                        type="number"
+                        min={0}
+                        step={1}
+                        disabled={!chosen}
+                        value={costs[product.id] ?? ""}
+                        onChange={(event) => setCosts((prev) => ({ ...prev, [product.id]: event.target.value }))}
+                        placeholder="New cost"
+                        aria-label={`New cost for ${product.name}`}
                       />
                     </td>
                   ) : null}
@@ -434,7 +490,7 @@ export function ProductPriceList({
             })}
             {visible.length === 0 ? (
               <tr>
-                <td className="px-4 py-8 text-sm text-muted-foreground" colSpan={5 + (canPrice ? 2 : 0) + (canEdit || pricesOnly ? 1 : 0)}>
+                <td className="px-4 py-8 text-sm text-muted-foreground" colSpan={5 + (canPrice ? 2 : 0) + (editCost ? 1 : 0) + (canEdit || pricesOnly ? 1 : 0)}>
                   No items match the specified search parameters.
                 </td>
               </tr>
@@ -461,6 +517,25 @@ export function ProductPriceList({
             </p>
             {selected.length ? (
               <div className="flex flex-wrap items-center gap-2">
+                {editCost ? (
+                  <div className="inline-flex rounded-lg bg-muted p-0.5 text-xs font-semibold">
+                    {(
+                      [
+                        ["sell", "Selling price"],
+                        ["cost", "Cost"],
+                      ] as const
+                    ).map(([target, label]) => (
+                      <button
+                        key={target}
+                        type="button"
+                        onClick={() => setBulkTarget(target)}
+                        className={`rounded-md px-2.5 py-1.5 ${bulkTarget === target ? "bg-card shadow-sm" : "text-muted-foreground"}`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="inline-flex rounded-lg bg-muted p-0.5 text-xs font-semibold">
                   {(
                     [
@@ -484,7 +559,7 @@ export function ProductPriceList({
                   onChange={(event) => setBulkValue(event.target.value)}
                   placeholder={bulkMode === "set" ? "₦ new price" : "e.g. -5"}
                   className="h-9 w-28"
-                  aria-label={bulkMode === "set" ? "One new price for every ticked item" : "Percent change for every ticked item"}
+                  aria-label={bulkMode === "set" ? "One new amount for every ticked item" : "Percent change for every ticked item"}
                 />
                 <Button type="button" variant="outline" size="sm" onClick={applyBulk}>
                   Type on all ticked

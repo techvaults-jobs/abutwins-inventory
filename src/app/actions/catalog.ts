@@ -346,41 +346,62 @@ export async function setProductPrices(input: {
   return { success: true, message: `${product.name}: prices saved.` }
 }
 
+/**
+ * Prices for many ticked items at once: the selling price, and the cost when
+ * it is typed. The CEO, the main admin and the branch managers set prices
+ * (PRICE_SETTER_ROLES), so a managed shop's prices are kept right without
+ * waiting on the owner. Each move lands in the price history and Who did
+ * what, and a manager's cost change alerts the CEO (see lib/prisma).
+ */
 export async function updateSelectedPrices(formData: FormData) {
   const user = await requireUser()
   if (!canChangePrices(user.role)) return { error: "Only the CEO, the main admin or a branch manager can change prices." }
+  const mayCost = canChangeCost(user.role)
 
   const reason = String(formData.get("reason") || "Several prices updated together").trim() || "Several prices updated together"
   let parsed: unknown
   try {
     parsed = JSON.parse(String(formData.get("changes") || "[]"))
   } catch {
-    return { error: "Tick the items and type each new selling price." }
+    return { error: "Tick the items and type each new price." }
   }
   if (!Array.isArray(parsed) || parsed.length === 0) {
     return { error: "Tick the items whose prices you want to change." }
   }
   if (parsed.length > 200) return { error: "Update up to 200 items at a time." }
 
-  const changes: Array<{ id: string; sellingPrice: number }> = []
+  const changes: Array<{ id: string; sellingPrice: number; costPrice: number | null }> = []
   for (const row of parsed) {
     if (!row || typeof row !== "object") continue
     const id = String((row as { id?: unknown }).id || "")
     const sellingPrice = Number((row as { sellingPrice?: unknown }).sellingPrice)
+    const costRaw = (row as { costPrice?: unknown }).costPrice
+    const costPrice = costRaw == null || String(costRaw).trim() === "" ? null : Number(costRaw)
     if (!id) continue
-    changes.push({ id, sellingPrice })
+    changes.push({ id, sellingPrice, costPrice })
   }
   if (changes.length === 0) return { error: "Tick the items whose prices you want to change." }
+  if (!mayCost && changes.some((row) => row.costPrice != null)) {
+    return { error: "Only the CEO, the main admin or a branch manager can change what an item cost us." }
+  }
 
-  const canFloor = await can(user.role, "action.override_floor")
   const products = await prisma.product.findMany({
     where: { id: { in: [...new Set(changes.map((row) => row.id))] } },
   })
   const byId = new Map(products.map((product) => [product.id, product]))
   const problems: string[] = []
   // oldMinimum is set when a mark-down goes under the item's lowest allowed
-  // price. The lowest follows it down, so staff can sell at the new price.
-  const work: Array<{ id: string; name: string; oldPrice: string; next: number; oldMinimum?: string }> = []
+  // price. The lowest follows it down, so staff can sell at the new price:
+  // whoever sets the selling price also sets the lowest.
+  const work: Array<{
+    id: string
+    name: string
+    oldPrice: string
+    next: number
+    oldMinimum?: string
+    oldCost?: string
+    nextCost?: number
+  }> = []
 
   for (const change of changes) {
     const product = byId.get(change.id)
@@ -392,22 +413,26 @@ export async function updateSelectedPrices(formData: FormData) {
       problems.push(`${product.name}: selling price must be a number above 0.`)
       continue
     }
-    if (change.sellingPrice < Number(product.minimumPrice) && !canFloor) {
-      problems.push(`${product.name} is below the lowest allowed price. Raise it, or ask the main admin.`)
+    if (change.costPrice != null && (!Number.isFinite(change.costPrice) || change.costPrice < 0)) {
+      problems.push(`${product.name}: cost must be a number of 0 or more.`)
       continue
     }
-    if (Number(product.sellingPrice) === change.sellingPrice) continue
+    const sellMoves = money(product.sellingPrice) !== money(change.sellingPrice)
+    const costMoves = change.costPrice != null && money(product.costPrice) !== money(change.costPrice)
+    if (!sellMoves && !costMoves) continue
     work.push({
       id: product.id,
       name: product.name,
       oldPrice: String(product.sellingPrice),
       next: change.sellingPrice,
-      oldMinimum: change.sellingPrice < Number(product.minimumPrice) ? String(product.minimumPrice) : undefined,
+      oldMinimum: sellMoves && change.sellingPrice < Number(product.minimumPrice) ? String(product.minimumPrice) : undefined,
+      ...(costMoves ? { oldCost: String(product.costPrice), nextCost: change.costPrice! } : {}),
     })
   }
 
   if (problems.length) return { error: problems.slice(0, 4).join(" ") }
-  if (work.length === 0) return { error: "Those selling prices are already what you typed." }
+  if (work.length === 0) return { error: "Those prices are already what you typed." }
+  const costRows = work.filter((row) => row.nextCost != null)
 
   try {
     await prisma.$transaction(async (tx) => {
@@ -415,7 +440,11 @@ export async function updateSelectedPrices(formData: FormData) {
         const newPrice = row.next.toFixed(2)
         await tx.product.update({
           where: { id: row.id },
-          data: row.oldMinimum ? { sellingPrice: newPrice, minimumPrice: newPrice } : { sellingPrice: newPrice },
+          data: {
+            sellingPrice: newPrice,
+            ...(row.oldMinimum ? { minimumPrice: newPrice } : {}),
+            ...(row.nextCost != null ? { costPrice: row.nextCost.toFixed(2) } : {}),
+          },
         })
         if (row.oldMinimum) {
           await tx.priceHistory.create({
@@ -429,16 +458,30 @@ export async function updateSelectedPrices(formData: FormData) {
             },
           })
         }
-        await tx.priceHistory.create({
-          data: {
-            productId: row.id,
-            oldPrice: row.oldPrice,
-            newPrice,
-            priceType: "SELLING_PRICE",
-            reason,
-            changedBy: user.id,
-          },
-        })
+        if (Number(row.oldPrice) !== row.next) {
+          await tx.priceHistory.create({
+            data: {
+              productId: row.id,
+              oldPrice: row.oldPrice,
+              newPrice,
+              priceType: "SELLING_PRICE",
+              reason,
+              changedBy: user.id,
+            },
+          })
+        }
+        if (row.nextCost != null) {
+          await tx.priceHistory.create({
+            data: {
+              productId: row.id,
+              oldPrice: row.oldCost!,
+              newPrice: row.nextCost.toFixed(2),
+              priceType: "COST_PRICE",
+              reason,
+              changedBy: user.id,
+            },
+          })
+        }
       }
       await tx.auditLog.create({
         data: {
@@ -446,21 +489,38 @@ export async function updateSelectedPrices(formData: FormData) {
           action: "UPDATE",
           entityType: "Product",
           entityId: work[0].id,
-          oldValue: JSON.stringify(work.map((row) => ({ name: row.name, sellingPrice: Number(row.oldPrice) }))),
+          oldValue: JSON.stringify(
+            work.map((row) => ({
+              name: row.name,
+              sellingPrice: Number(row.oldPrice),
+              ...(row.oldCost != null ? { costPrice: Number(row.oldCost) } : {}),
+            }))
+          ),
           newValue: JSON.stringify({
             updated: work.length,
             names: work.map((row) => row.name),
+            ...(costRows.length
+              ? {
+                  costPrice: costRows.map((row) => ({ name: row.name, from: Number(row.oldCost), to: row.nextCost })),
+                  note: `Cost changed on ${costRows.length} item${costRows.length === 1 ? "" : "s"} together: ${costRows
+                    .slice(0, 5)
+                    .map((row) => `${row.name} ${Number(row.oldCost)} → ${row.nextCost}`)
+                    .join(", ")}${costRows.length > 5 ? ", …" : ""}.`,
+                }
+              : {}),
             reason,
           }),
           branchId: user.branchId,
+          risk: costRows.length ? "MEDIUM" : "LOW",
         },
       })
     })
   } catch (error) {
-    return { error: shopError(error, "We could not save those selling prices. Try again.") }
+    return { error: shopError(error, "We could not save those prices. Try again.") }
   }
 
   revalidatePath("/products")
+  revalidatePath("/owner")
   revalidatePath("/pos")
   revalidatePath("/inventory")
   return { success: true, updated: work.length }

@@ -3,7 +3,7 @@
 import { IncomingIdentity, IncomingStatus, type Prisma } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { prisma } from "@/lib/prisma"
-import { LEFT_SHOP_STATUSES } from "@/lib/unit-comeback"
+import { bookCameBack, restoreCameBack, sortComingBack } from "@/lib/unit-comeback"
 import { recordMovement } from "@/lib/concurrency"
 import { can, isShopOwner } from "@/lib/permissions"
 import { canApprove, scopedBranchId } from "@/lib/rbac"
@@ -165,15 +165,29 @@ export async function createIncomingLot(formData: FormData) {
 
         for (const raw of ids) {
           const key = unitKey(identity, raw)
-          const duplicate = await tx.imeiRecord.findFirst({
-            where: { OR: [{ imei1: key }, { imei2: key }, { serialNumber: raw }] },
-            select: { status: true },
-          })
-          if (duplicate && LEFT_SHOP_STATUSES.includes(duplicate.status)) {
-            throw new Error(`${raw} left the shop before and is back, so it is already here. Book it straight into stock, not as goods coming.`)
-          }
-          if (duplicate) throw new Error(`${raw} is already on the system.`)
           if (identity === "IMEI" && raw.length < 14) throw new Error(`${raw} is not a valid IMEI.`)
+          // A phone we sold (or swapped out, wrote off, sent back) that is
+          // coming to us again is booked on the record it already has, so its
+          // earlier history stays. See lib/unit-comeback.
+          const { back, held } = await sortComingBack(tx, [key, raw])
+          const stuck = held.get(key) ?? held.get(raw)
+          if (stuck) throw new Error(stuck)
+          const cameBack = back.get(key) ?? back.get(raw)
+          if (cameBack) {
+            await bookCameBack(tx, cameBack, {
+              data: {
+                productId,
+                supplierId: linkedSupplierId,
+                branchId,
+                purchaseId,
+                status: "INCOMING",
+                notes: `Coming on ${lotNumber}`,
+              },
+              reference: lotNumber,
+              userId: user.id,
+            })
+            continue
+          }
           await tx.imeiRecord.create({
             data: {
               imei1: key,
@@ -540,7 +554,12 @@ async function finalizeStagedIncomingLot(
           notes: { contains: lot.lotNumber },
         },
       })
-      const confirmedSet = new Set(confirmedIds.length ? confirmedIds : existingImeis.map((row) => row.imei1))
+      // None of this line arrived: none of its phones go on the shelf. The
+      // numbers booked on the line used to be taken as arrived, so they went
+      // In shop while the count stayed at 0.
+      const confirmedSet = new Set(
+        receivedQty === 0 ? [] : confirmedIds.length ? confirmedIds : existingImeis.map((row) => row.imei1)
+      )
 
       for (const imeiRec of existingImeis) {
         if (confirmedSet.has(imeiRec.imei1) || (imeiRec.serialNumber && confirmedSet.has(imeiRec.serialNumber))) {
@@ -552,7 +571,9 @@ async function finalizeStagedIncomingLot(
               ...(lot.purchaseId ? { purchaseId: lot.purchaseId } : {}),
             },
           })
-        } else {
+        } else if (!(await restoreCameBack(tx, imeiRec, lot.lotNumber))) {
+          // A phone that came back on this lot and did not arrive goes back to
+          // what it was before, with its history. Any other is removed.
           await tx.imeiRecord.delete({ where: { id: imeiRec.id } })
         }
       }

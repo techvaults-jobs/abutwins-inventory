@@ -20,6 +20,20 @@ type Db = PrismaClient | Prisma.TransactionClient
 /** Out of the shop for good: sold, given out on a Swap Deal, written off, or sent back to the supplier. */
 export const LEFT_SHOP_STATUSES: IMEIStatus[] = ["SOLD", "SWAPPED", "DISPOSED", "RETURNED_TO_SUPPLIER"]
 
+/**
+ * A customer's own phone fixed on our repair desk and handed back reads
+ * Repaired, with the customer on it. It is in the customer's hands like a sold
+ * one, so it can come in on a Swap Deal or be bought back. Repaired with no
+ * customer is a shop phone, and one with a repair still open is on our bench.
+ */
+function withCustomerAfterRepair(row: { status: IMEIStatus; customerId: string | null }) {
+  return row.status === "REPAIRED" && Boolean(row.customerId)
+}
+
+function leftShop(row: { status: IMEIStatus; customerId: string | null }) {
+  return LEFT_SHOP_STATUSES.includes(row.status) || withCustomerAfterRepair(row)
+}
+
 /** Who did what marks the line that books a phone back in with this. */
 export const CAME_BACK_NOTE = "Came back into the shop"
 
@@ -60,6 +74,7 @@ const unitSelect = {
 
 const WHERE_IT_WENT: Partial<Record<IMEIStatus, string>> = {
   SOLD: "sold",
+  REPAIRED: "repaired and handed back",
   SWAPPED: "given out on a Swap Deal",
   DISPOSED: "written off",
   RETURNED_TO_SUPPLIER: "sent back to the supplier",
@@ -81,8 +96,8 @@ export async function sortComingBack(db: Db, codes: string[]) {
     where: { OR: [{ imei1: { in: wanted } }, { imei2: { in: wanted } }, { serialNumber: { in: wanted } }] },
     select: unitSelect,
   })
-  const leftIds = rows.filter((row) => LEFT_SHOP_STATUSES.includes(row.status)).map((row) => row.id)
-  const [openReturns, openSwaps] = leftIds.length
+  const leftIds = rows.filter(leftShop).map((row) => row.id)
+  const [openReturns, openSwaps, openRepairs] = leftIds.length
     ? await Promise.all([
         db.stockReturn.findMany({
           where: { imeiId: { in: leftIds }, status: { in: ["PENDING", "APPROVED"] } },
@@ -95,19 +110,25 @@ export async function sortComingBack(db: Db, codes: string[]) {
           },
           select: { oldImeiId: true, newImeiId: true, swapNumber: true },
         }),
+        db.repair.findMany({
+          where: { imeiId: { in: leftIds }, status: { notIn: ["DELIVERED", "CANCELLED"] } },
+          select: { imeiId: true, repairNumber: true },
+        }),
       ])
-    : [[], []]
+    : [[], [], []]
 
   for (const row of rows) {
     const keys = [row.imei1, row.imei2, row.serialNumber].filter((code): code is string => Boolean(code) && wanted.includes(code!))
     let why: string | null = null
-    if (!LEFT_SHOP_STATUSES.includes(row.status)) {
+    if (!leftShop(row)) {
       why = `${row.imei1} is already on the system (${row.status.toLowerCase().replace(/_/g, " ")}).`
     } else {
       const ret = openReturns.find((r) => r.imeiId === row.id)
       const swap = openSwaps.find((s) => s.oldImeiId === row.id || s.newImeiId === row.id)
+      const repair = openRepairs.find((r) => r.imeiId === row.id)
       if (ret) why = `${row.imei1} has return ${ret.returnNumber} still open. Finish it first.`
       else if (swap) why = `${row.imei1} is on Swap Deal ${swap.swapNumber}, not settled yet. Settle it first.`
+      else if (repair) why = `${row.imei1} is on repair ${repair.repairNumber}, still open. Close it first.`
     }
     if (why) {
       for (const key of keys) held.set(key, why)

@@ -42,7 +42,7 @@ const ROLE_JOB: Record<UserRole, { job: string; shops: string }> = {
     shops: "You see every shop.",
   },
   BRANCH_MANAGER: {
-    job: "You run one shop: sell, receive, upload stock one by one or many from Excel, transfer, approve shop work, and add staff for that shop. You add new item names with their cost, lowest and selling price, so they sell at once, and you change prices on the price list. A price you set applies in every shop, and the CEO is told when you change a cost.",
+    job: "You run one shop: sell, receive, upload stock one by one or many from Excel, transfer, approve shop work, and add staff for that shop. You add new item names with their cost, lowest and selling price, so they sell at once, and you change selling prices and costs on the price list, one item or many at once. A price you set applies in every shop. Every change is kept in the price history and Who did what, and the CEO is told when you change a cost.",
     shops: "You see your shop only, unless the main admin later ticks See every shop.",
   },
   VAULT_MANAGER: {
@@ -135,7 +135,7 @@ const PAGES: Array<
       "Search by item code or model.",
       "If you can add items, set cost, lowest price, and selling price. Pick the tracking that matches the thing: phones use IMEI, some accessories use serial, cords use no number.",
       "Adding items has its own screens under Phones & items: Add one item for a single model, Add from a sheet for a long list. Type the real product name (iPhone 13, MacBook Pro M3) and the brand, then the category (Phones, Laptops, Accessories, Screen). Pick All shops or one shop. A sheet can be names, brands, and categories only. This does not put stock on the shelf.",
-      "To change many selling prices at once, tick any mix of phones and accessories on the price list, type each new selling price, then click Update selected prices.",
+      "To change many prices at once, tick any mix of phones and accessories on the price list and type each new selling price and cost, or type one price or a % for all ticked items (pick Selling price or Cost). Then save. A selling price under the lowest brings the lowest down with it. Branch managers can do this too; every change is in the price history and Who did what.",
       "On a price list line, click Change or remove. Change details edits the name and prices. Reduce stock takes pieces off the shelf, or writes off phone IMEIs by scanning them. Remove item hides or deletes the name.",
       "Warranty days live on their own screen, Phones & items then Warranty days. Keep defaults at 0. Cashiers type days on Sell now.",
     ],
@@ -411,19 +411,20 @@ const PAGES: Array<
     href: "/swaps",
     title: "Swap Deal",
     needAction: "action.swap",
-    what: "A customer brings a phone or laptop and takes a shop device. You type swap-in value and shop-item value. The balance is Receivable or Payable. Save sends Needs approval. Stock hits and leaves only after yes. Then settle the money and print.",
+    what: "A customer brings a phone or laptop and takes a shop device. You type swap-in value and shop-item value. The balance is Receivable or Payable. Say what was paid now. Save, and it is done: no approval. Stock moves and the invoice is written at once.",
     doThis: [
       "Pick or type the customer name and phone.",
       "Enter the customer device IMEI or serial number, and the shop device IMEI or serial going out.",
       "Type the swap-in value and the value of the shop item given out. Read Receivable or Payable.",
-      "Save for approval. Wait for yes on Needs approval.",
-      "After approval, stock has already moved. Collect or pay the balance and finish the invoice.",
+      "Say whether the balance was paid now, in part, or not at all. What is not paid now goes on the customer's account.",
+      "Save Swap Deal. The customer's phone goes onto the shelf, the shop phone leaves, and the invoice opens.",
     ],
     watch: [
-      "Stock does not move while the Swap Deal is Waiting.",
-      "A shop device on a waiting Swap Deal cannot be sold.",
+      "Check the phones and the values before you save. There is no approval step to catch a mistake.",
+      "A phone the customer bought from us, or swapped with us before, can come in on a Swap Deal again. It keeps its earlier history.",
+      "A Swap Deal saved before approvals were dropped can be put through from Swap Deals: open it and settle the balance.",
     ],
-    cannot: ["A swap without approval stays waiting. Stock does not leave or hit the shelf."],
+    cannot: ["A shop device that is not In shop cannot go out on a Swap Deal."],
     lookup: ["swap", "trade-in", "trade", "swap deal", "serial", "receivable", "payable"],
   },
   {
@@ -560,7 +561,7 @@ const PAGES: Array<
     href: "/approvals",
     title: "Waiting for yes",
     needAction: "action.approve",
-    what: "The yes-or-no desk. Swaps, refunds, expenses, and stock counts wait here.",
+    what: "The yes-or-no desk. Expenses and stock counts wait here, with any swap or refund saved before those stopped needing a yes.",
     doThis: [
       "Open an item. Read who asked and why.",
       "Say yes or no.",

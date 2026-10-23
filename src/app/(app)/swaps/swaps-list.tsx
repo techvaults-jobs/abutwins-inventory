@@ -17,7 +17,7 @@ import { formatCurrency } from "@/lib/utils"
 import { shopConditionLabel } from "@/lib/conditions"
 
 /** A named bank a Swap Deal's money can go through. */
-type SwapBank = { id: string; label: string; branchId: string }
+export type SwapBank = { id: string; label: string; branchId: string }
 
 type SwapRow = {
   id: string
@@ -144,6 +144,7 @@ export function SwapsList({
         <div className="whitespace-nowrap">
           <StatusBadge value={swap.status} />
           {swap.status === "APPROVED" ? <p className="mt-1 text-[11px] font-medium text-warning">Settle and invoice</p> : null}
+          {swap.status === "PENDING" ? <p className="mt-1 text-[11px] font-medium text-warning">Put it through</p> : null}
           <p className="mt-1 text-[11px] text-muted-foreground">
             {swap.startedBy ? `by ${swap.startedBy}` : ""}
             {swap.approvedByName ? ` · approved by ${swap.approvedByName}` : ""}
@@ -172,7 +173,7 @@ export function SwapsList({
         onSelect={setStatus}
         steps={[
           { key: "all", label: "All swaps", count: counts.all, hint: "Every trade-in" },
-          { key: "PENDING", label: "Waiting", count: counts.PENDING ?? 0, hint: "Need a yes" },
+          { key: "PENDING", label: "Waiting", count: counts.PENDING ?? 0, hint: "From before, put through" },
           { key: "APPROVED", label: "Approved", count: counts.APPROVED ?? 0, hint: "Settle the balance" },
           { key: "COMPLETED", label: "Done", count: counts.COMPLETED ?? 0, hint: "Invoice closed" },
         ]}
@@ -240,7 +241,7 @@ function SwapBalance({ balance }: { balance: number }) {
 }
 
 /** Cash, or a bank transfer through one of our named accounts (the swap's shop first). */
-function SwapPaymentFields({ banks, branchId, payingOut }: { banks: SwapBank[]; branchId: string; payingOut: boolean }) {
+export function SwapPaymentFields({ banks, branchId, payingOut }: { banks: SwapBank[]; branchId: string; payingOut: boolean }) {
   const [method, setMethod] = useState("TRANSFER")
   const ordered = [...banks].sort((a, b) => Number(b.branchId === branchId) - Number(a.branchId === branchId))
   return (
@@ -325,7 +326,7 @@ function SwapDetail({ swap, banks, onDone }: { swap: SwapRow; banks: SwapBank[];
         </dd>
         <dt className="text-muted-foreground">Approved by</dt>
         <dd>
-          {swap.approvedByName ?? (swap.status === "PENDING" ? "Waiting for approval" : "-")}
+          {swap.approvedByName ?? (swap.status === "PENDING" ? "Not put through yet" : "No approval needed")}
           {swap.approvedAt ? <span className="text-xs text-muted-foreground"> · {formatShopWhen(swap.approvedAt)}</span> : null}
         </dd>
         {swap.settledBy ? (
@@ -356,15 +357,12 @@ function SwapDetail({ swap, banks, onDone }: { swap: SwapRow; banks: SwapBank[];
           </>
         ) : null}
       </dl>
-      {swap.status === "PENDING" ? (
-        <p className="rounded-lg border border-warning/20 bg-warning/10 px-3 py-2 text-sm text-warning">
-          Waiting for approval. Stock does not move until Needs approval says yes.
-        </p>
-      ) : null}
-      {swap.status === "APPROVED" ? (
+      {swap.status === "PENDING" || swap.status === "APPROVED" ? (
         <div className="space-y-2 rounded-xl border border-border p-4">
           <p className="text-sm font-medium">
-            {receivable > 0
+            {swap.status === "PENDING"
+              ? "Saved before Swap Deals stopped needing approval. Put it through now: stock moves, and say what was paid. Anything unpaid goes on the customer's account."
+              : receivable > 0
               ? "Stock has moved. Say what they paid and finish the invoice. Anything unpaid goes on their account."
               : payable > 0
                 ? "Stock has moved. Say what was paid back and finish the invoice. Anything not paid back stays on their account."
@@ -372,7 +370,7 @@ function SwapDetail({ swap, banks, onDone }: { swap: SwapRow; banks: SwapBank[];
           </p>
           <ActionForm
             action={completeSwap}
-            submit={receivable > 0 || payable > 0 ? "Settle & invoice" : "Finish invoice"}
+            submit={swap.status === "PENDING" ? "Put it through & invoice" : receivable > 0 || payable > 0 ? "Settle & invoice" : "Finish invoice"}
             successMessage="Swap finished and invoiced."
             className="grid gap-2 sm:grid-cols-2"
             onSuccess={onDone}

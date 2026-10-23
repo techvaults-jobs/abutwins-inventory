@@ -3,12 +3,14 @@
 import { useMemo, useState, type ReactNode } from "react"
 import { createSwap } from "@/app/actions/ops"
 import { ActionForm } from "@/components/action-form"
+import { DifferenceSettle } from "@/components/difference-settle"
 import { Input } from "@/components/ui/input"
 import { Select } from "@/components/ui/select"
 import { formatCurrency } from "@/lib/utils"
 import { SHOP_CONDITION_OPTIONS, shopConditionLabel } from "@/lib/conditions"
 import { STORAGE_OPTIONS } from "@/lib/item-specs"
 import { UNIT_IDENTITY_OPTIONS, type UnitIdentityKind } from "@/lib/unit-identity"
+import { SwapPaymentFields, type SwapBank } from "./swaps-list"
 
 /** A product name already on the price list, with the brand and category it sits under. */
 type ModelName = { name: string; brand: string; category: string }
@@ -42,6 +44,7 @@ export function SwapForm({
   brands,
   categories,
   branches,
+  banks,
   defaultBranchId,
   successHref,
 }: {
@@ -51,6 +54,7 @@ export function SwapForm({
   brands: string[]
   categories: string[]
   branches: Branch[]
+  banks: SwapBank[]
   defaultBranchId?: string | null
 }) {
   const [branchId, setBranchId] = useState(defaultBranchId || branches[0]?.id || "")
@@ -95,20 +99,24 @@ export function SwapForm({
     <ActionForm
       action={createSwap}
       successHref={successHref}
-      submit="Save for approval"
-      successMessage="Swap Deal saved. Waiting for approval."
+      submit="Save Swap Deal"
+      successMessage="Swap Deal done and invoiced."
       enterDoesNotSubmit
       confirmModal={{
-        title: "Send this Swap Deal for approval?",
+        title: "Save this Swap Deal?",
         description:
-          "A manager must say yes before stock moves. The shop item stays In shop and the swap-in item does not hit the shelf until approval.",
-        confirmLabel: "Send for approval",
+          "It takes effect at once, with no approval. Check the phones and the values: the customer's phone goes onto the shelf and the shop phone leaves now.",
+        confirmLabel: "Save Swap Deal",
         tone: "warning",
         impactItems: [
-          bookedAs ? `Customer's phone: ${bookedAs}` : "Customer's phone details as typed",
-          "No stock leaves the shop yet",
-          "No swap-in item hits In shop yet",
-          "Needs approval gets this request",
+          bookedAs ? `Customer's phone in: ${bookedAs}, worth ${formatCurrency(swapAmount)}` : "Customer's phone details as typed",
+          `Shop phone out, worth ${formatCurrency(givenAmount)}`,
+          balance > 0
+            ? `The customer owes ${formatCurrency(balance)}. Anything not paid now goes on their account.`
+            : balance < 0
+              ? `We owe the customer ${formatCurrency(-balance)}. Anything not paid back now stays on their account.`
+              : "Even swap. No money either way.",
+          "The invoice is written now",
         ],
       }}
       className="space-y-4"
@@ -318,6 +326,20 @@ export function SwapForm({
           Balance shows Receivable if the shop item is worth more, or Payable if the swap-in item is worth more.
         </p>
       )}
+
+      {balanceLabel && balanceLabel.kind !== "even" ? (
+        <Section title="The balance">
+          <DifferenceSettle
+            key={balance}
+            balance={balance}
+            moneyFields={
+              <div className="grid gap-2 sm:grid-cols-2">
+                <SwapPaymentFields banks={banks} branchId={branchId} payingOut={balance < 0} />
+              </div>
+            }
+          />
+        </Section>
+      ) : null}
     </ActionForm>
   )
 }

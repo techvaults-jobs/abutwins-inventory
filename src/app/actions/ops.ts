@@ -2576,7 +2576,9 @@ export async function getSwaps() {
       ...row,
       invoice: invoice ? { id: invoice.id, invoiceNumber: invoice.invoiceNumber } : null,
       startedBy: row.user?.name ?? null,
-      approvedByName: row.approvedBy ? approverName.get(row.approvedBy) ?? null : null,
+      // Swap Deals need no approval now: one put through by the person who
+      // saved it has no separate approver to show.
+      approvedByName: row.approvedBy && row.approvedBy !== row.userId ? approverName.get(row.approvedBy) ?? null : null,
       settledBy: invoice?.user?.name ?? null,
       money: money_,
     }
@@ -2788,14 +2790,18 @@ export async function createSwap(formData: FormData) {
   }
   const swapInLabel = [oldBrand, oldName, oldStorage, shopConditionLabel(condition), oldColor].filter(Boolean).join(" · ")
 
-  // Hold only: swap-in stays off the shelf, shop device stays In shop until approval.
-  // The customer's phone, the deal and its request for yes are written
-  // together. When the deal failed after the phone was written, the phone
-  // stayed on the system with no deal, and every retry was refused as
-  // "already on this system".
-  let swap: { id: string; swapNumber: string }
+  // A Swap Deal takes effect the moment it is saved, as a return does: no
+  // manager's yes. Managers in some shops took days to say yes while the
+  // customer waited. The customer's phone goes onto the shelf, the shop phone
+  // leaves, and the balance is paid now or goes on the customer's account, all
+  // in one step. Every check (the phone is In shop, the bank, the till) runs
+  // first, so a deal is either all done or nothing is saved.
+  const plan = await swapMoneyPlan({ branchId, balance, mustSay: true }, formData)
+  if ("error" in plan) return plan
+
+  let invoice: { id: string }
   try {
-    swap = await prisma.$transaction(async (tx) => {
+    invoice = await prisma.$transaction(async (tx) => {
       const swapInData = {
         productId: oldProductId,
         branchId,
@@ -2803,7 +2809,7 @@ export async function createSwap(formData: FormData) {
         status: "RECEIVED" as const,
         cosmeticGrade: condition,
         conditionNotes: [oldColor ? `Colour ${oldColor}` : null, oldConditionNotes].filter(Boolean).join(" · ") || null,
-        notes: `Swap Deal waiting for approval · ${swapInLabel || shopConditionLabel(condition)} · swap value ${tradeValue}`,
+        notes: `Swap Deal · ${swapInLabel || shopConditionLabel(condition)} · swap value ${tradeValue}`,
       }
       const incoming = swapInCameBack
         ? await (async () => {
@@ -2834,34 +2840,40 @@ export async function createSwap(formData: FormData) {
           balanceAmount: balance.toFixed(2),
           branchId,
           userId: user.id,
-          status: "PENDING",
+          // No approval: whoever saved it put it through.
+          status: "APPROVED",
+          approvedBy: user.id,
+          approvedAt: new Date(),
           notes: String(formData.get("notes") || "") || null,
         },
+        include: SWAP_PARTS,
       })
-      await tx.approval.create({
+      await tx.auditLog.create({
         data: {
-          type: "SWAP",
-          entityId: created.id,
+          userId: user.id,
+          action: "CREATE",
           entityType: "Swap",
-          requestedBy: user.id,
-          reason: `${created.swapNumber}: ${swapInLabel ? `${swapInLabel} (${oldDeviceId}) ` : ""}swap-in ₦${tradeValue} · given ₦${givenValue} · ${
-            balance > 0 ? `Receivable ₦${balance}` : balance < 0 ? `Payable ₦${Math.abs(balance)}` : "Even"
-          } · ${newImei.product.name}`,
+          entityId: created.swapNumber,
+          newValue: JSON.stringify({
+            note: `${swapInLabel ? `${swapInLabel} (${oldDeviceId}) ` : ""}in at ₦${tradeValue}, ${newImei.product.name} (${newImei.imei1}) out at ₦${givenValue}. No approval needed.`,
+            stockIn: oldDeviceId,
+            stockOut: newImei.imei1,
+            tradeValue,
+            givenValue,
+            balance,
+          }),
+          branchId,
         },
       })
-      return created
+      await moveSwapStock(tx, created, user.id)
+      const moved = await tx.swap.findUniqueOrThrow({ where: { id: created.id }, include: SWAP_PARTS })
+      return writeSwapInvoice(tx, user.id, moved, plan)
     })
   } catch (error) {
     return { error: shopError(error, "Could not save this Swap Deal. Nothing was saved; try again.") }
   }
-  const managers = await prisma.user.findMany({
-    where: { role: { in: ["CEO", "BRANCH_MANAGER", "SUPER_ADMIN"] }, isActive: true },
-  })
-  for (const manager of managers) {
-    await notify(manager.id, "A Swap Deal is waiting for approval", swap.swapNumber, "/approvals", "APPROVAL_REQUEST")
-  }
   refreshOps()
-  return { success: true }
+  return { success: true, redirectTo: `/sales/${invoice.id}` }
 }
 
 /**
@@ -2916,39 +2928,7 @@ export async function applySwapApprovalDecision(
         return
       }
 
-      if (!swap.newImeiId) throw new ConflictError("This Swap Deal has no shop device going out.")
-
-      await claimImei(tx, {
-        imeiId: swap.newImeiId,
-        branchId: swap.branchId,
-        label: "The shop device on this Swap Deal",
-        data: {
-          status: "SWAPPED",
-          customerId: swap.customerId,
-          notes: `Left on Swap Deal ${swap.swapNumber}`,
-        },
-      })
-      await drawStock(tx, {
-        move: { kind: "SWAP_OUT", reference: swap.swapNumber, userId },
-        productId: swap.newProductId,
-        branchId: swap.branchId,
-        quantity: 1,
-        label: swap.newProduct.name,
-      })
-      await tx.imeiRecord.update({
-        where: { id: swap.oldImeiId },
-        data: {
-          status: "IN_STOCK",
-          customerId: null,
-          notes: `Swap Deal from ${swap.customer.name} · ${swap.swapNumber}`,
-        },
-      })
-      await returnStock(tx, {
-        productId: swap.oldImei.productId,
-        branchId: swap.branchId,
-        quantity: 1,
-        move: { kind: "SWAP_IN", reference: swap.swapNumber, userId },
-      })
+      await moveSwapStock(tx, swap, userId)
 
       await tx.swap.update({
         where: { id: swap.id },
@@ -2982,12 +2962,78 @@ export async function completeSwap(formData: FormData) {
   return finishSwap(user, formData)
 }
 
-/** Write a Swap Deal's invoice and money. Used by Settle and invoice, and by a return of its phone. */
-async function finishSwap(user: Awaited<ReturnType<typeof requireUser>>, formData: FormData) {
-  const id = String(formData.get("id"))
+const SWAP_PARTS = { customer: true, newProduct: true, oldImei: true, newImei: true } satisfies Prisma.SwapInclude
+type SwapWithParts = Prisma.SwapGetPayload<{ include: typeof SWAP_PARTS }>
+
+/**
+ * The stock side of a Swap Deal: the customer's phone goes onto the shelf
+ * and the shop phone leaves. Done when the deal is saved, and by a manager's
+ * yes on a deal still waiting from before approvals were dropped.
+ */
+async function moveSwapStock(tx: Prisma.TransactionClient, swap: SwapWithParts, userId: string) {
+  if (!swap.newImeiId) throw new ConflictError("This Swap Deal has no shop device going out.")
+
+  await claimImei(tx, {
+    imeiId: swap.newImeiId,
+    branchId: swap.branchId,
+    label: "The shop device on this Swap Deal",
+    data: {
+      status: "SWAPPED",
+      customerId: swap.customerId,
+      notes: `Left on Swap Deal ${swap.swapNumber}`,
+    },
+  })
+  await drawStock(tx, {
+    move: { kind: "SWAP_OUT", reference: swap.swapNumber, userId },
+    productId: swap.newProductId,
+    branchId: swap.branchId,
+    quantity: 1,
+    label: swap.newProduct.name,
+  })
+  await tx.imeiRecord.update({
+    where: { id: swap.oldImeiId },
+    data: {
+      status: "IN_STOCK",
+      customerId: null,
+      notes: `Swap Deal from ${swap.customer.name} · ${swap.swapNumber}`,
+    },
+  })
+  await returnStock(tx, {
+    productId: swap.oldImei.productId,
+    branchId: swap.branchId,
+    quantity: 1,
+    move: { kind: "SWAP_IN", reference: swap.swapNumber, userId },
+  })
+}
+
+type SwapMoneyPlan = {
+  invoiceNumber: string
+  receivable: number
+  payable: number
+  collected: number
+  payOut: number
+  method: PaymentMethod
+  payChannel: ReturnType<typeof shopPayChannel>
+  swapBank: { id: string; bankName: string; accountNumber: string } | null
+  paymentReference: string | null
+}
+
+/**
+ * What changes hands on a Swap Deal's balance, read from the form and checked
+ * before anything is written: the bank and reference for a transfer, and the
+ * till for cash paid out. `mustSay` refuses a balance left unanswered.
+ */
+async function swapMoneyPlan(
+  input: { branchId: string; balance: number; mustSay?: boolean },
+  formData: FormData
+): Promise<SwapMoneyPlan | { error: string }> {
   const paid = Number(formData.get("paidAmount") || 0)
   // See applyReturn: what we owe and do not pay back now stays as credit.
   const paidTyped = String(formData.get("paidAmount") ?? "").trim() !== ""
+  if (input.mustSay && !paidTyped && Math.abs(input.balance) >= 0.005) {
+    return { error: "Say whether the balance was paid now or goes on the customer's account." }
+  }
+  if (paidTyped && (!Number.isFinite(paid) || paid < 0)) return { error: "Type what was paid now as a number." }
   // A Swap Deal is settled in cash or by bank transfer. By transfer, the named
   // bank account the money went into, or came out of, is picked.
   const method = (String(formData.get("method") || "TRANSFER") === "CASH" ? "CASH" : "TRANSFER") as PaymentMethod
@@ -2995,16 +3041,52 @@ async function finishSwap(user: Awaited<ReturnType<typeof requireUser>>, formDat
   // The transfer description or POS code, so the money can be matched to the
   // bank statement like any other bank payment.
   const paymentReference = String(formData.get("paymentReference") || "").trim() || null
-  const swap = await prisma.swap.findUnique({
-    where: { id },
-    include: { customer: true, newProduct: true, oldImei: true, newImei: true },
-  })
+
+  const receivable = Math.max(input.balance, 0)
+  const payable = Math.max(-input.balance, 0)
+  const collected = Math.min(Math.max(0, paid), receivable || payable)
+  const payOut = paidTyped ? Math.min(collected, payable) : payable
+  const payChannel = shopPayChannel(method)
+  const movesMoney = (receivable > 0 && collected > 0) || payOut > 0
+  const swapBank =
+    payChannel !== "CASH" && movesMoney && bankAccountId
+      ? await prisma.bankAccount.findFirst({
+          where: { id: bankAccountId, isActive: true },
+          select: { id: true, bankName: true, accountNumber: true },
+        })
+      : null
+  if (payChannel !== "CASH" && movesMoney && !swapBank) {
+    return { error: "Pick the bank account the money went into or came out of." }
+  }
+  if (payChannel !== "CASH" && movesMoney && !paymentReference) {
+    return { error: "Type the payment reference (transfer description or POS code) so this can be matched to the bank." }
+  }
+  if (payOut > 0 && payChannel === "CASH") {
+    const cashGate = await assertCashAvailable(input.branchId, payOut)
+    if (!cashGate.ok) return { error: cashGate.error }
+  }
+  return {
+    invoiceNumber: generateDocNumber("INV"),
+    receivable,
+    payable,
+    collected,
+    payOut,
+    method,
+    payChannel,
+    swapBank,
+    paymentReference: payChannel === "CASH" ? null : paymentReference,
+  }
+}
+
+/** Write a Swap Deal's invoice and money. Used by Settle and invoice, and by a return of its phone. */
+async function finishSwap(user: Awaited<ReturnType<typeof requireUser>>, formData: FormData) {
+  const id = String(formData.get("id"))
+  const swap = await prisma.swap.findUnique({ where: { id }, include: SWAP_PARTS })
   if (!swap || !swap.newImeiId) return { error: "We could not find that swap." }
   if (!(await canReachBranch(user, swap.branchId))) return { error: OTHER_SHOP }
   if (swap.status === "COMPLETED") return { error: "That swap is already finished." }
-  if (swap.status !== "APPROVED") {
-    return { error: "Wait for approval on Needs approval before settling the money." }
-  }
+  if (swap.status === "PENDING") return putThroughSwap(user, swap, formData)
+  if (swap.status !== "APPROVED") return { error: "That Swap Deal was turned down." }
   // Approval already moved both phones. Finishing then only writes the invoice
   // and the money, which has nothing to do with the opening count, so it must
   // not wait for it: Iwo Road's first swap sat approved for days, phone gone,
@@ -3018,201 +3100,220 @@ async function finishSwap(user: Awaited<ReturnType<typeof requireUser>>, formDat
     }
   }
 
-  const invoiceNumber = generateDocNumber("INV")
-  const balance = money(swap.balanceAmount)
-  const receivable = Math.max(balance, 0)
-  const payable = Math.max(-balance, 0)
-  const collected = Math.min(Math.max(0, paid), receivable || payable)
-  const payOut = paidTyped ? Math.min(collected, payable) : payable
-  const payChannel = shopPayChannel(method)
-  const movesMoney = (receivable > 0 && collected > 0) || payOut > 0
-  const swapBank =
-    payChannel !== "CASH" && movesMoney && bankAccountId
-      ? await prisma.bankAccount.findFirst({ where: { id: bankAccountId, isActive: true } })
-      : null
-  if (payChannel !== "CASH" && movesMoney && !swapBank) {
-    return { error: "Pick the bank account the money went into or came out of." }
-  }
-  if (payChannel !== "CASH" && movesMoney && !paymentReference) {
-    return { error: "Type the payment reference (transfer description or POS code) so this can be matched to the bank." }
-  }
-  const swapBankLabel = swapBank ? ` · ${swapBank.bankName} ${swapBank.accountNumber}` : ""
-  if (payOut > 0 && payChannel === "CASH") {
-    const cashGate = await assertCashAvailable(swap.branchId, payOut)
-    if (!cashGate.ok) return { error: cashGate.error }
-  }
+  const plan = await swapMoneyPlan({ branchId: swap.branchId, balance: money(swap.balanceAmount) }, formData)
+  if ("error" in plan) return plan
 
   let invoice: { id: string }
   try {
-  invoice = await prisma.$transaction(async (tx) => {
-    const sealed = await tx.swap.updateMany({
-      where: { id, status: "APPROVED" },
-      data: {
-        status: "COMPLETED",
-        completedAt: new Date(),
-        notes: [swap.notes, `Invoice ${invoiceNumber}`].filter(Boolean).join(" · "),
-      },
-    })
-    if (sealed.count !== 1) {
-      throw new ConflictError(`${swap.swapNumber} was already completed by someone else. Refresh to see it.`)
-    }
-
-    // Legacy path: older swaps may still have stock waiting if approval only flipped status.
-    if (swap.oldImei.status === "RECEIVED") {
-      await tx.imeiRecord.update({
-        where: { id: swap.oldImeiId },
-        data: {
-          status: "IN_STOCK",
-          customerId: null,
-          notes: `Swap Deal from ${swap.customer.name} · ${swap.swapNumber}`,
-        },
-      })
-      await returnStock(tx, {
-        productId: swap.oldImei.productId,
-        branchId: swap.branchId,
-        quantity: 1,
-        move: { kind: "SWAP_IN", reference: swap.swapNumber, userId: user.id },
-      })
-    }
-    if (swap.newImei?.status === "IN_STOCK") {
-      await claimImei(tx, {
-        imeiId: swap.newImeiId!,
-        branchId: swap.branchId,
-        label: "The shop device on this Swap Deal",
-        data: { status: "SOLD", customerId: swap.customerId },
-      })
-      await drawStock(tx, {
-        move: { kind: "SWAP_OUT", reference: swap.swapNumber, userId: user.id },
-        productId: swap.newProductId,
-        branchId: swap.branchId,
-        quantity: 1,
-        label: swap.newProduct.name,
-      })
-    } else {
-      await tx.imeiRecord.update({
-        where: { id: swap.newImeiId! },
-        data: { status: "SOLD", customerId: swap.customerId },
-      })
-    }
-
-    const sale = await tx.sale.create({
-      data: {
-        invoiceNumber,
-        branchId: swap.branchId,
-        userId: user.id,
-        customerId: swap.customerId,
-        saleType: "RETAIL",
-        status: "COMPLETED",
-        subtotal: receivable.toFixed(2),
-        // The trade-in is already taken off on the line below. Taking it off
-        // the invoice again made subtotal less discount disagree with the total.
-        discount: "0.00",
-        totalAmount: receivable.toFixed(2),
-        paidAmount: receivable > 0 ? collected.toFixed(2) : "0.00",
-        paymentMethod: receivable > 0 && collected < receivable ? "CREDIT" : method,
-        notes: `Swap ${swap.swapNumber}`,
-        items: {
-          create: {
-            productId: swap.newProductId,
-            imeiId: swap.newImeiId,
-            quantity: 1,
-            unitPrice: money(swap.newProductPrice).toFixed(2),
-            discount: money(swap.tradeValue).toFixed(2),
-            totalPrice: receivable.toFixed(2),
-            // Profit everywhere is line amount less line cost. The line only
-            // carries what the customer pays in money; the rest of the price
-            // was paid with the phone they traded in, which goes onto the shelf
-            // as stock. So the cost here is the new phone's cost less that
-            // part, and the profit comes out as price less cost, as for any
-            // sale. Left at 0, the whole balance read as profit.
-            costPrice: (money(swap.newProduct.costPrice) - (money(swap.newProductPrice) - receivable)).toFixed(2),
-          },
-        },
-        payments:
-          receivable > 0 && collected > 0
-            ? {
-                create: {
-                  amount: collected.toFixed(2),
-                  method,
-                  bankAccountId: swapBank?.id ?? null,
-                  reference: payChannel === "CASH" ? null : paymentReference,
-                  receivedByUserId: user.id,
-                },
-              }
-            : undefined,
-      },
-    })
-
-    await tx.imeiRecord.update({
-      where: { id: swap.newImeiId! },
-      data: { saleId: sale.id },
-    })
-
-    const due = Math.max(receivable - collected, 0)
-    if (due > 0) {
-      const after = await shiftCustomerBalance(tx, swap.customerId, due)
-      await tx.ledgerEntry.create({
-        data: {
-          customerId: swap.customerId,
-          type: "SALE",
-          amount: due.toFixed(2),
-          balance: money(after.currentBalance).toFixed(2),
-          reference: invoiceNumber,
-          description: `Swap receivable ${swap.swapNumber}`,
-        },
-      })
-    }
-    if (receivable > 0 && collected > 0) {
-      await tx.financeEntry.create({
-        data: {
-          branchId: swap.branchId,
-          account: payChannel === "CASH" ? "CASH" : "BANK",
-          type: "INCOME",
-          amount: collected.toFixed(2),
-          reference: invoiceNumber,
-          description: `Swap receivable ${swap.swapNumber}${swapBankLabel}${paymentReference ? ` · ref ${paymentReference}` : ""}`,
-          bankAccountId: swapBank?.id ?? null,
-        },
-      })
-    }
-    if (payOut > 0) {
-      await tx.financeEntry.create({
-        data: {
-          branchId: swap.branchId,
-          account: payChannel === "CASH" ? "CASH" : "BANK",
-          type: "EXPENSE",
-          amount: payOut.toFixed(2),
-          reference: invoiceNumber,
-          description: `Swap payable to ${swap.customer.name} · ${swap.swapNumber}${swapBankLabel}${paymentReference ? ` · ref ${paymentReference}` : ""}`,
-          bankAccountId: swapBank?.id ?? null,
-        },
-      })
-    }
-    await keepOnAccount(tx, {
-      customerId: swap.customerId,
-      amount: payable - payOut,
-      reference: invoiceNumber,
-      what: `Swap Deal ${swap.swapNumber}`,
-    })
-
-    await tx.auditLog.create({
-      data: {
-        userId: user.id,
-        action: "UPDATE",
-        entityType: "Swap",
-        entityId: swap.swapNumber,
-        newValue: JSON.stringify({ invoiceNumber, collected, receivable, payable, paidOut: payOut, keptOnAccount: payable - payOut }),
-        branchId: swap.branchId,
-      },
-    })
-    return sale
-  })
+    invoice = await prisma.$transaction((tx) => writeSwapInvoice(tx, user.id, swap, plan))
   } catch (error) {
     return { error: shopError(error, "Could not complete this swap.") }
   }
 
   refreshOps()
   return { success: true, redirectTo: `/sales/${invoice.id}` }
+}
+
+/**
+ * A Swap Deal saved while deals still waited for a manager's yes. Swap Deals
+ * no longer need one, so whoever records swaps puts it through: stock moves
+ * and the money is settled in one step, as for a new deal.
+ */
+async function putThroughSwap(user: Awaited<ReturnType<typeof requireUser>>, swap: SwapWithParts, formData: FormData) {
+  if (!(await can(user.role, "action.swap"))) return { error: "You are not allowed to record a swap. Ask the main admin." }
+  const plan = await swapMoneyPlan({ branchId: swap.branchId, balance: money(swap.balanceAmount), mustSay: true }, formData)
+  if ("error" in plan) return plan
+
+  let invoice: { id: string }
+  try {
+    invoice = await prisma.$transaction(async (tx) => {
+      const opened = await tx.swap.updateMany({
+        where: { id: swap.id, status: "PENDING" },
+        data: { status: "APPROVED", approvedBy: user.id, approvedAt: new Date() },
+      })
+      if (opened.count !== 1) {
+        throw new ConflictError(`${swap.swapNumber} was already put through by someone else. Refresh to see it.`)
+      }
+      await moveSwapStock(tx, swap, user.id)
+      const moved = await tx.swap.findUniqueOrThrow({ where: { id: swap.id }, include: SWAP_PARTS })
+      return writeSwapInvoice(tx, user.id, moved, plan)
+    })
+  } catch (error) {
+    return { error: shopError(error, "Could not put this Swap Deal through.") }
+  }
+  // Its old request on Needs approval is settled too.
+  await prisma.approval.updateMany({
+    where: { entityType: "Swap", entityId: swap.id, status: "PENDING" },
+    data: { status: "APPROVED", approvedBy: user.id, approvedAt: new Date() },
+  })
+  refreshOps()
+  return { success: true, redirectTo: `/sales/${invoice.id}` }
+}
+
+async function writeSwapInvoice(tx: Prisma.TransactionClient, userId: string, swap: SwapWithParts, plan: SwapMoneyPlan) {
+  const { invoiceNumber, receivable, payable, collected, payOut, method, payChannel, swapBank, paymentReference } = plan
+  const swapBankLabel = swapBank ? ` · ${swapBank.bankName} ${swapBank.accountNumber}` : ""
+  const sealed = await tx.swap.updateMany({
+    where: { id: swap.id, status: "APPROVED" },
+    data: {
+      status: "COMPLETED",
+      completedAt: new Date(),
+      notes: [swap.notes, `Invoice ${invoiceNumber}`].filter(Boolean).join(" · "),
+    },
+  })
+  if (sealed.count !== 1) {
+    throw new ConflictError(`${swap.swapNumber} was already completed by someone else. Refresh to see it.`)
+  }
+
+  // Legacy path: older swaps may still have stock waiting if approval only flipped status.
+  if (swap.oldImei.status === "RECEIVED") {
+    await tx.imeiRecord.update({
+      where: { id: swap.oldImeiId },
+      data: {
+        status: "IN_STOCK",
+        customerId: null,
+        notes: `Swap Deal from ${swap.customer.name} · ${swap.swapNumber}`,
+      },
+    })
+    await returnStock(tx, {
+      productId: swap.oldImei.productId,
+      branchId: swap.branchId,
+      quantity: 1,
+      move: { kind: "SWAP_IN", reference: swap.swapNumber, userId },
+    })
+  }
+  if (swap.newImei?.status === "IN_STOCK") {
+    await claimImei(tx, {
+      imeiId: swap.newImeiId!,
+      branchId: swap.branchId,
+      label: "The shop device on this Swap Deal",
+      data: { status: "SOLD", customerId: swap.customerId },
+    })
+    await drawStock(tx, {
+      move: { kind: "SWAP_OUT", reference: swap.swapNumber, userId },
+      productId: swap.newProductId,
+      branchId: swap.branchId,
+      quantity: 1,
+      label: swap.newProduct.name,
+    })
+  } else {
+    await tx.imeiRecord.update({
+      where: { id: swap.newImeiId! },
+      data: { status: "SOLD", customerId: swap.customerId },
+    })
+  }
+
+  const sale = await tx.sale.create({
+    data: {
+      invoiceNumber,
+      branchId: swap.branchId,
+      userId,
+      customerId: swap.customerId,
+      saleType: "RETAIL",
+      status: "COMPLETED",
+      subtotal: receivable.toFixed(2),
+      // The trade-in is already taken off on the line below. Taking it off
+      // the invoice again made subtotal less discount disagree with the total.
+      discount: "0.00",
+      totalAmount: receivable.toFixed(2),
+      paidAmount: receivable > 0 ? collected.toFixed(2) : "0.00",
+      paymentMethod: receivable > 0 && collected < receivable ? "CREDIT" : method,
+      notes: `Swap ${swap.swapNumber}`,
+      items: {
+        create: {
+          productId: swap.newProductId,
+          imeiId: swap.newImeiId,
+          quantity: 1,
+          unitPrice: money(swap.newProductPrice).toFixed(2),
+          discount: money(swap.tradeValue).toFixed(2),
+          totalPrice: receivable.toFixed(2),
+          // Profit everywhere is line amount less line cost. The line only
+          // carries what the customer pays in money; the rest of the price
+          // was paid with the phone they traded in, which goes onto the shelf
+          // as stock. So the cost here is the new phone's cost less that
+          // part, and the profit comes out as price less cost, as for any
+          // sale. Left at 0, the whole balance read as profit.
+          costPrice: (money(swap.newProduct.costPrice) - (money(swap.newProductPrice) - receivable)).toFixed(2),
+        },
+      },
+      payments:
+        receivable > 0 && collected > 0
+          ? {
+              create: {
+                amount: collected.toFixed(2),
+                method,
+                bankAccountId: swapBank?.id ?? null,
+                reference: paymentReference,
+                receivedByUserId: userId,
+              },
+            }
+          : undefined,
+    },
+  })
+
+  await tx.imeiRecord.update({
+    where: { id: swap.newImeiId! },
+    data: { saleId: sale.id },
+  })
+
+  const due = Math.max(receivable - collected, 0)
+  if (due > 0) {
+    const after = await shiftCustomerBalance(tx, swap.customerId, due)
+    await tx.ledgerEntry.create({
+      data: {
+        customerId: swap.customerId,
+        type: "SALE",
+        amount: due.toFixed(2),
+        balance: money(after.currentBalance).toFixed(2),
+        reference: invoiceNumber,
+        description: `Swap receivable ${swap.swapNumber}`,
+      },
+    })
+  }
+  if (receivable > 0 && collected > 0) {
+    await tx.financeEntry.create({
+      data: {
+        branchId: swap.branchId,
+        account: payChannel === "CASH" ? "CASH" : "BANK",
+        type: "INCOME",
+        amount: collected.toFixed(2),
+        reference: invoiceNumber,
+        description: `Swap receivable ${swap.swapNumber}${swapBankLabel}${paymentReference ? ` · ref ${paymentReference}` : ""}`,
+        bankAccountId: swapBank?.id ?? null,
+      },
+    })
+  }
+  if (payOut > 0) {
+    await tx.financeEntry.create({
+      data: {
+        branchId: swap.branchId,
+        account: payChannel === "CASH" ? "CASH" : "BANK",
+        type: "EXPENSE",
+        amount: payOut.toFixed(2),
+        reference: invoiceNumber,
+        description: `Swap payable to ${swap.customer.name} · ${swap.swapNumber}${swapBankLabel}${paymentReference ? ` · ref ${paymentReference}` : ""}`,
+        bankAccountId: swapBank?.id ?? null,
+      },
+    })
+  }
+  await keepOnAccount(tx, {
+    customerId: swap.customerId,
+    amount: payable - payOut,
+    reference: invoiceNumber,
+    what: `Swap Deal ${swap.swapNumber}`,
+  })
+
+  await tx.auditLog.create({
+    data: {
+      userId,
+      action: "UPDATE",
+      entityType: "Swap",
+      entityId: swap.swapNumber,
+      newValue: JSON.stringify({ invoiceNumber, collected, receivable, payable, paidOut: payOut, keptOnAccount: payable - payOut }),
+      branchId: swap.branchId,
+    },
+  })
+  return sale
 }
 
 export async function getRepairs() {

@@ -36,9 +36,9 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
           canRemove
             ? "Names, cost, lowest price, and selling price. Tick lines to change prices, or use Change or remove on a line to edit any detail, reduce stock, or take an item off the active list."
             : canPrice && canEdit
-              ? "Names, cost, lowest price, and selling price. Tick lines to change selling prices, or use Change on a line to edit its details or reduce stock. Only the CEO or the main admin can remove an item."
+              ? "Names, cost, lowest price, and selling price. Tick lines to change selling prices and costs, many at once, or use Change on a line to edit its details or reduce stock. Only the CEO or the main admin can remove an item."
               : canPrice
-                ? "Names, cost, lowest price, and selling price. Tick lines to change selling prices, or use Prices on a line to set its cost, lowest and selling price. A price you set applies in every shop."
+                ? "Names, cost, lowest price, and selling price. Tick lines to change selling prices and costs, many at once, or use Prices on a line to set its cost, lowest and selling price. A price you set applies in every shop."
                 : canEdit
                   ? "Names, lowest price, and selling price. Use Change on a line to edit its details or reduce stock. The CEO, the main admin or a branch manager changes prices."
                   : "Names, lowest price, and selling price. The CEO, the main admin or a branch manager changes prices."
