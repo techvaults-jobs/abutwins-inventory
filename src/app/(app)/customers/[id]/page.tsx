@@ -56,7 +56,7 @@ export default async function CustomerDetailPage({ params }: { params: Promise<{
       return { tag: "Opening balance", tone: "text-warning", note: null as string | null }
     }
     const tags: Record<string, { tag: string; tone: string }> = {
-      SALE: { tag: "Bought on credit", tone: "text-warning" },
+      SALE: { tag: entry.reference?.startsWith("RTN-") ? "Owed on a return" : "Bought on credit", tone: "text-warning" },
       PAYMENT: { tag: "Paid us", tone: "text-success" },
       REFUND: { tag: "Refund paid out", tone: "text-danger" },
       ADJUSTMENT: { tag: entry.reference?.startsWith("RTN-") ? "Returned" : "Adjustment", tone: "text-success" },

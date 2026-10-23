@@ -6,6 +6,7 @@ import { toast } from "sonner"
 import { createReturn, findSoldImei, findSaleByInvoice } from "@/app/actions/ops"
 import type { SaleReturnRoom } from "@/lib/return-limits"
 import { ActionForm } from "@/components/action-form"
+import { DifferenceSettle } from "@/components/difference-settle"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -480,42 +481,31 @@ function OutcomeFields({
                   : "Balance is even — no money either way."}
           </div>
           {replacementId && Number.isFinite(returnAmount) && balance !== 0 ? (
-            <div className="space-y-3 border-t border-border pt-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="settle-amount-input">
-                  {balance > 0 ? "Amount received from the customer now (₦)" : "Amount paid back to the customer (₦)"}
-                </Label>
-                <Input
-                  id="settle-amount-input"
-                  name="paidAmount"
-                  type="number"
-                  min={0}
-                  step={1}
-                  key={`${replacementId}-${balance}`}
-                  defaultValue={Math.abs(balance)}
-                />
-                {balance > 0 ? (
-                  <p className="text-xs text-muted-foreground">Anything not paid now is added to what the customer owes.</p>
-                ) : null}
-              </div>
-              {balance > 0 ? (
-                <>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="settle-method-select">How they paid</Label>
-                    <Select id="settle-method-select" name="method" value={payMethod} onChange={(e) => setPayMethod(e.target.value)}>
-                      <option value="CASH">Cash</option>
-                      <option value="TRANSFER">Bank transfer</option>
-                      <option value="POS">POS</option>
-                    </Select>
-                  </div>
-                  {payMethod !== "CASH" ? <BankSelect banks={banks} branchId={branchId} label="Bank that received it" required={false} /> : null}
-                </>
-              ) : (
-                <>
-                  <input type="hidden" name="method" value="TRANSFER" />
-                  <BankSelect banks={banks} branchId={branchId} label="Pay the difference back from" required />
-                </>
-              )}
+            <div className="border-t border-border pt-3">
+              <DifferenceSettle
+                key={`${replacementId}-${balance}`}
+                balance={balance}
+                moneyFields={
+                  balance > 0 ? (
+                    <>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="settle-method-select">How they paid</Label>
+                        <Select id="settle-method-select" name="method" value={payMethod} onChange={(e) => setPayMethod(e.target.value)}>
+                          <option value="CASH">Cash</option>
+                          <option value="TRANSFER">Bank transfer</option>
+                          <option value="POS">POS</option>
+                        </Select>
+                      </div>
+                      {payMethod !== "CASH" ? <BankSelect banks={banks} branchId={branchId} label="Bank that received it" required={false} /> : null}
+                    </>
+                  ) : (
+                    <>
+                      <input type="hidden" name="method" value="TRANSFER" />
+                      <BankSelect banks={banks} branchId={branchId} label="Pay the difference back from" required />
+                    </>
+                  )
+                }
+              />
             </div>
           ) : null}
         </div>

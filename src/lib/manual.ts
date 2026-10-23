@@ -165,7 +165,8 @@ const PAGES: Array<
     ],
     watch: [
       "Coming phones are not for sale on Sell now.",
-      "The same IMEI cannot live two lives. The system stops a copy.",
+      "A phone still in a shop cannot be booked twice. The system stops a copy.",
+      "A phone we sold (or swapped out, wrote off, or sent back to the supplier) that is in your hands again can be added here. It comes back into stock on its own record, and its earlier sale stays on its history.",
       "Scanning does not save. Press Add phone to shop when the rest of the fields are ready.",
       "Battery health is not asked when you add a phone.",
       "If How the phone looks is Damaged, the phone is booked as Damaged. It does not go on sellable In shop stock, and Sell now will refuse it until someone Sets Good (sellable).",
@@ -203,7 +204,7 @@ const PAGES: Array<
     ],
     watch: [
       "If you mix Coming with In shop, cashiers will sell phones that are still on the road.",
-      "The same IMEI cannot be booked twice.",
+      "The same IMEI cannot be booked twice. A phone that came back to us is already here: add it on One phone at a time, not as Coming.",
     ],
     cannot: ["A cashier who cannot book goods will not see the add form."],
     lookup: ["incoming", "coming", "book", "arrived", "carton"],

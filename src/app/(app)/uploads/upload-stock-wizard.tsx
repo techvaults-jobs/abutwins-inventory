@@ -101,6 +101,11 @@ export function UploadStockWizard({
   const router = useRouter()
   const [busy, setBusy] = useState(false)
   const [softNotes, setSoftNotes] = useState<string[]>([])
+  // Phones on the upload that left the shop before. The upload stops until
+  // staff say whether each came back; the answer rides on the next try.
+  const [comeBack, setComeBack] = useState<Array<{ code: string; label: string }>>([])
+  const comeBackAnswer = useRef<{ comeBack: string[]; leaveOut: string[] }>({ comeBack: [], leaveOut: [] })
+  const formRef = useRef<HTMLFormElement>(null)
   const defaultBrandId = brands[0]?.id || ""
   const defaultCategoryId =
     categories.find((row) => /phone/i.test(row.name))?.id || categories[0]?.id || ""
@@ -316,6 +321,8 @@ export function UploadStockWizard({
       onTheWay,
       expectedDate: onTheWay && expectedDate ? expectedDate : undefined,
       notes: notes.trim() || undefined,
+      comeBack: comeBackAnswer.current.comeBack,
+      leaveOut: comeBackAnswer.current.leaveOut,
       items: items.map((line) => {
         const item: BatchUploadPayload["items"][number] & { key?: string } = { ...line }
         delete item.key
@@ -344,14 +351,23 @@ export function UploadStockWizard({
     }
     setBusy(false)
 
+    if (result.comeBack?.length) {
+      setComeBack(result.comeBack)
+      toast.error(result.error ?? "Some phones on this upload left the shop before. Say whether they came back.")
+      requestAnimationFrame(() => document.getElementById("came-back-panel")?.scrollIntoView({ block: "center", behavior: "smooth" }))
+      return
+    }
     if (result.error) {
       toast.error(result.error)
       return
     }
+    comeBackAnswer.current = { comeBack: [], leaveOut: [] }
+    setComeBack([])
 
     const soft = [
       result.duplicates ? `${result.duplicates} duplicate number(s) counted once` : null,
       result.skipped ? `${result.skipped} already on the system left as they are` : null,
+      result.cameBack ? `${result.cameBack} phone(s) that came back are in stock again` : null,
     ].filter(Boolean)
     toast.success(
       [
@@ -405,6 +421,7 @@ export function UploadStockWizard({
 
   return (
     <form
+      ref={formRef}
       onSubmit={handleSubmit}
       onKeyDown={preventEnterFromSubmitting}
       className="surface-card overflow-visible"
@@ -894,6 +911,56 @@ export function UploadStockWizard({
           </label>
         </section>
       </div>
+
+      {comeBack.length ? (
+        <div id="came-back-panel" className="border-t border-border px-5 py-3">
+          <div className="space-y-3 rounded-lg border border-warning/30 bg-warning/10 p-3">
+            <div>
+              <p className="text-sm font-semibold text-foreground">
+                {comeBack.length === 1 ? "This phone left the shop before." : `These ${comeBack.length} phones left the shop before.`} Did{" "}
+                {comeBack.length === 1 ? "it" : "they"} come back to us?
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Book {comeBack.length === 1 ? "it" : "them"} in only if {comeBack.length === 1 ? "it is" : "they are"} really here again,
+                bought back from a customer or returned by the supplier. A sheet uploaded twice by mistake must not put sold phones back
+                on the shelf. Nothing was saved yet.
+              </p>
+            </div>
+            <ul className="max-h-48 space-y-1 overflow-y-auto">
+              {comeBack.map((row) => (
+                <li key={row.code} className="break-words font-mono text-xs text-foreground">
+                  {row.label}
+                </li>
+              ))}
+            </ul>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  comeBackAnswer.current.comeBack.push(...comeBack.map((row) => row.code))
+                  setComeBack([])
+                  formRef.current?.requestSubmit()
+                }}
+              >
+                They came back to us, book them in
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy}
+                onClick={() => {
+                  comeBackAnswer.current.leaveOut.push(...comeBack.map((row) => row.code))
+                  setComeBack([])
+                  formRef.current?.requestSubmit()
+                }}
+              >
+                Leave them out
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {softNotes.length ? (
         <div className="border-t border-border px-5 py-3">

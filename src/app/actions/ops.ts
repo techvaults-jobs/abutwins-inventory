@@ -37,6 +37,7 @@ import { parseShopCondition, shopConditionLabel } from "@/lib/conditions"
 import { normalizeStorage } from "@/lib/item-specs"
 import { makeOpeningSku } from "@/lib/opening-stock"
 import { unitCodeProblem, unitIdentityColumns, type UnitIdentityKind } from "@/lib/unit-identity"
+import { bookCameBack, sortComingBack } from "@/lib/unit-comeback"
 
 function parseImeis(raw: string) {
   return [...new Set(raw.split(/[\s,;]+/).map((item) => item.trim()).filter((item) => item.length >= 14))]
@@ -532,12 +533,14 @@ export async function receivePurchaseImeis(formData: FormData) {
     return { error: `Only ${remaining} units are still expected. You pasted ${imeis.length} ${numberWord}.` }
   }
 
-  const duplicates = await prisma.imeiRecord.findMany({
-    where: { OR: [{ imei1: { in: imeis } }, { imei2: { in: imeis } }, { serialNumber: { in: imeis } }] },
-    select: { imei1: true },
-  })
-  if (duplicates.length) {
-    return { error: `Already in the shop: ${duplicates.map((row) => row.imei1).join(", ")}` }
+  // A phone that left the shop and came back on this shipment comes in on its
+  // own record; one still in a shop is refused.
+  const { back: cameBack, held } = await sortComingBack(prisma, imeis)
+  if (held.size) {
+    return { error: `Already in the shop: ${[...new Set(held.values())].join(" ")}` }
+  }
+  if (new Set([...cameBack.values()].map((unit) => unit.id)).size < cameBack.size) {
+    return { error: "Two of the numbers you scanned belong to one phone (its IMEI 1 and IMEI 2). Scan one number per phone." }
   }
 
   const receivedQty = item.receivedQty + imeis.length
@@ -556,6 +559,22 @@ export async function receivePurchaseImeis(formData: FormData) {
       throw new ConflictError(`${purchase.invoiceNumber} was received by someone else while you were scanning. Refresh and scan what is left.`)
     }
     for (const imei1 of imeis) {
+      const back = cameBack.get(imei1)
+      if (back) {
+        await bookCameBack(tx, back, {
+          data: {
+            productId: item.productId,
+            supplierId: purchase.supplierId,
+            branchId: purchase.branchId,
+            purchaseId: purchase.id,
+            status: "IN_STOCK",
+            notes: `Came back · Received on ${purchase.invoiceNumber}`,
+          },
+          reference: purchase.invoiceNumber,
+          userId: user.id,
+        })
+        continue
+      }
       await tx.imeiRecord.create({
         data: {
           imei1,
@@ -1794,6 +1813,11 @@ async function applyReturn(user: Awaited<ReturnType<typeof requireUser>>, formDa
   }
   const method = String(formData.get("method") || "CASH") as PaymentMethod
   const paidAmount = Number(formData.get("paidAmount") || 0)
+  // Whether the form said how much changes hands now. A difference owed to the
+  // customer that is not paid back now stays on their account as credit; one
+  // the customer owes and does not pay now goes on their account as debt. A
+  // form from before this left the field out and paid any difference back whole.
+  const paidTyped = String(formData.get("paidAmount") ?? "").trim() !== ""
   // Money going back to a customer leaves by bank, from a named account: safer
   // than cash from the till, and it is how most refunds are paid anyway.
   const bankAccountId = String(formData.get("bankAccountId") || "").trim()
@@ -1836,7 +1860,8 @@ async function applyReturn(user: Awaited<ReturnType<typeof requireUser>>, formDa
       const returnValue = money(record.returnValue) || money(record.refundAmount) || (record.imei ? money(record.imei.product.sellingPrice) : 0)
       balance = unit ? money(unit.product.sellingPrice) - returnValue : 0
     }
-    if (balance < 0 && !refundBank) return { error: "Pick the bank account the difference is paid back from." }
+    const payBackNow = paidTyped ? Math.min(Math.max(0, paidAmount), Math.max(-balance, 0)) : Math.max(-balance, 0)
+    if (payBackNow > 0 && !refundBank) return { error: "Pick the bank account the difference is paid back from." }
   }
 
   try {
@@ -2011,17 +2036,25 @@ async function applyReturn(user: Awaited<ReturnType<typeof requireUser>>, formDa
         })
       }
       if (payable > 0) {
-        const payOut = collected > 0 ? Math.min(collected, payable) : payable
-        await tx.financeEntry.create({
-          data: {
-            branchId: record.branchId,
-            account: "BANK",
-            type: "EXPENSE",
-            amount: payOut.toFixed(2),
-            reference: record.returnNumber,
-            description: `Return payable to ${record.customer.name} from ${bankLabel} · ${record.returnNumber}`,
-            bankAccountId: refundBank?.id ?? null,
-          },
+        const payOut = paidTyped ? Math.min(collected, payable) : payable
+        if (payOut > 0) {
+          await tx.financeEntry.create({
+            data: {
+              branchId: record.branchId,
+              account: "BANK",
+              type: "EXPENSE",
+              amount: payOut.toFixed(2),
+              reference: record.returnNumber,
+              description: `Return payable to ${record.customer.name} from ${bankLabel} · ${record.returnNumber}`,
+              bankAccountId: refundBank?.id ?? null,
+            },
+          })
+        }
+        await keepOnAccount(tx, {
+          customerId: record.customerId,
+          amount: payable - payOut,
+          reference: record.returnNumber,
+          what: `the return ${record.returnNumber}`,
         })
       }
     }
@@ -2168,6 +2201,32 @@ export async function restockReturn(formData: FormData) {
  * for a refund or as credit to spend at the till for a credit note. Shared by
  * Apply and by a send-back put right, so both settle a return the same way.
  */
+/**
+ * What we owe a customer after a return or a Swap Deal and did not pay back
+ * there and then. It stays on their account as credit (their balance goes
+ * below zero), shows on their statement, and the till offers it on their next
+ * purchase. Before this the whole difference was always written as paid out,
+ * so a customer who left the money with the shop had nothing on their account.
+ */
+async function keepOnAccount(
+  tx: Prisma.TransactionClient,
+  args: { customerId: string; amount: number; reference: string; what: string }
+) {
+  const amount = money(args.amount)
+  if (amount <= 0.005) return
+  const after = await shiftCustomerBalance(tx, args.customerId, -amount)
+  await tx.ledgerEntry.create({
+    data: {
+      customerId: args.customerId,
+      type: "CREDIT_NOTE",
+      amount: (-amount).toFixed(2),
+      balance: money(after.currentBalance).toFixed(2),
+      reference: args.reference,
+      description: `${formatCurrency(amount)} owed to them on ${args.what}, kept on their account to use on a later purchase`,
+    },
+  })
+}
+
 async function settleReturnMoney(
   tx: Prisma.TransactionClient,
   args: {
@@ -2662,13 +2721,16 @@ export async function createSwap(formData: FormData) {
     return { error: "That customer belongs to another shop." }
   }
 
+  // A customer often swaps in a phone they bought from us. It comes in on its
+  // own record, so its earlier sale stays on its history. A phone still in a
+  // shop, or in an open return or Swap Deal, is refused.
   const oldCodes = [oldDeviceId, ...(oldIdentityKind === "IMEI" && oldImei2 ? [oldImei2] : [])]
-  const exists = await prisma.imeiRecord.findFirst({
-    where: {
-      OR: [{ imei1: { in: oldCodes } }, { imei2: { in: oldCodes } }, { serialNumber: { in: oldCodes } }],
-    },
-  })
-  if (exists) return { error: "That IMEI or serial number is already on this system." }
+  const { back: swapInBack, held: swapInHeld } = await sortComingBack(prisma, oldCodes)
+  if (swapInHeld.size) return { error: `That phone is already on this system. ${[...new Set(swapInHeld.values())].join(" ")}` }
+  if (new Set([...swapInBack.values()].map((unit) => unit.id)).size > 1) {
+    return { error: `${oldCodes.join(", ")} belong to two different phones on the system. Check the numbers.` }
+  }
+  const swapInCameBack = swapInBack.values().next().value ?? null
 
   const newImei = newImeiId
     ? await prisma.imeiRecord.findUnique({
@@ -2734,18 +2796,30 @@ export async function createSwap(formData: FormData) {
   let swap: { id: string; swapNumber: string }
   try {
     swap = await prisma.$transaction(async (tx) => {
-      const incoming = await tx.imeiRecord.create({
-        data: {
-          ...unitIdentityColumns({ kind: oldIdentityKind, imei1: oldDeviceId, imei2: oldImei2 }),
-          productId: oldProductId,
-          branchId,
-          customerId: customer.id,
-          status: "RECEIVED",
-          cosmeticGrade: condition,
-          conditionNotes: [oldColor ? `Colour ${oldColor}` : null, oldConditionNotes].filter(Boolean).join(" · ") || null,
-          notes: `Swap Deal waiting for approval · ${swapInLabel || shopConditionLabel(condition)} · swap value ${tradeValue}`,
-        },
-      })
+      const swapInData = {
+        productId: oldProductId,
+        branchId,
+        customerId: customer.id,
+        status: "RECEIVED" as const,
+        cosmeticGrade: condition,
+        conditionNotes: [oldColor ? `Colour ${oldColor}` : null, oldConditionNotes].filter(Boolean).join(" · ") || null,
+        notes: `Swap Deal waiting for approval · ${swapInLabel || shopConditionLabel(condition)} · swap value ${tradeValue}`,
+      }
+      const incoming = swapInCameBack
+        ? await (async () => {
+            await bookCameBack(tx, swapInCameBack, {
+              data: { ...swapInData, purchaseId: null, supplierId: null },
+              reference: `Swap Deal from ${customer.name}`,
+              userId: user.id,
+            })
+            return { id: swapInCameBack.id }
+          })()
+        : await tx.imeiRecord.create({
+            data: {
+              ...unitIdentityColumns({ kind: oldIdentityKind, imei1: oldDeviceId, imei2: oldImei2 }),
+              ...swapInData,
+            },
+          })
 
       const created = await tx.swap.create({
         data: {
@@ -2912,6 +2986,8 @@ export async function completeSwap(formData: FormData) {
 async function finishSwap(user: Awaited<ReturnType<typeof requireUser>>, formData: FormData) {
   const id = String(formData.get("id"))
   const paid = Number(formData.get("paidAmount") || 0)
+  // See applyReturn: what we owe and do not pay back now stays as credit.
+  const paidTyped = String(formData.get("paidAmount") ?? "").trim() !== ""
   // A Swap Deal is settled in cash or by bank transfer. By transfer, the named
   // bank account the money went into, or came out of, is picked.
   const method = (String(formData.get("method") || "TRANSFER") === "CASH" ? "CASH" : "TRANSFER") as PaymentMethod
@@ -2947,8 +3023,9 @@ async function finishSwap(user: Awaited<ReturnType<typeof requireUser>>, formDat
   const receivable = Math.max(balance, 0)
   const payable = Math.max(-balance, 0)
   const collected = Math.min(Math.max(0, paid), receivable || payable)
+  const payOut = paidTyped ? Math.min(collected, payable) : payable
   const payChannel = shopPayChannel(method)
-  const movesMoney = (receivable > 0 && collected > 0) || payable > 0
+  const movesMoney = (receivable > 0 && collected > 0) || payOut > 0
   const swapBank =
     payChannel !== "CASH" && movesMoney && bankAccountId
       ? await prisma.bankAccount.findFirst({ where: { id: bankAccountId, isActive: true } })
@@ -2960,8 +3037,7 @@ async function finishSwap(user: Awaited<ReturnType<typeof requireUser>>, formDat
     return { error: "Type the payment reference (transfer description or POS code) so this can be matched to the bank." }
   }
   const swapBankLabel = swapBank ? ` · ${swapBank.bankName} ${swapBank.accountNumber}` : ""
-  if (payable > 0 && payChannel === "CASH") {
-    const payOut = collected > 0 ? Math.min(collected, payable) : payable
+  if (payOut > 0 && payChannel === "CASH") {
     const cashGate = await assertCashAvailable(swap.branchId, payOut)
     if (!cashGate.ok) return { error: cashGate.error }
   }
@@ -3099,8 +3175,7 @@ async function finishSwap(user: Awaited<ReturnType<typeof requireUser>>, formDat
         },
       })
     }
-    if (payable > 0) {
-      const payOut = collected > 0 ? Math.min(collected, payable) : payable
+    if (payOut > 0) {
       await tx.financeEntry.create({
         data: {
           branchId: swap.branchId,
@@ -3113,6 +3188,12 @@ async function finishSwap(user: Awaited<ReturnType<typeof requireUser>>, formDat
         },
       })
     }
+    await keepOnAccount(tx, {
+      customerId: swap.customerId,
+      amount: payable - payOut,
+      reference: invoiceNumber,
+      what: `Swap Deal ${swap.swapNumber}`,
+    })
 
     await tx.auditLog.create({
       data: {
@@ -3120,7 +3201,7 @@ async function finishSwap(user: Awaited<ReturnType<typeof requireUser>>, formDat
         action: "UPDATE",
         entityType: "Swap",
         entityId: swap.swapNumber,
-        newValue: JSON.stringify({ invoiceNumber, collected, receivable, payable }),
+        newValue: JSON.stringify({ invoiceNumber, collected, receivable, payable, paidOut: payOut, keptOnAccount: payable - payOut }),
         branchId: swap.branchId,
       },
     })

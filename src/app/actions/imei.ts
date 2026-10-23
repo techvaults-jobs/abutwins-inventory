@@ -5,6 +5,7 @@ import { PRODUCT_SPEC_SELECT } from "@/lib/product-specs"
 import { IMEIStatus, type Prisma } from "@prisma/client"
 import { prisma } from "@/lib/prisma"
 import { recordMovement } from "@/lib/concurrency"
+import { shopError } from "@/lib/shop-speak"
 import { canReachBranch, viewBranchFilter } from "@/lib/branch-scope"
 import { requireUser } from "@/lib/session"
 import { canChangeCost, canManageCatalog, canSeeCost } from "@/lib/rbac"
@@ -27,6 +28,7 @@ import {
   unitIdentityLabel,
   type UnitIdentityKind,
 } from "@/lib/unit-identity"
+import { bookCameBack, sortComingBack, type CameBackUnit } from "@/lib/unit-comeback"
 
 /** Every number on the system that already names a unit, other than `exceptId`. */
 async function unitCodesTaken(codes: string[], exceptId?: string) {
@@ -206,9 +208,19 @@ export async function intakeImei(formData: FormData) {
     return { error: "Selling price cannot sit below the lowest sell." }
   }
 
+  // A phone that left the shop (sold, swapped out, written off, sent back to
+  // the supplier) and is here again comes in on its own record. Only a phone
+  // still in a shop, or in an open return or Swap Deal, is refused.
+  let cameBack: CameBackUnit | null = null
   if (tracked) {
-    const taken = await unitCodesTaken([identity.imei1, identity.imei2 ?? "", identity.serialNumber ?? ""])
-    if (taken.length) return { error: `Already on the system: ${taken.join(", ")}.` }
+    const codes = [identity.imei1, identity.imei2 ?? "", identity.serialNumber ?? ""].filter(Boolean)
+    const { back, held } = await sortComingBack(prisma, codes)
+    if (held.size) return { error: [...new Set(held.values())].join(" ") }
+    const units = new Set([...back.values()].map((unit) => unit.id))
+    if (units.size > 1) {
+      return { error: `${codes.join(", ")} belong to ${units.size} different phones on the system. Check the numbers.` }
+    }
+    cameBack = back.values().next().value ?? null
   }
 
   let supplierId = String(formData.get("supplierId") || "").trim()
@@ -240,6 +252,7 @@ export async function intakeImei(formData: FormData) {
       money(product.minimumPrice) !== minimumPrice ||
       money(product.sellingPrice) !== sellingPrice)
 
+  try {
   await prisma.$transaction(async (tx) => {
     if (priceChanged) {
       await tx.product.update({
@@ -252,7 +265,26 @@ export async function intakeImei(formData: FormData) {
       })
     }
 
-    if (tracked) {
+    if (tracked && cameBack) {
+      await bookCameBack(tx, cameBack, {
+        data: {
+          ...(identity.imei2 ? { imei2: identity.imei2 } : {}),
+          ...(identity.serialNumber ? { serialNumber: identity.serialNumber } : {}),
+          productId,
+          supplierId: supplierId || null,
+          branchId,
+          purchaseId: null,
+          status,
+          notes: String(formData.get("notes") || "") || "Came back into the shop",
+          cosmeticGrade,
+          batteryHealth: null,
+          conditionNotes: String(formData.get("conditionNotes") || "") || null,
+          photoData: String(formData.get("photoData") || "") || null,
+        },
+        reference: `Receive phone ${imei1}`,
+        userId: user.id,
+      })
+    } else if (tracked) {
       await tx.imeiRecord.create({
         data: {
           ...identity,
@@ -310,12 +342,17 @@ export async function intakeImei(formData: FormData) {
       },
     })
   })
+  } catch (error) {
+    return { error: shopError(error, "Could not receive this phone.") }
+  }
 
   revalidatePath("/imei")
   revalidatePath("/inventory")
   revalidatePath("/products")
   revalidatePath("/pos")
-  return { success: true }
+  return cameBack
+    ? { success: true, message: `${imei1} came back into the shop. Its earlier sale stays on its history.` }
+    : { success: true }
 }
 
 export async function updateImeiCondition(formData: FormData) {

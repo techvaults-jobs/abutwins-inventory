@@ -104,6 +104,11 @@ export default async function UploadsPage({ searchParams }: { searchParams: Prom
           <li>
             <span className="font-medium text-foreground">Same IMEI twice:</span> the system stops the copy. Nothing already in the shop is changed.
           </li>
+          <li>
+            <span className="font-medium text-foreground">A phone we sold that came back:</span> on a Supplier bill the system
+            lists it and asks if it really came back. Say yes and it is in stock again on its own record, with its earlier sale
+            still on its history.
+          </li>
         </ul>
       </div>
     </div>

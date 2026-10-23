@@ -3,6 +3,7 @@
 import { IncomingIdentity, IncomingStatus, type Prisma } from "@prisma/client"
 import { revalidatePath } from "next/cache"
 import { prisma } from "@/lib/prisma"
+import { LEFT_SHOP_STATUSES } from "@/lib/unit-comeback"
 import { recordMovement } from "@/lib/concurrency"
 import { can, isShopOwner } from "@/lib/permissions"
 import { canApprove, scopedBranchId } from "@/lib/rbac"
@@ -166,7 +167,11 @@ export async function createIncomingLot(formData: FormData) {
           const key = unitKey(identity, raw)
           const duplicate = await tx.imeiRecord.findFirst({
             where: { OR: [{ imei1: key }, { imei2: key }, { serialNumber: raw }] },
+            select: { status: true },
           })
+          if (duplicate && LEFT_SHOP_STATUSES.includes(duplicate.status)) {
+            throw new Error(`${raw} left the shop before and is back, so it is already here. Book it straight into stock, not as goods coming.`)
+          }
           if (duplicate) throw new Error(`${raw} is already on the system.`)
           if (identity === "IMEI" && raw.length < 14) throw new Error(`${raw} is not a valid IMEI.`)
           await tx.imeiRecord.create({

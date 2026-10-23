@@ -4,6 +4,7 @@ import { useMemo, useState } from "react"
 import Link from "next/link"
 import { completeSwap } from "@/app/actions/ops"
 import { ActionForm } from "@/components/action-form"
+import { DifferenceSettle } from "@/components/difference-settle"
 import { StatusBadge } from "@/components/shared"
 import { DataTable, type DataColumn } from "@/components/data-table"
 import { Sheet, SheetContent } from "@/components/ui/sheet"
@@ -364,29 +365,29 @@ function SwapDetail({ swap, banks, onDone }: { swap: SwapRow; banks: SwapBank[];
         <div className="space-y-2 rounded-xl border border-border p-4">
           <p className="text-sm font-medium">
             {receivable > 0
-              ? "Stock has moved. Collect what they owe and finish the invoice."
+              ? "Stock has moved. Say what they paid and finish the invoice. Anything unpaid goes on their account."
               : payable > 0
-                ? "Stock has moved. Pay the customer and finish the invoice."
+                ? "Stock has moved. Say what was paid back and finish the invoice. Anything not paid back stays on their account."
                 : "Stock has moved. Finish the invoice. No money either way."}
           </p>
           <ActionForm
             action={completeSwap}
-            submit={receivable > 0 ? "Collect & invoice" : payable > 0 ? "Pay & invoice" : "Finish invoice"}
+            submit={receivable > 0 || payable > 0 ? "Settle & invoice" : "Finish invoice"}
             successMessage="Swap finished and invoiced."
             className="grid gap-2 sm:grid-cols-2"
             onSuccess={onDone}
           >
             <input type="hidden" name="id" value={swap.id} />
-            <Input
-              name="paidAmount"
-              type="number"
-              defaultValue={receivable > 0 ? receivable : payable}
-              placeholder={receivable > 0 ? "Amount received" : payable > 0 ? "Amount paid out" : "0"}
-              aria-label="Amount"
-            />
-            {receivable > 0 || payable > 0 ? (
-              <SwapPaymentFields banks={banks} branchId={swap.branchId} payingOut={payable > 0} />
-            ) : null}
+            <div className="space-y-3 sm:col-span-2">
+              <DifferenceSettle
+                balance={swap.balanceAmount}
+                moneyFields={
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <SwapPaymentFields banks={banks} branchId={swap.branchId} payingOut={payable > 0} />
+                  </div>
+                }
+              />
+            </div>
           </ActionForm>
         </div>
       ) : null}

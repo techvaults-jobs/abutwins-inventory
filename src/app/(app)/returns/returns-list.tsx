@@ -5,6 +5,7 @@ import Link from "next/link"
 import { Package, Smartphone } from "lucide-react"
 import { completeReturn, correctReturnValue, restockReturn, undoReturnSendBack } from "@/app/actions/ops"
 import { ActionForm } from "@/components/action-form"
+import { DifferenceSettle } from "@/components/difference-settle"
 import { StatusBadge } from "@/components/shared"
 import { DataTable, type DataColumn } from "@/components/data-table"
 import { Sheet, SheetContent } from "@/components/ui/sheet"
@@ -312,7 +313,6 @@ function ApplyForm({
     : picked
       ? picked.product.sellingPrice - returnValue
       : 0
-  const receivable = Math.max(balance, 0)
   const payable = Math.max(-balance, 0)
   const refundOut = outcome === "REFUND" ? refundSplit(returnValue, row.invoice).paysBack : 0
   const choices = OUTCOME_CHOICES.filter((choice) => !("phoneOnly" in choice) || row.imei)
@@ -382,34 +382,31 @@ function ApplyForm({
               </Select>
             )}
             {!keepsAgreedReplacement && picked ? <BalanceFigure balance={balance} /> : null}
-            {receivable > 0 || payable > 0 ? (
-              <Input
-                name="paidAmount"
-                type="number"
-                key={`${pickedId}-${balance}`}
-                defaultValue={receivable > 0 ? receivable : payable}
-                placeholder={receivable > 0 ? "Amount received from customer (₦)" : "Amount paid to customer (₦)"}
-              />
-            ) : null}
-            {payable > 0 ? (
-              <>
-                <input type="hidden" name="method" value="TRANSFER" />
-                <BankPicker banks={banks} branchId={row.branchId} label="Pay the difference back from" required />
-              </>
-            ) : receivable > 0 ? (
-              <>
-                <Select name="method" value={method} onChange={(event) => setMethod(event.target.value)}>
-                  <option value="CASH">Cash</option>
-                  <option value="TRANSFER">Transfer</option>
-                  <option value="POS">POS</option>
-                </Select>
-                {method !== "CASH" ? (
-                  <BankPicker banks={banks} branchId={row.branchId} label="Which bank received it" required={false} />
-                ) : null}
-              </>
-            ) : null}
+            <DifferenceSettle
+              key={`${pickedId}-${balance}`}
+              balance={balance}
+              moneyFields={
+                payable > 0 ? (
+                  <>
+                    <input type="hidden" name="method" value="TRANSFER" />
+                    <BankPicker banks={banks} branchId={row.branchId} label="Pay the difference back from" required />
+                  </>
+                ) : (
+                  <>
+                    <Select name="method" value={method} onChange={(event) => setMethod(event.target.value)}>
+                      <option value="CASH">Cash</option>
+                      <option value="TRANSFER">Transfer</option>
+                      <option value="POS">POS</option>
+                    </Select>
+                    {method !== "CASH" ? (
+                      <BankPicker banks={banks} branchId={row.branchId} label="Which bank received it" required={false} />
+                    ) : null}
+                  </>
+                )
+              }
+            />
             <p className="text-sm text-muted-foreground">
-              Stock moves on Apply. Collect the receivable or pay the payable so the books match the event.
+              Stock moves on Apply. Whatever is not paid now goes on the customer&apos;s account.
             </p>
           </>
         ) : outcome === "REFUND" ? (

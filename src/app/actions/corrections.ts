@@ -7,6 +7,7 @@ import { requireUser } from "@/lib/session"
 import { canHardDelete, isShopOwner } from "@/lib/rbac"
 import { writeAudit } from "@/lib/audit"
 import { canReachBranch, OTHER_SHOP } from "@/lib/branch-scope"
+import { restoreCameBack } from "@/lib/unit-comeback"
 import { ConflictError, drawStock, returnStock, shiftCustomerBalance } from "@/lib/concurrency"
 import { assertCashAvailable, UNDO_COLLECTION_NOTE } from "@/lib/shop-cash"
 import { isOpeningStockPurchase } from "@/lib/purchase-money"
@@ -60,7 +61,7 @@ export async function cancelSale(formData: FormData) {
   if (!(await canReachBranch(user, sale.branchId))) return { error: OTHER_SHOP }
   if (sale.status !== "COMPLETED") return { error: "This sale is already cancelled." }
 
-  const [returns, swaps] = await Promise.all([
+  const [returns, swaps, swapInvoice] = await Promise.all([
     prisma.stockReturn.count({ where: { saleId: sale.id, status: { not: "REJECTED" } } }),
     prisma.swap.count({
       where: {
@@ -68,7 +69,14 @@ export async function cancelSale(formData: FormData) {
         status: { notIn: ["REJECTED", "CANCELLED"] },
       },
     }),
+    // A Swap Deal writes "Invoice INV-…" into its notes when it is settled.
+    prisma.swap.findFirst({ where: { status: "COMPLETED", notes: { contains: `Invoice ${sale.invoiceNumber}` } }, select: { swapNumber: true } }),
   ])
+  // Cancelling a swap's invoice put the phone given out back on the shelf but
+  // left the customer's phone in stock and the difference on the books.
+  if (swapInvoice) {
+    return { error: `${sale.invoiceNumber} is the invoice of Swap Deal ${swapInvoice.swapNumber}. A swap's invoice cannot be cancelled on its own.` }
+  }
   if (returns > 0) {
     return { error: "This sale has a return on it. A sale with a return cannot be cancelled; correct the return instead." }
   }
@@ -201,6 +209,19 @@ export async function cancelSale(formData: FormData) {
   return { success: true, message: `${sale.invoiceNumber} is cancelled. The goods are back in stock${moneyPaid > 0 ? ` and ${formatCurrency(moneyPaid)} is off the books` : ""}.` }
 }
 
+/** Whether a phone has had a sale, return, repair, swap or send-back since `since`. */
+async function usedSince(imeiId: string, since: Date) {
+  const after = { gt: since }
+  const counts = await Promise.all([
+    prisma.saleItem.count({ where: { imeiId, createdAt: after } }),
+    prisma.stockReturn.count({ where: { OR: [{ imeiId }, { replacementImeiId: imeiId }], createdAt: after } }),
+    prisma.repair.count({ where: { imeiId, createdAt: after } }),
+    prisma.swap.count({ where: { OR: [{ oldImeiId: imeiId }, { newImeiId: imeiId }], createdAt: after } }),
+    prisma.supplierReturnLine.count({ where: { imeiId, sentAt: after } }),
+  ])
+  return counts.some((count) => count > 0)
+}
+
 /**
  * Cancel a supplier bill booked by mistake: the wrong supplier, loaded twice,
  * or goods that never came. Everything the bill put on the shelf comes off,
@@ -255,8 +276,21 @@ export async function cancelSupplierBill(formData: FormData) {
   }
 
   const live = bill.imeiRecords.filter((unit) => unit.status !== "DISPOSED")
+  // A phone that came back on this bill had its history before the bill. It
+  // goes back to what it was (sold to its customer, with its supplier), not
+  // off the system, provided nothing has happened to it since.
+  const cameBack = new Set<string>()
   for (const unit of live) {
-    const history = Object.values(unit._count).some((count) => count > 0)
+    if (!Object.values(unit._count).some((count) => count > 0)) continue
+    const line = await prisma.auditLog.findFirst({
+      where: { entityType: "IMEIRecord", entityId: unit.imei1, newValue: { contains: `"cameBackOn":${JSON.stringify(bill.invoiceNumber)}` } },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
+    })
+    if (line && !(await usedSince(unit.id, line.createdAt))) cameBack.add(unit.id)
+  }
+  for (const unit of live) {
+    const history = !cameBack.has(unit.id) && Object.values(unit._count).some((count) => count > 0)
     if (!["IN_STOCK", "INCOMING", "RECEIVED"].includes(unit.status) || unit.branchId !== bill.branchId || history) {
       const where =
         unit.branchId !== bill.branchId
@@ -348,12 +382,22 @@ export async function cancelSupplierBill(formData: FormData) {
         })
       }
 
-      if (live.length) {
+      const leaving = live.filter((unit) => !cameBack.has(unit.id))
+      if (leaving.length) {
         const gone = await tx.imeiRecord.deleteMany({
-          where: { id: { in: live.map((unit) => unit.id) }, status: { in: ["IN_STOCK", "INCOMING", "RECEIVED"] }, branchId: bill.branchId },
+          where: { id: { in: leaving.map((unit) => unit.id) }, status: { in: ["IN_STOCK", "INCOMING", "RECEIVED"] }, branchId: bill.branchId },
         })
-        if (gone.count !== live.length) {
+        if (gone.count !== leaving.length) {
           throw new ConflictError("A phone on this bill was sold or moved while it was being cancelled. Open the bill again.")
+        }
+      }
+      for (const unit of live.filter((row) => cameBack.has(row.id))) {
+        const still = await tx.imeiRecord.updateMany({
+          where: { id: unit.id, status: { in: ["IN_STOCK", "INCOMING", "RECEIVED"] }, branchId: bill.branchId, purchaseId: bill.id },
+          data: { updatedAt: new Date() },
+        })
+        if (still.count !== 1 || !(await restoreCameBack(tx, unit, bill.invoiceNumber))) {
+          throw new ConflictError(`${unit.imei1} was sold or moved while this bill was being cancelled. Open the bill again.`)
         }
       }
 
@@ -369,6 +413,7 @@ export async function cancelSupplierBill(formData: FormData) {
             status: bill.status,
             lines: bill.items.map((line) => ({ name: line.product.name, quantity: line.quantity, cost: money(line.costPrice) })),
             units: live.map((unit) => unit.imei1),
+            putBackAsBefore: live.filter((unit) => cameBack.has(unit.id)).map((unit) => unit.imei1),
           }),
           newValue: JSON.stringify({
             status: "CANCELLED",

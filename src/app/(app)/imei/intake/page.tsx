@@ -79,8 +79,10 @@ export default async function ImeiIntakePage() {
               supplier is recorded with it. This screen updates item prices. It does not post a supplier bill.
             </li>
             <li>
-              <span className="font-medium text-foreground">A phone that is already on the system:</span> nothing
-              breaks. The record that is already there is left as it is.
+              <span className="font-medium text-foreground">A phone that is already on the system:</span> one still in a
+              shop is refused, so it is never booked twice. One that left the shop (sold, swapped out, written off or sent
+              back to the supplier) and is here again comes back into stock on its own record. Its earlier sale stays on its
+              history.
             </li>
           </ul>
         </SectionCard>

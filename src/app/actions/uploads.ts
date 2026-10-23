@@ -31,6 +31,7 @@ import { canSeeAllBranches } from "@/lib/rbac"
 import { purchaseBalance, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
 import { listPayingBanks, resolveSupplierPayChannel } from "@/lib/supplier-pay"
 import { assertCashAvailable } from "@/lib/shop-cash"
+import { bookCameBack, sortComingBack, type CameBackUnit } from "@/lib/unit-comeback"
 
 /**
  * Loading the shop system from a sheet or by hand.
@@ -82,6 +83,13 @@ export type UploadResult = {
   lotNumber?: string
   shops?: number
   shopNames?: string
+  /**
+   * Phones on the upload that were sold (or otherwise left the shop) before.
+   * Nothing was saved: staff say whether they came back, then upload again.
+   */
+  comeBack?: Array<{ code: string; label: string }>
+  /** Phones booked back in on their own record, having left the shop before. */
+  cameBack?: number
 }
 
 export type BatchUploadItem = {
@@ -141,6 +149,10 @@ export type BatchUploadPayload = {
   expectedDate?: string
   notes?: string
   items: BatchUploadItem[]
+  /** Numbers of phones that left the shop before and staff say came back: book them in again. */
+  comeBack?: string[]
+  /** Numbers of phones that left the shop before and staff say to leave out. */
+  leaveOut?: string[]
 }
 
 
@@ -1505,17 +1517,7 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
     if (!sPhone) return { error: "Type the new supplier phone number." }
     const clash = await findDuplicateSupplier({ name: sName, phone: sPhone })
     if (clash) return clash
-    const newSupp = await prisma.supplier.create({
-      data: {
-        name: sName,
-        phone: sPhone,
-        country: payload.newSupplierCountry?.trim() || null,
-        city: payload.newSupplierCity?.trim() || null,
-        kind: "SUPPLIER",
-      },
-    })
-    supplierId = newSupp.id
-    supplierName = newSupp.name
+    supplierName = sName
   } else if (supplierId) {
     const supp = await prisma.supplier.findUnique({ where: { id: supplierId } })
     if (!supp) return { error: "We could not find that supplier." }
@@ -1598,20 +1600,42 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
     item.tracking === "IMEI" || item.tracking === "SERIAL" ? item.identities || [] : []
   )
 
+  // A number already on the system is either a phone still in a shop (left
+  // as it is, never doubled) or one that left the shop and came back. Those
+  // come in again on their own record, once staff say they really came back:
+  // a container sheet sent twice must never put sold phones back on the shelf.
   const alreadyOnSystem = new Set<string>()
+  const cameBackByCode = new Map<string, CameBackUnit>()
   if (allIdentities.length > 0) {
     for (const batch of chunks(allIdentities, WRITE_CHUNK)) {
-      const existingInDb = await prisma.imeiRecord.findMany({
-        where: {
-          OR: [{ imei1: { in: batch } }, { serialNumber: { in: batch } }],
-        },
-        select: { imei1: true, serialNumber: true },
-      })
-      for (const row of existingInDb) {
-        if (row.imei1) alreadyOnSystem.add(row.imei1)
-        if (row.serialNumber) alreadyOnSystem.add(row.serialNumber)
-      }
+      const { back, held } = await sortComingBack(prisma, batch)
+      for (const code of held.keys()) alreadyOnSystem.add(code)
+      for (const [code, unit] of back) cameBackByCode.set(code, unit)
     }
+  }
+  const confirmedBack = new Set(payload.comeBack ?? [])
+  const leftOut = new Set(payload.leaveOut ?? [])
+  const unanswered = [...cameBackByCode].filter(([code]) => !confirmedBack.has(code) && !leftOut.has(code))
+  if (unanswered.length) {
+    return {
+      error: `${unanswered.length} phone(s) on this upload left the shop before (sold, swapped out, written off or sent back to the supplier). Say whether they came back to us. Nothing was saved yet.`,
+      comeBack: unanswered.map(([code, unit]) => ({ code, label: unit.label })),
+    }
+  }
+  const comingBack = new Map([...cameBackByCode].filter(([code]) => confirmedBack.has(code)))
+  if (comingBack.size && payload.onTheWay) {
+    return {
+      error: `${[...comingBack.keys()].slice(0, 5).join(", ")} came back to us, so ${comingBack.size === 1 ? "it is" : "they are"} already here. Upload ${comingBack.size === 1 ? "it" : "them"} as arrived, not as goods still on the way.`,
+    }
+  }
+  // Two numbers of one phone (IMEI 1 and IMEI 2) on the same upload book it once.
+  const bookedBack = new Set<string>()
+  for (const [code, unit] of comingBack) {
+    if (bookedBack.has(unit.id)) {
+      comingBack.delete(code)
+      alreadyOnSystem.add(code)
+    }
+    bookedBack.add(unit.id)
   }
 
   const itemsToLoad: typeof normalizedItems = []
@@ -1622,7 +1646,9 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
       itemsToLoad.push(item)
       continue
     }
-    const fresh = (item.identities || []).filter((id) => !alreadyOnSystem.has(id))
+    const fresh = (item.identities || []).filter(
+      (id) => !alreadyOnSystem.has(id) && (!cameBackByCode.has(id) || comingBack.has(id))
+    )
     const dropped = (item.identities || []).length - fresh.length
     if (dropped > 0) skippedExisting += dropped
     if (!fresh.length) continue
@@ -1630,8 +1656,11 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
   }
   if (skippedExisting > 0) {
     softNotes.push(
-      `${skippedExisting} IMEI or serial number(s) were already on the system. Each stays as one entry and was not doubled. Staff can edit stock later on Phones and items or Correct and close opening stock.`
+      `${skippedExisting} IMEI or serial number(s) were already on the system${leftOut.size ? " or were left out" : ""}. Each stays as one entry and was not doubled. Staff can edit stock later on Phones and items or Correct and close opening stock.`
     )
+  }
+  if (comingBack.size) {
+    softNotes.push(`${comingBack.size} phone(s) came back to us and are in stock again. Their earlier sale stays on their history.`)
   }
 
   if (!itemsToLoad.length) {
@@ -1835,6 +1864,21 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
   if (payChannel && payChannel.account === "CASH") {
     const cashGate = await assertCashAvailable(shop.id, amountPaid)
     if (!cashGate.ok) return { error: cashGate.error }
+  }
+  // A new supplier is written only now, once the upload has passed every
+  // check: an upload sent back to confirm returning phones used to leave the
+  // supplier behind, and the second try was refused as a duplicate.
+  if (!supplierId && payload.newSupplierName) {
+    const newSupp = await prisma.supplier.create({
+      data: {
+        name: supplierName,
+        phone: (payload.newSupplierPhone || "").trim(),
+        country: payload.newSupplierCountry?.trim() || null,
+        city: payload.newSupplierCity?.trim() || null,
+        kind: "SUPPLIER",
+      },
+    })
+    supplierId = newSupp.id
   }
   const balanceOwed = Math.max(0, payable - amountPaid)
   const fullyPaid = billAfter.payable > 0 && balanceOwed <= 0.005
@@ -2045,7 +2089,21 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
       // If IMEI / SERIAL, insert individual records
       if (tracked) {
         totalPhones += item.identities.length
-        const unitRows = item.identities.map((id) => {
+        for (const id of item.identities.filter((code) => comingBack.has(code))) {
+          await bookCameBack(tx, comingBack.get(id)!, {
+            data: {
+              productId: item.productId,
+              branchId: shop.id,
+              supplierId,
+              purchaseId: po.id,
+              status: "IN_STOCK",
+              notes: `Came back · Uploaded via Stock Upload · ${invoiceNumber}`,
+            },
+            reference: invoiceNumber,
+            userId: user.id,
+          })
+        }
+        const unitRows = item.identities.filter((code) => !comingBack.has(code)).map((id) => {
           const isImei = item.tracking === "IMEI"
           const imeiDigits = isImei ? id.replace(/\D/g, "") : null
           return {
@@ -2131,6 +2189,7 @@ export async function batchUploadStock(payload: BatchUploadPayload): Promise<Upl
     products: totalProductsAdded,
     added: totalPhones + totalPieces,
     skipped: skippedExisting,
+    cameBack: comingBack.size,
     duplicates: softNotes.filter((n) => n.includes("more than once") || n.includes("duplicate")).length,
     problems: softNotes.length ? softNotes.slice(0, 40) : undefined,
   }
