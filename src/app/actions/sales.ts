@@ -1,10 +1,10 @@
 "use server"
 
 import { revalidatePath } from "next/cache"
-import { PaymentMethod } from "@prisma/client"
+import { PaymentMethod, type Prisma } from "@prisma/client"
 import { prisma } from "@/lib/prisma"
 import { requireUser } from "@/lib/session"
-import { canManageFinance, canSeeAllBranches, canSeeCost, canSell, scopedBranchId } from "@/lib/rbac"
+import { canManageFinance, canSeeAllBranches, canSeeCost, canSell, isShopOwner, scopedBranchId } from "@/lib/rbac"
 import { can } from "@/lib/permissions"
 import { getAppSettings, lowStockLimit } from "@/lib/settings"
 import { letterheadFromSettings } from "@/lib/letterhead"
@@ -12,9 +12,9 @@ import { formatCurrency, generateDocNumber, money } from "@/lib/utils"
 import { ConflictError, claimImei, creditInvoice, drawStock, settle, shiftCustomerBalance } from "@/lib/concurrency"
 import { canReachBranch, OTHER_SHOP, resolveWritableShopId, scopeRecord, viewBranchFilter } from "@/lib/branch-scope"
 import { markParkedPosted } from "@/app/actions/parked"
-import { isBlockedFromSell } from "@/lib/phone-look"
 import { reservedTransferImeiSet, reservedSwapImeiSet } from "@/app/actions/ops"
 import { shopPayChannel } from "@/lib/sale-money"
+import { statusLabel } from "@/lib/status"
 import { ON_ACCOUNT_NOTE } from "@/lib/shop-cash"
 import { belowCost, blindTillPrices, discountOff, sellFloor, type PriceBasis } from "@/lib/pricing"
 import { readPriceApproval } from "@/lib/price-approval"
@@ -85,7 +85,7 @@ export async function getPosLookups() {
   const showCost = canSeeCost(user.role)
   const [products, customers, imeis, branches, bankAccounts] = await Promise.all([
     prisma.product.findMany({
-      where: { isActive: true, condition: { not: "FAULTY" } },
+      where: { isActive: true },
       include: {
         brand: true,
         category: true,
@@ -100,12 +100,10 @@ export async function getPosLookups() {
     }),
     prisma.imeiRecord.findMany({
       where: {
+        // In shop is sellable, whatever the phone's look or its item's
+        // condition: a phone sold as Faulty is still stock. A phone set
+        // Damaged leaves In shop (status FAULTY), which is what keeps it off.
         status: "IN_STOCK",
-        // A phone with no cosmetic grade recorded is an ordinary phone, not a
-        // faulty one. `NOT: { cosmeticGrade: "FAULTY" }` drops those rows, because
-        // SQL cannot compare NULL to a word — it hid every ungraded phone.
-        OR: [{ cosmeticGrade: null }, { cosmeticGrade: { not: "FAULTY" } }],
-        product: { condition: { not: "FAULTY" } },
         ...(branchId ? { branchId } : {}),
       },
       include: { product: { include: { brand: true, category: true } }, branch: true },
@@ -245,18 +243,18 @@ export async function findInStockImei(code: string, branchId?: string) {
   const shopGate = await resolveWritableShopId(user, branchId)
   if ("error" in shopGate) return { error: shopGate.error }
   const shop = shopGate.shopId
+  // The same number IMEI search finds: either IMEI on the box, or the serial
+  // in any case. Scanning the second IMEI used to come back "not in this shop".
+  const sameNumber: Prisma.ImeiRecordWhereInput[] = [
+    { imei1: cleaned },
+    { imei2: cleaned },
+    { serialNumber: { equals: cleaned, mode: "insensitive" } },
+  ]
   const item = await prisma.imeiRecord.findFirst({
-    where: {
-      status: "IN_STOCK",
-      branchId: shop,
-      OR: [{ imei1: cleaned }, { serialNumber: cleaned }],
-    },
+    where: { status: "IN_STOCK", branchId: shop, OR: sameNumber },
     include: { product: { include: { brand: true, category: true } } },
   })
-  if (!item) return { error: "That IMEI is not in this shop. Check Goods on the way, or check the shop." }
-  if (isBlockedFromSell({ cosmeticGrade: item.cosmeticGrade, productCondition: item.product.condition })) {
-    return { error: "That phone is Damaged. It cannot be sold. Open All phones and Set Good (sellable) if it is fixed." }
-  }
+  if (!item) return { error: await whyNotOnTill(sameNumber, shop) }
   const reserved = await reservedTransferImeiSet(item.branchId)
   if (reserved.has(item.imei1) || (item.serialNumber && reserved.has(item.serialNumber))) {
     return {
@@ -271,6 +269,28 @@ export async function findInStockImei(code: string, branchId?: string) {
     }
   }
   return { imei: mapTillImei(item, canSeeCost(user.role)) }
+}
+
+/** Why a phone IMEI search can see is not on this till, in words the cashier can act on. */
+async function whyNotOnTill(sameNumber: Prisma.ImeiRecordWhereInput[], shop: string) {
+  const found = await prisma.imeiRecord.findFirst({
+    where: { OR: sameNumber },
+    include: { branch: { select: { name: true } } },
+    orderBy: { updatedAt: "desc" },
+  })
+  if (!found) return "That IMEI is not on the system. Check the number, or receive the phone first."
+  const there = found.branchId === shop ? "in this shop" : `at ${found.branch.name}`
+  if (found.status === "IN_STOCK") {
+    return `That phone is In shop ${there}, not here. Pick ${found.branch.name} at the top of Sell now, or send it here by transfer.`
+  }
+  if (found.status === "FAULTY") {
+    return `That phone is set Damaged ${there}, so it is off Sell now. Open it in IMEI search and press Set Good (sellable), then scan it again.`
+  }
+  if (found.status === "SOLD") return "That phone is already sold. Open it in IMEI search to see the sale."
+  if (found.status === "RECEIVED" || found.status === "INCOMING") {
+    return "That phone is still on Goods on the way. Receive it into the shop first."
+  }
+  return `That phone is ${statusLabel(found.status)} ${there}, not In shop, so it cannot be sold.`
 }
 
 /**
@@ -305,16 +325,12 @@ export async function searchTillStock(query: string, branchId?: string) {
   const [imeiRows, productRows] = await Promise.all([
     prisma.imeiRecord.findMany({
       where: {
+        // In shop is sellable. See getPosLookups.
         status: "IN_STOCK",
         branchId: shop,
-        // A phone with no cosmetic grade recorded is an ordinary phone, not a
-        // faulty one. `NOT: { cosmeticGrade: "FAULTY" }` drops those rows, because
-        // SQL cannot compare NULL to a word — it hid every ungraded phone.
-        // This sits in AND so it cannot displace the search's own OR below.
-        AND: [{ OR: [{ cosmeticGrade: null }, { cosmeticGrade: { not: "FAULTY" } }] }],
-        product: { condition: { not: "FAULTY" } },
         OR: [
           { imei1: { contains: imeiDigits, mode: "insensitive" } },
+          { imei2: { contains: imeiDigits, mode: "insensitive" } },
           { serialNumber: { contains: cleaned, mode: "insensitive" } },
           { product: { name: { contains: cleaned, mode: "insensitive" } } },
           { product: { storage: { contains: cleaned, mode: "insensitive" } } },
@@ -331,7 +347,6 @@ export async function searchTillStock(query: string, branchId?: string) {
       where: {
         isActive: true,
         tracking: "NONE",
-        condition: { not: "FAULTY" },
         inventory: { some: { branchId: shop, quantity: { gt: 0 } } },
         OR: [
           { name: { contains: cleaned, mode: "insensitive" } },
@@ -356,6 +371,7 @@ export async function searchTillStock(query: string, branchId?: string) {
     .filter((row) => {
       const hay = [
         row.imei1,
+        row.imei2 ?? "",
         row.serialNumber ?? "",
         row.product.name,
         row.product.storage ?? "",
@@ -367,7 +383,7 @@ export async function searchTillStock(query: string, branchId?: string) {
       ]
         .join(" ")
         .toLowerCase()
-      return hay.includes(q) || row.imei1.includes(imeiDigits)
+      return hay.includes(q) || row.imei1.includes(imeiDigits) || Boolean(row.imei2?.includes(imeiDigits))
     })
     .slice(0, 20)
     .map((row) => mapTillImei(row, canSeeCost(user.role)))
@@ -590,9 +606,6 @@ export async function checkoutSale(input: {
   for (const [lineIndex, item] of input.items.entries()) {
     const product = productById.get(item.productId)
     if (!product) return { error: "One of the items in the cart is missing." }
-    if (isBlockedFromSell({ productCondition: product.condition })) {
-      return { error: `${product.name} is Damaged and cannot be sold.` }
-    }
     if (!Number.isFinite(item.quantity) || item.quantity < 1) {
       return { error: `Enter how many ${product.name} the customer is buying.` }
     }
@@ -650,9 +663,6 @@ export async function checkoutSale(input: {
       const imei = imeiById.get(item.imeiId)
       if (!imei || imei.status !== "IN_STOCK") return { error: `IMEI ${imei?.imei1 ?? ""} is not available.` }
       if (imei.branchId !== saleShopId) return { error: `${imei.imei1} is not in this shop.` }
-      if (isBlockedFromSell({ cosmeticGrade: imei.cosmeticGrade, productCondition: imei.product.condition })) {
-        return { error: `${imei.imei1} is Damaged and cannot be sold.` }
-      }
       if (reservedOnTransfer.has(imei.imei1)) {
         return {
           error: `${imei.imei1} is on a shop-to-shop transfer waiting for accept or reject. It cannot be sold yet.`,
@@ -1597,7 +1607,21 @@ export async function attachSaleCustomer(formData: FormData) {
     include: { items: true, imeis: true },
   })
   if (!sale) return { error: "We could not find that sale." }
-  if (sale.customerId) return { error: "This sale already has a buyer name. The items stay as they are." }
+  // Putting the wrong buyer right is a correction: the CEO and the main admin.
+  const previousCustomerId = sale.customerId
+  if (previousCustomerId) {
+    if (!isShopOwner(user.role)) {
+      return { error: "This sale already has a buyer name. Only the CEO or the main admin can change it." }
+    }
+    if (sale.status === "CANCELLED") return { error: "This sale was cancelled. Its buyer stays as it was." }
+    if (money(sale.creditNoteUsed) > 0) {
+      return { error: "Part of this sale was paid from the buyer's credit note, so the buyer cannot be changed. Cancel the sale and sell it again." }
+    }
+    const returned = await prisma.stockReturn.count({ where: { saleId: sale.id } })
+    if (returned > 0) {
+      return { error: "Something on this sale was already returned, so the buyer cannot be changed. Cancel the sale and sell it again." }
+    }
+  }
 
   const scoped = await scopedBranchId(user.role, user.branchId)
   if (scoped && sale.branchId !== scoped) return { error: "You can only add a customer name on sales from your own shop." }
@@ -1626,6 +1650,7 @@ export async function attachSaleCustomer(formData: FormData) {
   }
 
   const due = money(sale.totalAmount) - money(sale.paidAmount)
+  if (previousCustomerId === customer.id) return { error: `${customer.name} is already the buyer on this sale.` }
   if (due > 0) {
     const next = money(customer.currentBalance) + due
     const limit = money(customer.creditLimit)
@@ -1642,11 +1667,25 @@ export async function attachSaleCustomer(formData: FormData) {
       // Only attach if the sale is still a walk-in. Two clerks naming the same
       // invoice at once would otherwise post the debt to the customer twice.
       const claimed = await tx.sale.updateMany({
-        where: { id: sale.id, customerId: null },
+        where: { id: sale.id, customerId: previousCustomerId },
         data: { customerId: buyer.id },
       })
       if (claimed.count !== 1) {
         throw new ConflictError("Someone else just put a customer name on this sale. Refresh to see it.")
+      }
+      // What the wrong buyer still owed on this sale comes off their account.
+      if (previousCustomerId && due > 0) {
+        const before = await shiftCustomerBalance(tx, previousCustomerId, -due)
+        await tx.ledgerEntry.create({
+          data: {
+            customerId: previousCustomerId,
+            type: "ADJUSTMENT",
+            amount: (-due).toFixed(2),
+            balance: money(before.currentBalance).toFixed(2),
+            reference: sale.invoiceNumber,
+            description: `${sale.invoiceNumber} moved to ${buyer.name}: it was put on the wrong buyer`,
+          },
+        })
       }
       await tx.imeiRecord.updateMany({
         where: { saleId: sale.id },
@@ -1661,7 +1700,9 @@ export async function attachSaleCustomer(formData: FormData) {
             amount: due.toFixed(2),
             balance: money(after.currentBalance).toFixed(2),
             reference: sale.invoiceNumber,
-            description: `A buyer name was put on the unpaid sale ${sale.invoiceNumber}`,
+            description: previousCustomerId
+              ? `${sale.invoiceNumber} moved here from another buyer`
+              : `A buyer name was put on the unpaid sale ${sale.invoiceNumber}`,
           },
         })
       }
@@ -1671,7 +1712,7 @@ export async function attachSaleCustomer(formData: FormData) {
           action: "UPDATE",
           entityType: "Sale",
           entityId: sale.invoiceNumber,
-          oldValue: "WALK_IN",
+          oldValue: previousCustomerId ? JSON.stringify({ customerId: previousCustomerId }) : "WALK_IN",
           newValue: JSON.stringify({ customerId: buyer.id, customer: buyer.name, itemsUntouched: true, due }),
           branchId: sale.branchId,
         },
@@ -1684,6 +1725,7 @@ export async function attachSaleCustomer(formData: FormData) {
   revalidatePath("/sales")
   revalidatePath(`/sales/${sale.id}`)
   revalidatePath(`/customers/${customer.id}`)
+  if (previousCustomerId) revalidatePath(`/customers/${previousCustomerId}`)
   revalidatePath("/customers")
   revalidatePath("/returns")
   revalidatePath("/imei")

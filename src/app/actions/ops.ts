@@ -1347,12 +1347,8 @@ export async function getInStockForReplace() {
     shopIds.map((shopId) =>
       prisma.imeiRecord.findMany({
         where: {
+          // In shop is sellable, the same as Sell now (see getPosLookups).
           status: "IN_STOCK",
-          // A phone with no cosmetic grade recorded is an ordinary phone, not a
-          // faulty one. `NOT: { cosmeticGrade: "FAULTY" }` drops those rows, because
-          // SQL cannot compare NULL to a word — it hid every ungraded phone.
-          OR: [{ cosmeticGrade: null }, { cosmeticGrade: { not: "FAULTY" } }],
-          product: { condition: { not: "FAULTY" } },
           branchId: shopId,
         },
         include: { product: true },

@@ -235,11 +235,19 @@ export default async function SaleDetailPage({
         </div>
         <PaymentTrail steps={paymentSteps} total={money(sale.totalAmount)} returned={returned} />
       </div>
-      {!sale.customerId && !cancelled ? (
+      {(!sale.customerId || isShopOwner(me.role)) && !cancelled ? (
         <div className="surface-card p-5 print:hidden">
-          <h3 className="mb-2 font-semibold">Attach named buyer</h3>
-          <p className="mb-3 text-sm text-muted-foreground">Warranty and returns need a name. Items and prices stay as they are.</p>
-          <ActionForm action={attachSaleCustomer} submit="Attach buyer" className="grid gap-3 md:grid-cols-2">
+          <h3 className="mb-2 font-semibold">{sale.customerId ? "Change the buyer" : "Attach named buyer"}</h3>
+          <p className="mb-3 text-sm text-muted-foreground">
+            {sale.customerId
+              ? "Put on the wrong customer? Pick the right one. Anything still owed on this sale moves to them. Items and prices stay as they are."
+              : "Warranty and returns need a name. Items and prices stay as they are."}
+          </p>
+          <ActionForm
+            action={attachSaleCustomer}
+            submit={sale.customerId ? "Change buyer" : "Attach buyer"}
+            className="grid gap-3 md:grid-cols-2"
+          >
             <input type="hidden" name="saleId" value={sale.id} />
             <Select name="customerId" defaultValue="" className="md:col-span-2">
               <option value="">Add a new customer below, or pick one from this shop</option>

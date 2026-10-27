@@ -21,7 +21,7 @@ export default async function StaffPage() {
   const admin = isSuperAdmin(me.role)
   const owner = isShopOwner(me.role)
   const ceo = canHardDelete(me.role)
-  const roles = (Object.keys(ROLE_LABELS) as UserRole[]).filter((role) => admin || role !== "SUPER_ADMIN")
+  const roles = (Object.keys(ROLE_LABELS) as UserRole[]).filter((role) => owner || role !== "SUPER_ADMIN")
   const activeShops = branches.filter((branch) => branch.isActive)
 
   return (
@@ -45,7 +45,7 @@ export default async function StaffPage() {
               canAdd &&
               user.id !== me.id &&
               (owner || (user.branchId && me.branchId && user.branchId === me.branchId)) &&
-              (admin || user.role !== "SUPER_ADMIN") &&
+              (owner || user.role !== "SUPER_ADMIN") &&
               (me.role === "CEO" || user.role !== "CEO")
 
             return (

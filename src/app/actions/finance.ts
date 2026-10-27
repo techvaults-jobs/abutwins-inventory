@@ -7,7 +7,7 @@ import { prisma } from "@/lib/prisma"
 import { setStock } from "@/lib/concurrency"
 import { branchFilter, canReachBranch, OTHER_SHOP, resolveWritableShopId, viewBranchFilter } from "@/lib/branch-scope"
 import { requireUser } from "@/lib/session"
-import { canApprove, canHardDelete, canManageFinance, canManageStaff, canEditLetterhead, canSeeAllBranches, canSetOpeningMoney, canSeeProfit, isShopOwner, isSuperAdmin, scopedBranchId } from "@/lib/rbac"
+import { canApprove, canHardDelete, canManageFinance, canManageStaff, canEditLetterhead, canSeeAllBranches, canSetOpeningMoney, canSeeProfit, isShopOwner, scopedBranchId } from "@/lib/rbac"
 import { can } from "@/lib/permissions"
 import { isLetterheadKey } from "@/lib/letterhead"
 import { formatCurrency, generateDocNumber, money } from "@/lib/utils"
@@ -1678,7 +1678,8 @@ export async function createStaff(formData: FormData) {
   const role = String(formData.get("role") || "SALES_EXECUTIVE") as UserRole
   const branchId = String(formData.get("branchId") || "") || null
 
-  if (role === "SUPER_ADMIN" && !isSuperAdmin(user.role)) {
+  // The CEO owns the business, so the CEO can hand someone main admin too.
+  if (role === "SUPER_ADMIN" && !isShopOwner(user.role)) {
     return { error: "Only the main admin can create another main admin." }
   }
   if (!name || !email || password.length < 8) {
@@ -1744,8 +1745,8 @@ export async function resetStaffPassword(formData: FormData) {
   if (target.role === "CEO" && user.role !== "CEO") {
     return { error: "Only the CEO can change the CEO's password." }
   }
-  if (target.role === "SUPER_ADMIN" && !isSuperAdmin(user.role)) {
-    return { error: "Only the main admin can reset another main admin's password." }
+  if (target.role === "SUPER_ADMIN" && !isShopOwner(user.role)) {
+    return { error: "Only the CEO or another main admin can reset a main admin's password." }
   }
   const managerScope = await branchFilter(user)
   if (managerScope && target.branchId !== managerScope) {
@@ -1799,14 +1800,15 @@ export async function updateStaff(formData: FormData) {
   const target = await prisma.user.findUnique({ where: { id } })
   if (!target) return { error: "We could not find that staff." }
 
-  if (role === "SUPER_ADMIN" && !isSuperAdmin(user.role)) {
-    return { error: "Only the main admin can make someone a main admin." }
+  // The CEO owns the business, so the CEO can hand someone main admin too.
+  if (role === "SUPER_ADMIN" && !isShopOwner(user.role)) {
+    return { error: "Only the CEO or the main admin can make someone a main admin." }
   }
   if ((target.role === "CEO" || role === "CEO") && user.role !== "CEO") {
     return { error: "Only the CEO can edit the CEO's login or make someone CEO." }
   }
-  if (target.role === "SUPER_ADMIN" && !isSuperAdmin(user.role)) {
-    return { error: "Only the main admin can edit another main admin." }
+  if (target.role === "SUPER_ADMIN" && !isShopOwner(user.role)) {
+    return { error: "Only the CEO or another main admin can edit a main admin." }
   }
   if (target.id === user.id && role !== target.role) {
     return { error: "You cannot change your own job. Ask another main admin." }

@@ -13,7 +13,10 @@ export function phoneLookLabel(value?: string | null) {
   return shopConditionLabel(value) || formatCondition(value)
 }
 
-/** Damaged (FAULTY) units must not sit on Sell now until staff set Good (sellable). */
+/**
+ * A Faulty look or item condition. Sell now no longer uses this: a phone is
+ * sellable while it is In shop, and Set Damaged is what takes it off.
+ */
 export function isFaultyBlocked(value?: string | null) {
   return String(value || "").trim().toUpperCase() === "FAULTY"
 }

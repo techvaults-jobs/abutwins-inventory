@@ -954,6 +954,54 @@ export async function updateBranch(formData: FormData) {
   return { success: true }
 }
 
+/**
+ * Take a shop off the system for good: one opened by mistake, or a test shop.
+ * Only a shop with nothing on it. A shop that has traded keeps its records,
+ * so it is closed instead: deleting it would take its sales and stock with it.
+ */
+export async function deleteBranch(formData: FormData) {
+  const user = await requireUser()
+  if (!isShopOwner(user.role)) return { error: "Only the main admin or the CEO can delete a shop." }
+  const id = String(formData.get("id") || "")
+  const branch = await prisma.branch.findUnique({
+    where: { id },
+    include: { _count: { select: { users: true, sales: true, imeiRecords: true, purchases: true } } },
+  })
+  if (!branch) return { error: "We could not find that shop." }
+  if ((await prisma.branch.count()) <= 1) return { error: "This is the only shop. Open another one before deleting it." }
+  if (branch._count.users > 0) {
+    return { error: `${branch._count.users} staff still work at ${branch.name}. Move them to another shop on Staff first.` }
+  }
+  const pieces = await prisma.inventory.aggregate({ where: { branchId: id }, _sum: { quantity: true } })
+  if (branch._count.sales || branch._count.imeiRecords || branch._count.purchases || (pieces._sum.quantity ?? 0) > 0) {
+    return {
+      error: `${branch.name} has sales, stock or supplier bills on it, so deleting it would wipe that history. Close the shop instead: it leaves Sell now and its records stay.`,
+    }
+  }
+  try {
+    await prisma.$transaction(async (tx) => {
+      await tx.branch.delete({ where: { id } })
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "DELETE",
+          entityType: "Branch",
+          entityId: branch.code,
+          oldValue: JSON.stringify({ name: branch.name, code: branch.code, address: branch.address }),
+        },
+      })
+    })
+  } catch (error) {
+    // Anything else still pointing at the shop (an expense, a bank, a count).
+    if ((error as { code?: string })?.code === "P2003") {
+      return { error: `${branch.name} still has money or stock records on it. Close the shop instead: its records stay.` }
+    }
+    return { error: shopError(error, "Could not delete this shop. Nothing changed.") }
+  }
+  revalidatePath("/branches")
+  return { success: true }
+}
+
 export async function toggleBranch(id: string) {
   const user = await requireUser()
   if (!isShopOwner(user.role)) return { error: "Only the main admin or the CEO can close a shop or open it again." }

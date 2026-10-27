@@ -18,7 +18,7 @@ import { applyParkedToTillSnapshot, readTillSnapshot, saveTillSnapshot, type Til
 import { formatCurrency, money } from "@/lib/utils"
 import { belowCost, lineMargin, needsReason, openingPrice, resellerPrice, sellFloor } from "@/lib/pricing"
 import { formatCondition } from "@/lib/status"
-import { phoneLookLabel, isBlockedFromSell } from "@/lib/phone-look"
+import { phoneLookLabel } from "@/lib/phone-look"
 import { BellRing, ChevronDown, Loader2, PlusCircle, RotateCcw, ScanLine, Trash2 } from "lucide-react"
 import { useDecision } from "@/hooks/use-decision"
 import { AnimatedNumber } from "@/components/animated-number"
@@ -765,10 +765,6 @@ export function PosClient({
   }
 
   function addImei(item: TillImei) {
-    if (isBlockedFromSell({ cosmeticGrade: item.cosmeticGrade, productCondition: item.product.condition })) {
-      toast.error("That phone is Damaged. It cannot be sold. Open All phones and Set Good (sellable) if it is fixed.")
-      return
-    }
     const basis = priceBasis(item.product)
     const opening = openingPrice(basis, { reseller: wholesale })
     setCart((current) => {
@@ -823,10 +819,6 @@ export function PosClient({
   }
 
   function addAccessory(product: TillProduct, pieces = 1) {
-    if (isBlockedFromSell({ productCondition: product.condition })) {
-      toast.error(`${product.name} is Damaged and cannot be sold.`)
-      return
-    }
     const onHand = product.stock.find((row) => row.branchId === branchId)?.quantity ?? 0
     if (onHand < 1) {
       toast.error(`${product.name} has no pieces left in this shop.`)

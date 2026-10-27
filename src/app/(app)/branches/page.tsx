@@ -1,6 +1,6 @@
 import Link from "next/link"
 import { Plus } from "lucide-react"
-import { getBranches, toggleBranch, updateBranch } from "@/app/actions/parties"
+import { deleteBranch, getBranches, toggleBranch, updateBranch } from "@/app/actions/parties"
 import { ActionForm } from "@/components/action-form"
 import { PageHeader } from "@/components/shared"
 import { Badge } from "@/components/ui/badge"
@@ -86,6 +86,21 @@ function ShopCard({
               </label>
             </ActionForm>
           </details>
+          <ActionForm
+            action={deleteBranch}
+            submit="Delete this shop"
+            variant="destructive"
+            successMessage="Shop deleted"
+            confirmModal={{
+              title: `Delete ${branch.name} for good?`,
+              description:
+                "Only a shop with no staff, sales, phones or supplier bills can be deleted. A shop that has traded is closed instead, so its records stay.",
+              confirmLabel: "Delete shop",
+              tone: "danger",
+            }}
+          >
+            <input type="hidden" name="id" value={branch.id} />
+          </ActionForm>
         </div>
       ) : null}
     </div>

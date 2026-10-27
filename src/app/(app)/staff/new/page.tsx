@@ -8,16 +8,15 @@ import { FormScreen } from "@/components/shared"
 import { Input } from "@/components/ui/input"
 import { PasswordInput } from "@/components/ui/password-input"
 import { Select } from "@/components/ui/select"
-import { canManageStaff, isShopOwner, isSuperAdmin, ROLE_LABELS } from "@/lib/rbac"
+import { canManageStaff, isShopOwner, ROLE_LABELS } from "@/lib/rbac"
 import { requireUser } from "@/lib/session"
 
 export default async function AddStaffPage() {
   const me = await requireUser()
   if (!(await canManageStaff(me.role))) redirect("/staff")
   const branches = await getBranches()
-  const admin = isSuperAdmin(me.role)
   const owner = isShopOwner(me.role)
-  const roles = (Object.keys(ROLE_LABELS) as UserRole[]).filter((role) => admin || role !== "SUPER_ADMIN")
+  const roles = (Object.keys(ROLE_LABELS) as UserRole[]).filter((role) => owner || role !== "SUPER_ADMIN")
   const activeShops = branches.filter((branch) => branch.isActive)
 
   return (
