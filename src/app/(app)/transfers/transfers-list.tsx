@@ -5,6 +5,8 @@ import Link from "next/link"
 import { Download, FileSpreadsheet } from "lucide-react"
 import { toast } from "sonner"
 import { receiveTransfer, rejectTransfer } from "@/app/actions/ops"
+import { cancelTransfer } from "@/app/actions/corrections"
+import { CancelRecordCard } from "@/components/cancel-record-card"
 import { ActionForm } from "@/components/action-form"
 import { StatusBadge } from "@/components/shared"
 import { DataTable, type DataColumn } from "@/components/data-table"
@@ -54,6 +56,8 @@ type TransferRow = {
   receivedBy: string | null
   /** May this person accept or reject it (receiving shop's manager, CEO, main admin)? */
   canDecide: boolean
+  /** May this person undo it after it was accepted (CEO, main admin)? */
+  canCancel: boolean
 }
 
 /** Accepted, but not all of it arrived. */
@@ -559,6 +563,22 @@ function TransferDetail({
           ) : null}
         </div>
       )}
+      {transfer.status === "RECEIVED" && transfer.canCancel ? (
+        <CancelRecordCard
+          bare
+          action={cancelTransfer}
+          idName="id"
+          id={transfer.id}
+          title="Cancel this transfer"
+          description="Accepted by mistake: the wrong shop, the wrong phones, or sent twice. Everything that arrived goes back to the sending shop."
+          submit="Cancel this transfer"
+          confirmTitle={`Cancel ${transfer.transferNumber}?`}
+          impact={[
+            `Everything that arrived leaves ${transfer.toBranch.name} and goes back In shop at ${transfer.fromBranch.name}.`,
+            "Refused if any of it was sold or moved on since.",
+          ]}
+        />
+      ) : null}
     </div>
   )
 }

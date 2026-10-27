@@ -5,11 +5,14 @@ import { PageHeader } from "@/components/shared"
 import { Button } from "@/components/ui/button"
 import { money } from "@/lib/utils"
 import { prisma } from "@/lib/prisma"
+import { isShopOwner } from "@/lib/rbac"
+import { requireUser } from "@/lib/session"
 import { SwapsList } from "./swaps-list"
 
 export default async function SwapsPage({ searchParams }: { searchParams: Promise<{ status?: string }> }) {
   const { status } = await searchParams
-  const [swaps, bankAccounts] = await Promise.all([
+  const [me, swaps, bankAccounts] = await Promise.all([
+    requireUser(),
     getSwaps(),
     prisma.bankAccount.findMany({
       where: { isActive: true },
@@ -67,6 +70,7 @@ export default async function SwapsPage({ searchParams }: { searchParams: Promis
           approvedByName: swap.approvedByName,
           settledBy: swap.settledBy,
           money: swap.money,
+          canCancel: isShopOwner(me.role),
         }))}
       />
     </div>

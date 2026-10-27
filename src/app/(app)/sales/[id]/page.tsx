@@ -26,6 +26,7 @@ import { prisma } from "@/lib/prisma"
 import { buildPaymentTrails } from "@/lib/payment-trail"
 import { PaymentTrail } from "@/components/payment-trail"
 import { CorrectSalePrice } from "./correct-sale-price"
+import { ChangeSalePhone } from "./change-sale-phone"
 import { FixPaymentMethod } from "./fix-payment-method"
 
 export default async function SaleDetailPage({
@@ -264,10 +265,11 @@ export default async function SaleDetailPage({
       ) : null}
       {(me.role === "CEO" || me.role === "SUPER_ADMIN") && sale.status === "COMPLETED" ? (
         <div className="surface-card p-5 print:hidden">
-          <h3 className="mb-2 font-semibold">Correct a price on this sale</h3>
+          <h3 className="mb-2 font-semibold">Correct a price or quantity on this sale</h3>
           <p className="mb-4 text-sm text-muted-foreground">
-            For a price typed wrong. The invoice total and the buyer&apos;s balance follow. If the money taken was typed
-            with the same slip, tick the box so it is corrected too. Who did what keeps the old figure and your reason.
+            For a price or a quantity typed wrong. The invoice total, the stock and the buyer&apos;s balance follow. If the
+            money taken was typed with the same slip, tick the box so it is corrected too. Who did what keeps the old
+            figures and your reason.
           </p>
           <CorrectSalePrice
             canFixMoney={sale.payments.length === 1}
@@ -276,8 +278,22 @@ export default async function SaleDetailPage({
               label: [item.product.name, item.imei?.imei1].filter(Boolean).join(" · "),
               quantity: item.quantity,
               unitPrice: money(item.unitPrice),
+              isPhone: Boolean(item.imei),
             }))}
           />
+          {sale.items.some((item) => item.imei) ? (
+            <div className="mt-5 border-t border-border pt-4">
+              <h4 className="mb-1 font-medium">Change the phone</h4>
+              <p className="mb-3 text-sm text-muted-foreground">
+                The wrong phone was scanned. It goes back In shop and the right one is sold in its place.
+              </p>
+              <ChangeSalePhone
+                lines={sale.items
+                  .filter((item) => item.imei)
+                  .map((item) => ({ id: item.id, label: `${item.product.name} · ${item.imei?.imei1}` }))}
+              />
+            </div>
+          ) : null}
         </div>
       ) : null}
       {isShopOwner(me.role) && sale.payments.length ? (

@@ -3,6 +3,8 @@
 import { useMemo, useState } from "react"
 import Link from "next/link"
 import { completeSwap } from "@/app/actions/ops"
+import { cancelSwap } from "@/app/actions/corrections"
+import { CancelRecordCard } from "@/components/cancel-record-card"
 import { ActionForm } from "@/components/action-form"
 import { DifferenceSettle } from "@/components/difference-settle"
 import { StatusBadge } from "@/components/shared"
@@ -46,6 +48,8 @@ type SwapRow = {
   settledBy: string | null
   /** Money that moved on the swap's invoice: received from, or paid out to, the customer. */
   money: Array<{ direction: "in" | "out"; amount: number; channel: string; bank: string | null; reference: string | null }>
+  /** May this person undo it (CEO, main admin)? */
+  canCancel: boolean
 }
 
 /** "Received ₦530,000 into FAIRMONEY 2006327917 · ref TRF8812" */
@@ -388,6 +392,23 @@ function SwapDetail({ swap, banks, onDone }: { swap: SwapRow; banks: SwapBank[];
             </div>
           </ActionForm>
         </div>
+      ) : null}
+      {(swap.status === "APPROVED" || swap.status === "COMPLETED") && swap.canCancel ? (
+        <CancelRecordCard
+          bare
+          action={cancelSwap}
+          idName="id"
+          id={swap.id}
+          title="Cancel this Swap Deal"
+          description="Typed by mistake: the wrong phone, the wrong values, or the deal fell through. Both phones and the money go back as before."
+          submit="Cancel this Swap Deal"
+          confirmTitle={`Cancel ${swap.swapNumber}?`}
+          impact={[
+            `${swap.newImei?.imei1 ?? "The shop phone"} comes back In shop.`,
+            `${swap.oldImei.imei1} leaves the shelf: it goes back to ${swap.customer.name}.`,
+            "Money taken on it comes off the till or the bank; money paid to the customer comes back in; their account is put back.",
+          ]}
+        />
       ) : null}
     </div>
   )

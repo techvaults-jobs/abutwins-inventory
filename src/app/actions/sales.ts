@@ -9,7 +9,7 @@ import { can } from "@/lib/permissions"
 import { getAppSettings, lowStockLimit } from "@/lib/settings"
 import { letterheadFromSettings } from "@/lib/letterhead"
 import { formatCurrency, generateDocNumber, money } from "@/lib/utils"
-import { ConflictError, claimImei, creditInvoice, drawStock, settle, shiftCustomerBalance } from "@/lib/concurrency"
+import { ConflictError, claimImei, creditInvoice, drawStock, returnStock, settle, shiftCustomerBalance } from "@/lib/concurrency"
 import { canReachBranch, OTHER_SHOP, resolveWritableShopId, scopeRecord, viewBranchFilter } from "@/lib/branch-scope"
 import { markParkedPosted } from "@/app/actions/parked"
 import { reservedTransferImeiSet, reservedSwapImeiSet } from "@/app/actions/ops"
@@ -1818,12 +1818,13 @@ export async function correctSaleLinePrice(formData: FormData) {
     return { error: "Only the CEO or the main admin can correct a finished sale." }
   }
   const saleItemId = String(formData.get("saleItemId") || "")
-  const nextPrice = money(Number(formData.get("unitPrice")))
+  const priceTyped = String(formData.get("unitPrice") ?? "").trim()
+  const quantityTyped = String(formData.get("quantity") ?? "").trim()
   const reason = String(formData.get("reason") || "").trim()
   const moneyTypedWrong = String(formData.get("moneyTypedWrong") || "") === "on"
   if (!saleItemId) return { error: "Pick the line to correct." }
-  if (!Number.isFinite(nextPrice) || nextPrice < 0) return { error: "Type the right price for one unit." }
-  if (reason.length < 4) return { error: "Say why the price is being corrected, for Who did what." }
+  if (!priceTyped && !quantityTyped) return { error: "Type the right price, the right quantity, or both." }
+  if (reason.length < 4) return { error: "Say why the line is being corrected, for Who did what." }
 
   const line = await prisma.saleItem.findUnique({
     where: { id: saleItemId },
@@ -1837,13 +1838,23 @@ export async function correctSaleLinePrice(formData: FormData) {
   if (!(await canReachBranch(user, sale.branchId))) return { error: OTHER_SHOP }
   if (sale.status !== "COMPLETED") return { error: "Only a finished sale can be corrected." }
   const oldPrice = money(line.unitPrice)
-  if (Math.abs(oldPrice - nextPrice) < 0.005) return { error: "That is already the price on this line." }
+  // Left blank, the price or the quantity stays as it is.
+  const nextPrice = priceTyped ? money(Number(priceTyped)) : oldPrice
+  if (!Number.isFinite(nextPrice) || nextPrice < 0) return { error: "Type the right price for one unit." }
+  const nextQty = quantityTyped ? Number(quantityTyped) : line.quantity
+  if (!Number.isInteger(nextQty) || nextQty < 1) {
+    return { error: "Type the right quantity, 1 or more. To take the whole line off, use a return or cancel the sale." }
+  }
+  if (line.imeiId && nextQty !== 1) return { error: "A phone line is always 1. To change the phone, use Change the phone." }
+  if (Math.abs(oldPrice - nextPrice) < 0.005 && nextQty === line.quantity) {
+    return { error: "That is already the price and quantity on this line." }
+  }
   const returns = await prisma.stockReturn.count({ where: { saleId: sale.id, status: { not: "REJECTED" } } })
   if (returns) {
     return { error: "Something on this sale has been returned, and the return was valued from these prices. Correct the return first, or ask for help." }
   }
 
-  const delta = money((nextPrice - oldPrice) * line.quantity)
+  const delta = money(nextPrice * nextQty - oldPrice * line.quantity)
   const subtotal = money(money(sale.subtotal) + delta)
   const discount = money(sale.discount)
   if (discount > subtotal + 0.005) return { error: "The order discount on this sale would be more than the corrected sale." }
@@ -1898,12 +1909,30 @@ export async function correctSaleLinePrice(formData: FormData) {
       await tx.saleItem.update({
         where: { id: line.id },
         data: {
+          quantity: nextQty,
           unitPrice: nextPrice.toFixed(2),
-          totalPrice: (nextPrice * line.quantity).toFixed(2),
-          discount: discountOff(money(line.listPrice), nextPrice, line.quantity).toFixed(2),
+          totalPrice: (nextPrice * nextQty).toFixed(2),
+          discount: discountOff(money(line.listPrice), nextPrice, nextQty).toFixed(2),
           priceReason: `Corrected: ${reason}`,
         },
       })
+      // More pieces sold come off the shelf; fewer go back on it.
+      if (nextQty > line.quantity) {
+        await drawStock(tx, {
+          productId: line.productId,
+          branchId: sale.branchId,
+          quantity: nextQty - line.quantity,
+          label: line.product.name,
+          move: { kind: "SALE", reference: sale.invoiceNumber, userId: user.id },
+        })
+      } else if (nextQty < line.quantity) {
+        await returnStock(tx, {
+          productId: line.productId,
+          branchId: sale.branchId,
+          quantity: line.quantity - nextQty,
+          move: { kind: "SALE_REVERSED", reference: sale.invoiceNumber, userId: user.id },
+        })
+      }
       // Only over the figures read above. Money collected on this invoice, or
       // another line corrected, in the meantime would otherwise be written over.
       const rewritten = await tx.sale.updateMany({
@@ -1935,7 +1964,7 @@ export async function correctSaleLinePrice(formData: FormData) {
             amount: balanceShift.toFixed(2),
             balance: money(after.currentBalance).toFixed(2),
             reference: sale.invoiceNumber,
-            description: `Price corrected on ${sale.invoiceNumber}: sale now ${formatCurrency(total)}`,
+            description: `Line corrected on ${sale.invoiceNumber}: sale now ${formatCurrency(total)}`,
           },
         })
       }
@@ -1945,15 +1974,16 @@ export async function correctSaleLinePrice(formData: FormData) {
           action: "UPDATE",
           entityType: "Sale",
           entityId: sale.invoiceNumber,
-          oldValue: JSON.stringify({ item: line.product.name, unitPrice: oldPrice, total: money(sale.totalAmount), paid: settled }),
+          oldValue: JSON.stringify({ item: line.product.name, quantity: line.quantity, unitPrice: oldPrice, total: money(sale.totalAmount), paid: settled }),
           newValue: JSON.stringify({
             item: line.product.name,
+            quantity: nextQty,
             unitPrice: nextPrice,
             total,
             paid: nextPaid,
             moneyCorrected: paymentFix ? { from: paymentFix.from, to: paymentFix.to, method: paymentFix.method } : null,
             reason,
-            note: `Price of ${line.product.name} on ${sale.invoiceNumber} corrected from ${formatCurrency(oldPrice)} to ${formatCurrency(nextPrice)}. Sale now ${formatCurrency(total)}.`,
+            note: `${line.product.name} on ${sale.invoiceNumber} corrected from ${line.quantity} × ${formatCurrency(oldPrice)} to ${nextQty} × ${formatCurrency(nextPrice)}. Sale now ${formatCurrency(total)}.`,
           }),
           branchId: sale.branchId,
           risk: "HIGH",
@@ -1970,6 +2000,119 @@ export async function correctSaleLinePrice(formData: FormData) {
   revalidatePath("/dashboard")
   revalidatePath("/reports")
   revalidatePath("/profits")
+  if (nextQty !== line.quantity) {
+    revalidatePath("/inventory")
+    revalidatePath("/pos")
+  }
   if (sale.customerId) revalidatePath(`/customers/${sale.customerId}`)
   return { success: true }
+}
+
+/**
+ * The wrong phone was scanned on a sale: put the right one on the line. The
+ * phone typed wrong goes back In shop, the right one is sold in its place.
+ * The price stays as it was (correct it on its own if it was wrong too); the
+ * line takes the right phone's item and cost, so profit reads true.
+ */
+export async function changeSalePhone(formData: FormData) {
+  const user = await requireUser()
+  if (!isShopOwner(user.role)) return { error: "Only the CEO or the main admin can change the phone on a finished sale." }
+  const saleItemId = String(formData.get("saleItemId") || "")
+  const code = String(formData.get("imei") || "").replace(/[\s-]/g, "").trim()
+  const reason = String(formData.get("reason") || "").trim()
+  if (!saleItemId) return { error: "Pick the line with the wrong phone." }
+  if (!code) return { error: "Scan or type the IMEI of the phone that was really sold." }
+  if (reason.length < 4) return { error: "Say why the phone is being changed, for Who did what." }
+
+  const line = await prisma.saleItem.findUnique({
+    where: { id: saleItemId },
+    include: { product: { select: { name: true } }, imei: true, sale: true },
+  })
+  if (!line) return { error: "We could not find that line." }
+  const sale = line.sale
+  if (!(await canReachBranch(user, sale.branchId))) return { error: OTHER_SHOP }
+  if (sale.status !== "COMPLETED") return { error: "Only a finished sale can be corrected." }
+  if (!line.imei) return { error: "That line has no phone on it. Correct its quantity instead." }
+  if (line.imei.status !== "SOLD" || line.imei.saleId !== sale.id) {
+    return { error: `${line.imei.imei1} is no longer sold on this sale (it was returned or moved). Undo that first.` }
+  }
+  const returns = await prisma.stockReturn.count({ where: { saleId: sale.id, status: { not: "REJECTED" } } })
+  if (returns) return { error: "Something on this sale has been returned. Correct the return first." }
+
+  const sameNumber: Prisma.ImeiRecordWhereInput[] = [
+    { imei1: code },
+    { imei2: code },
+    { serialNumber: { equals: code, mode: "insensitive" } },
+  ]
+  const right = await prisma.imeiRecord.findFirst({
+    where: { status: "IN_STOCK", branchId: sale.branchId, OR: sameNumber },
+    include: { product: { select: { name: true, costPrice: true } } },
+  })
+  if (!right) return { error: await whyNotOnTill(sameNumber, sale.branchId) }
+  if (right.id === line.imei.id) return { error: "That is already the phone on this line." }
+  const [onTransfer, onSwap] = await Promise.all([reservedTransferImeiSet(sale.branchId), reservedSwapImeiSet(sale.branchId)])
+  if (onTransfer.has(right.imei1) || onSwap.has(right.imei1)) {
+    return { error: `${right.imei1} is waiting on a transfer or a Swap Deal, so it cannot be sold.` }
+  }
+  const wrong = line.imei
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      const back = await tx.imeiRecord.updateMany({
+        where: { id: wrong.id, status: "SOLD", saleId: sale.id },
+        data: { status: "IN_STOCK", saleId: null, customerId: null, branchId: sale.branchId },
+      })
+      if (back.count !== 1) throw new ConflictError(`${wrong.imei1} moved while you were correcting the sale. Open it again.`)
+      await returnStock(tx, {
+        productId: line.productId,
+        branchId: sale.branchId,
+        quantity: 1,
+        move: { kind: "SALE_REVERSED", reference: sale.invoiceNumber, userId: user.id },
+      })
+      await claimImei(tx, {
+        imeiId: right.id,
+        branchId: sale.branchId,
+        label: right.imei1,
+        data: { status: "SOLD", saleId: sale.id, customerId: sale.customerId },
+      })
+      await drawStock(tx, {
+        productId: right.productId,
+        branchId: sale.branchId,
+        quantity: 1,
+        label: right.product.name,
+        move: { kind: "SALE", reference: sale.invoiceNumber, userId: user.id },
+      })
+      await tx.saleItem.update({
+        where: { id: line.id },
+        data: {
+          imeiId: right.id,
+          productId: right.productId,
+          costPrice: money(right.product.costPrice).toFixed(2),
+          priceReason: [line.priceReason, `Phone changed from ${wrong.imei1}: ${reason}`].filter(Boolean).join(" · "),
+        },
+      })
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "UPDATE",
+          entityType: "Sale",
+          entityId: sale.invoiceNumber,
+          oldValue: JSON.stringify({ item: line.product.name, imei: wrong.imei1 }),
+          newValue: JSON.stringify({
+            item: right.product.name,
+            imei: right.imei1,
+            reason,
+            note: `Phone on ${sale.invoiceNumber} changed from ${wrong.imei1} to ${right.imei1}. ${wrong.imei1} is back In shop.`,
+          }),
+          branchId: sale.branchId,
+          risk: "HIGH",
+        },
+      })
+    })
+  } catch (error) {
+    return { error: error instanceof ConflictError ? error.message : "Could not change the phone. Nothing was changed." }
+  }
+
+  for (const path of [`/sales/${sale.id}`, "/sales", "/imei", "/inventory", "/pos", "/profits", "/reports"]) revalidatePath(path)
+  return { success: true, message: `${right.imei1} is now on ${sale.invoiceNumber}. ${wrong.imei1} is back In shop.` }
 }

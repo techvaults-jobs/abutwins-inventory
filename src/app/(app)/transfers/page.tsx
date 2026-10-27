@@ -1,5 +1,6 @@
 import Link from "next/link"
 import { mayDecideTransfer } from "@/lib/transfer-rights"
+import { isShopOwner } from "@/lib/rbac"
 import { productSpecLine } from "@/lib/product-specs"
 import { Plus } from "lucide-react"
 import { getTransfers } from "@/app/actions/ops"
@@ -46,6 +47,8 @@ export default async function TransfersPage({ searchParams }: { searchParams: Pr
     // Accept and reject: the CEO and the main admin for any shop, the receiving
     // shop's manager or vault manager for their own. Everyone else looks.
     canDecide: mayDecideTransfer(me, transfer.toBranchId),
+    // Undoing one already accepted: the CEO and the main admin.
+    canCancel: isShopOwner(me.role),
     imeis: transfer.imeis.map((imei) => ({
       id: imei.id,
       imei1: imei.imei1,

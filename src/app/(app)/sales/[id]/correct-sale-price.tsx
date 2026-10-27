@@ -8,24 +8,35 @@ import { Input } from "@/components/ui/input"
 import { Select } from "@/components/ui/select"
 import { formatCurrency } from "@/lib/utils"
 
-type Line = { id: string; label: string; quantity: number; unitPrice: number }
+type Line = { id: string; label: string; quantity: number; unitPrice: number; isPhone: boolean }
 
-/** The CEO's and the main admin's correction for a price typed wrong on a finished sale. */
+/** The CEO's and the main admin's correction for a price or a quantity typed wrong on a finished sale. */
 export function CorrectSalePrice({ lines, canFixMoney }: { lines: Line[]; canFixMoney: boolean }) {
   const [lineId, setLineId] = useState(lines[0]?.id ?? "")
   const [price, setPrice] = useState("")
+  const [quantity, setQuantity] = useState("")
   const line = lines.find((row) => row.id === lineId)
+  const nextPrice = price !== "" && Number(price) >= 0 ? Number(price) : line?.unitPrice ?? 0
+  const nextQty = quantity !== "" && Number(quantity) >= 1 ? Math.floor(Number(quantity)) : line?.quantity ?? 1
 
   return (
     <ActionForm
       action={correctSaleLinePrice}
-      submit="Correct this price"
-      successMessage="Price corrected. The invoice and the buyer's balance follow it."
+      submit="Correct this line"
+      successMessage="Line corrected. The invoice, the stock and the buyer's balance follow it."
       variant="outline"
       className="grid gap-3 md:grid-cols-2"
     >
       <FormField label="Which line">
-        <Select name="saleItemId" value={lineId} onChange={(event) => setLineId(event.target.value)} required>
+        <Select
+          name="saleItemId"
+          value={lineId}
+          onChange={(event) => {
+            setLineId(event.target.value)
+            setQuantity("")
+          }}
+          required
+        >
           {lines.map((row) => (
             <option key={row.id} value={row.id}>
               {row.label} · {row.quantity} × {formatCurrency(row.unitPrice)}
@@ -33,9 +44,14 @@ export function CorrectSalePrice({ lines, canFixMoney }: { lines: Line[]; canFix
           ))}
         </Select>
       </FormField>
-      <FormField label="Right price of one unit (₦)">
-        <Input name="unitPrice" type="number" min={0} step="0.01" value={price} onChange={(event) => setPrice(event.target.value)} required />
+      <FormField label="Right price of one unit (₦)" hint="Leave blank to keep the price">
+        <Input name="unitPrice" type="number" min={0} step="0.01" value={price} onChange={(event) => setPrice(event.target.value)} />
       </FormField>
+      {line && !line.isPhone ? (
+        <FormField label="Right quantity" hint="Leave blank to keep it. Pieces come off or go back on the shelf.">
+          <Input name="quantity" type="number" min={1} step={1} value={quantity} onChange={(event) => setQuantity(event.target.value)} />
+        </FormField>
+      ) : null}
       <FormField label="Why it is being corrected" className="md:col-span-2">
         <Input name="reason" placeholder="Example: cashier typed an extra digit" required minLength={4} />
       </FormField>
@@ -50,10 +66,13 @@ export function CorrectSalePrice({ lines, canFixMoney }: { lines: Line[]; canFix
           </span>
         </label>
       ) : null}
-      {line && price !== "" && Number(price) >= 0 ? (
+      {line && (price !== "" || quantity !== "") ? (
         <p className="text-sm text-muted-foreground md:col-span-2">
-          Line goes from {formatCurrency(line.unitPrice * line.quantity)} to{" "}
-          <span className="font-semibold text-foreground">{formatCurrency(Number(price) * line.quantity)}</span>.
+          Line goes from {line.quantity} × {formatCurrency(line.unitPrice)} = {formatCurrency(line.unitPrice * line.quantity)} to{" "}
+          <span className="font-semibold text-foreground">
+            {nextQty} × {formatCurrency(nextPrice)} = {formatCurrency(nextPrice * nextQty)}
+          </span>
+          .
         </p>
       ) : null}
     </ActionForm>

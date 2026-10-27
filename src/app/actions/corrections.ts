@@ -75,7 +75,7 @@ export async function cancelSale(formData: FormData) {
   // Cancelling a swap's invoice put the phone given out back on the shelf but
   // left the customer's phone in stock and the difference on the books.
   if (swapInvoice) {
-    return { error: `${sale.invoiceNumber} is the invoice of Swap Deal ${swapInvoice.swapNumber}. A swap's invoice cannot be cancelled on its own.` }
+    return { error: `${sale.invoiceNumber} is the invoice of Swap Deal ${swapInvoice.swapNumber}. Cancel the Swap Deal itself on Swap Deal instead: that undoes both phones and the money.` }
   }
   if (returns > 0) {
     return { error: "This sale has a return on it. A sale with a return cannot be cancelled; correct the return instead." }
@@ -584,4 +584,309 @@ export async function fixBankDetails(formData: FormData) {
   revalidatePath("/finance")
   revalidatePath("/audit")
   return { success: true }
+}
+
+/** The phones a transfer's notes list on one labelled line ("IMEIs: …", "Arrived: …"). */
+function transferPhones(notes: string, label: string) {
+  const line = notes.split("\n").find((row) => row.startsWith(`${label}:`))
+  if (!line) return []
+  return [...new Set(line.slice(label.length + 1).split(/[\s,;]+/).map((item) => item.trim()).filter((item) => item.length >= 4))]
+}
+
+/**
+ * Undo a shop-to-shop transfer that was accepted by mistake: the wrong shop,
+ * the wrong phones, or sent twice. What arrived goes back to the sending
+ * shop, as if it never left. A transfer still waiting is rejected instead.
+ *
+ * Refused when anything that arrived was sold or moved on since: undo that first.
+ */
+export async function cancelTransfer(formData: FormData) {
+  const user = await requireUser()
+  if (!isShopOwner(user.role)) return { error: "Only the CEO or the main admin can cancel a transfer." }
+  const id = String(formData.get("id") || "")
+  const why = reasonOf(formData)
+  if (why.length < 4) return { error: "Say why this transfer is being cancelled, for Who did what." }
+
+  const transfer = await prisma.stockTransfer.findUnique({
+    where: { id },
+    include: { items: { include: { product: { select: { name: true } } } }, fromBranch: true, toBranch: true },
+  })
+  if (!transfer) return { error: "We could not find that transfer." }
+  if (transfer.status === "CANCELLED") return { error: "This transfer is already cancelled or rejected." }
+  if (transfer.status !== "RECEIVED") return { error: "This transfer has not been accepted yet. Reject it instead." }
+
+  // Phones that arrived: the "Arrived:" line on a part-accepted transfer, else
+  // every phone on it less any that stayed behind.
+  const notes = transfer.notes ?? ""
+  const listed = notes.match(/IMEIs:\s*(.+)/i)?.[1] ?? ""
+  const allPhones = [...new Set(listed.split(/[\s,;]+/).map((item) => item.trim()).filter((item) => item.length >= 4 && !item.includes(":")))]
+  const stayed = new Set(transferPhones(notes, `Stayed at ${transfer.fromBranch.name}`))
+  const arrived = /\nArrived:/.test(notes) ? transferPhones(notes, "Arrived") : allPhones.filter((imei) => !stayed.has(imei))
+
+  const units = arrived.length
+    ? await prisma.imeiRecord.findMany({ where: { imei1: { in: arrived } }, select: { imei1: true, status: true, branchId: true } })
+    : []
+  const movedOn = arrived.filter((imei) => {
+    const unit = units.find((row) => row.imei1 === imei)
+    return !unit || unit.status !== "IN_STOCK" || unit.branchId !== transfer.toBranchId
+  })
+  if (movedOn.length) {
+    return {
+      error: `${movedOn.slice(0, 5).join(", ")} ${movedOn.length === 1 ? "is" : "are"} no longer In shop at ${transfer.toBranch.name} (sold or moved on). Undo that first, or send the rest back with a new transfer.`,
+    }
+  }
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      const closed = await tx.stockTransfer.updateMany({
+        where: { id, status: "RECEIVED" },
+        data: {
+          status: "CANCELLED",
+          notes: [notes, `Rejected: Cancelled after it was accepted, by ${whoDid(user)}: ${why.slice(0, 500)}`].filter(Boolean).join("\n"),
+        },
+      })
+      if (closed.count !== 1) throw new ConflictError(`${transfer.transferNumber} changed while you were looking at it. Open it again.`)
+
+      if (arrived.length) {
+        const back = await tx.imeiRecord.updateMany({
+          where: { imei1: { in: arrived }, branchId: transfer.toBranchId, status: "IN_STOCK" },
+          data: { branchId: transfer.fromBranchId },
+        })
+        if (back.count !== arrived.length) {
+          throw new ConflictError("A phone on this transfer was sold or moved while it was being cancelled. Open it again.")
+        }
+      }
+      for (const item of transfer.items) {
+        if (item.receivedQty <= 0) continue
+        await drawStock(tx, {
+          productId: item.productId,
+          branchId: transfer.toBranchId,
+          quantity: item.receivedQty,
+          label: item.product.name,
+          move: { kind: "TRANSFER_OUT", reference: transfer.transferNumber, userId: user.id },
+        })
+        await returnStock(tx, {
+          productId: item.productId,
+          branchId: transfer.fromBranchId,
+          quantity: item.receivedQty,
+          move: { kind: "TRANSFER_IN", reference: transfer.transferNumber, userId: user.id },
+        })
+      }
+
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "DELETE",
+          entityType: "StockTransfer",
+          entityId: transfer.transferNumber,
+          oldValue: JSON.stringify({
+            status: "RECEIVED",
+            from: transfer.fromBranch.name,
+            to: transfer.toBranch.name,
+            phones: arrived,
+            pieces: transfer.items.map((item) => ({ item: item.product.name, arrived: item.receivedQty })),
+          }),
+          newValue: JSON.stringify({ status: "CANCELLED", why, note: `Everything that arrived went back to ${transfer.fromBranch.name}.` }),
+          branchId: transfer.toBranchId,
+          risk: "HIGH",
+        },
+      })
+    })
+  } catch (error) {
+    return { error: shopError(error, "Could not cancel this transfer. Nothing was changed.") }
+  }
+
+  for (const path of ["/transfers", "/inventory", "/imei", "/pos", "/products", "/dashboard"]) revalidatePath(path)
+  return { success: true, message: `${transfer.transferNumber} is cancelled. Everything that arrived is back at ${transfer.fromBranch.name}.` }
+}
+
+/**
+ * Undo a Swap Deal typed by mistake. The shop phone that went out comes back
+ * In shop, the customer's phone leaves the shelf (it is theirs again), and
+ * the money on its invoice is taken off: what they paid comes off the till or
+ * the bank, what we paid them comes back in, and what went on their account
+ * comes off it.
+ *
+ * Refused when either phone has moved on since (the customer's phone sold,
+ * the shop phone returned): undo that first.
+ */
+export async function cancelSwap(formData: FormData) {
+  const user = await requireUser()
+  if (!isShopOwner(user.role)) return { error: "Only the CEO or the main admin can cancel a Swap Deal." }
+  const id = String(formData.get("id") || "")
+  const why = reasonOf(formData)
+  if (why.length < 4) return { error: "Say why this Swap Deal is being cancelled, for Who did what." }
+
+  const swap = await prisma.swap.findUnique({
+    where: { id },
+    include: { customer: true, newProduct: true, oldImei: { include: { product: true } }, newImei: true },
+  })
+  if (!swap) return { error: "We could not find that Swap Deal." }
+  if (!(await canReachBranch(user, swap.branchId))) return { error: OTHER_SHOP }
+  if (swap.status === "CANCELLED" || swap.status === "REJECTED") return { error: "This Swap Deal is already cancelled." }
+  if (swap.status === "PENDING") return { error: "This Swap Deal never went through. Nothing moved, so there is nothing to undo." }
+
+  const invoiceNumber = swap.notes?.match(/Invoice (INV-[A-Z0-9-]+)/)?.[1] ?? null
+  const sale = invoiceNumber
+    ? await prisma.sale.findUnique({ where: { invoiceNumber }, include: { payments: true } })
+    : null
+  if (swap.status === "COMPLETED" && !sale) return { error: "We could not find this Swap Deal's invoice. Nothing was changed." }
+  if (sale && sale.status !== "COMPLETED") return { error: `${sale.invoiceNumber} is already cancelled.` }
+  if (sale) {
+    const returns = await prisma.stockReturn.count({ where: { saleId: sale.id, status: { not: "REJECTED" } } })
+    if (returns) return { error: "The phone from this Swap Deal was returned. Undo the return first." }
+  }
+
+  const shopPhone = swap.newImei
+  if (!shopPhone || !["SWAPPED", "SOLD"].includes(shopPhone.status) || shopPhone.customerId !== swap.customerId) {
+    return { error: `The shop phone on this Swap Deal${shopPhone ? ` (${shopPhone.imei1})` : ""} is no longer with ${swap.customer.name}. Undo what moved it first.` }
+  }
+  const theirs = swap.oldImei
+  if (theirs.status !== "IN_STOCK" || theirs.branchId !== swap.branchId) {
+    return { error: `The customer's phone ${theirs.imei1} is no longer In shop here (sold or moved on). Undo that first.` }
+  }
+
+  // The money the invoice moved, read back from the books it wrote.
+  const ref = invoiceNumber ?? swap.swapNumber
+  const [paidOut, keptOnAccount] = await Promise.all([
+    prisma.financeEntry.findMany({
+      where: { reference: ref, type: "EXPENSE", description: { startsWith: "Swap payable" } },
+      select: { amount: true, account: true, bankAccountId: true },
+    }),
+    prisma.ledgerEntry.findMany({ where: { reference: ref, customerId: swap.customerId, type: "CREDIT_NOTE" }, select: { amount: true } }),
+  ])
+  const payments = sale?.payments ?? []
+  const cashIn = payments.filter((row) => row.method === "CASH").reduce((sum, row) => sum + money(row.amount), 0)
+  if (cashIn > 0.005) {
+    const till = await assertCashAvailable(swap.branchId, cashIn)
+    if (!till.ok) {
+      return {
+        error: `The till holds only ${formatCurrency(Math.max(0, till.available))} now, so the ${formatCurrency(cashIn)} cash taken on this Swap Deal cannot be handed back. Undo what moved the cash first.`,
+      }
+    }
+  }
+  const moneyIn = payments.reduce((sum, row) => sum + money(row.amount), 0)
+  const owedByThem = sale ? money(sale.totalAmount) - moneyIn : 0
+  const credited = keptOnAccount.reduce((sum, row) => sum + money(row.amount), 0) // negative
+
+  try {
+    await prisma.$transaction(async (tx) => {
+      const closed = await tx.swap.updateMany({
+        where: { id: swap.id, status: swap.status },
+        data: { status: "CANCELLED", notes: [swap.notes, `Cancelled by ${whoDid(user)}: ${why.slice(0, 500)}`].filter(Boolean).join(" · ") },
+      })
+      if (closed.count !== 1) throw new ConflictError(`${swap.swapNumber} changed while you were looking at it. Open it again.`)
+
+      // The shop phone comes back on the shelf.
+      const back = await tx.imeiRecord.updateMany({
+        where: { id: shopPhone.id, status: shopPhone.status, customerId: swap.customerId },
+        data: { status: "IN_STOCK", customerId: null, saleId: null, branchId: swap.branchId, notes: `Back In shop: Swap Deal ${swap.swapNumber} cancelled` },
+      })
+      if (back.count !== 1) throw new ConflictError(`${shopPhone.imei1} moved while this Swap Deal was being cancelled. Open it again.`)
+      await returnStock(tx, {
+        productId: swap.newProductId,
+        branchId: swap.branchId,
+        quantity: 1,
+        move: { kind: "SALE_REVERSED", reference: swap.swapNumber, userId: user.id },
+      })
+
+      // The customer's phone goes back to them. Its record stays for the history.
+      const out = await tx.imeiRecord.updateMany({
+        where: { id: theirs.id, status: "IN_STOCK", branchId: swap.branchId },
+        data: { status: "DISPOSED", customerId: swap.customerId, notes: `Given back to ${swap.customer.name}: Swap Deal ${swap.swapNumber} cancelled` },
+      })
+      if (out.count !== 1) throw new ConflictError(`${theirs.imei1} was sold or moved while this Swap Deal was being cancelled. Open it again.`)
+      await drawStock(tx, {
+        productId: theirs.productId,
+        branchId: swap.branchId,
+        quantity: 1,
+        label: theirs.product.name,
+        move: { kind: "HAND_CORRECTION", reference: swap.swapNumber, userId: user.id },
+      })
+
+      if (sale) {
+        await tx.sale.update({
+          where: { id: sale.id },
+          data: {
+            status: "CANCELLED",
+            paidAmount: "0.00",
+            notes: [sale.notes, `Cancelled by ${whoDid(user)} with Swap Deal ${swap.swapNumber}: ${why.slice(0, 500)}`].filter(Boolean).join("\n"),
+          },
+        })
+        for (const payment of payments) {
+          await tx.payment.delete({ where: { id: payment.id } })
+          await tx.financeEntry.create({
+            data: {
+              branchId: swap.branchId,
+              account: payment.method === "CASH" ? "CASH" : "BANK",
+              type: "EXPENSE",
+              amount: money(payment.amount).toFixed(2),
+              reference: ref,
+              bankAccountId: payment.bankAccountId,
+              description: `${UNDO_COLLECTION_NOTE}${ref} · Swap Deal ${swap.swapNumber} cancelled`,
+            },
+          })
+        }
+      }
+      // What we paid the customer comes back in.
+      for (const row of paidOut) {
+        await tx.financeEntry.create({
+          data: {
+            branchId: swap.branchId,
+            account: row.account,
+            type: "INCOME",
+            amount: money(row.amount).toFixed(2),
+            reference: ref,
+            bankAccountId: row.bankAccountId,
+            description: `Paid back by ${swap.customer.name} · Swap Deal ${swap.swapNumber} cancelled`,
+          },
+        })
+      }
+      // Their account: what the deal put on it (owed by them, or kept for them) comes off.
+      const shift = -(Math.max(owedByThem, 0) + credited)
+      if (Math.abs(shift) > 0.005) {
+        const after = await shiftCustomerBalance(tx, swap.customerId, shift)
+        await tx.ledgerEntry.create({
+          data: {
+            customerId: swap.customerId,
+            type: "ADJUSTMENT",
+            amount: shift.toFixed(2),
+            balance: money(after.currentBalance).toFixed(2),
+            reference: ref,
+            description: `Swap Deal ${swap.swapNumber} cancelled by ${whoDid(user)}`,
+          },
+        })
+      }
+
+      await tx.auditLog.create({
+        data: {
+          userId: user.id,
+          action: "DELETE",
+          entityType: "Swap",
+          entityId: swap.swapNumber,
+          oldValue: JSON.stringify({
+            status: swap.status,
+            customer: swap.customer.name,
+            shopPhoneOut: shopPhone.imei1,
+            customerPhoneIn: theirs.imei1,
+            invoice: invoiceNumber,
+            moneyIn,
+            paidOut: paidOut.reduce((sum, row) => sum + money(row.amount), 0),
+          }),
+          newValue: JSON.stringify({ status: "CANCELLED", why }),
+          branchId: swap.branchId,
+          risk: "HIGH",
+        },
+      })
+    })
+  } catch (error) {
+    return { error: shopError(error, "Could not cancel this Swap Deal. Nothing was changed.") }
+  }
+
+  for (const path of ["/swaps", "/sales", "/pos", "/imei", "/inventory", "/finance", "/finance/close", "/dashboard", "/customers", "/reports", "/audit/books"]) {
+    revalidatePath(path)
+  }
+  revalidatePath(`/customers/${swap.customerId}`)
+  if (sale) revalidatePath(`/sales/${sale.id}`)
+  return { success: true, message: `${swap.swapNumber} is cancelled. ${shopPhone.imei1} is back In shop and ${theirs.imei1} is off the shelf.` }
 }
