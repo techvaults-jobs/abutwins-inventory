@@ -2,14 +2,17 @@
 
 import { useMemo, useState } from "react"
 import Link from "next/link"
-import { Coins, HandCoins, PackageCheck, Undo2, Wallet } from "lucide-react"
+import { Coins, FileSpreadsheet, HandCoins, PackageCheck, Undo2, Wallet } from "lucide-react"
 import { DataTable, type DataColumn } from "@/components/data-table"
 import { FilterChips } from "@/components/filter-chips"
 import { StatCard, StatGrid, StatusBadge, TonePill } from "@/components/shared"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent } from "@/components/ui/sheet"
+import { downloadTable, downloadWorkbook } from "@/lib/download-table"
 import { groupByPartyIdentity } from "@/lib/party-key"
+import { watDayKey } from "@/lib/lagos-day"
 import { formatCurrency, formatDate } from "@/lib/utils"
+import { statusLabel } from "@/lib/status"
 import {
   formatPurchaseBalanceCell,
   formatValueOwingMinus,
@@ -159,10 +162,116 @@ function buildHouses(suppliers: SupplierRow[]): House[] {
     .sort((a, b) => Number(b.openingNames.length > 0) - Number(a.openingNames.length > 0) || a.name.localeCompare(b.name))
 }
 
+function houseSearchText(house: House) {
+  return [house.name, house.phone, house.from, ...house.copies.map((copy) => copy.name), ...house.bills.map((bill) => bill.invoiceNumber)].join(" ")
+}
+
+const FILTER_NAMES: Record<HouseFilter, string> = {
+  all: "every-supplier",
+  bought: "bought-from",
+  paid: "paid",
+  owing: "we-owe",
+  credit: "they-owe-us",
+  opening: "opening-stock",
+}
+
+function houseKind(house: House) {
+  if (house.openingNames.length) return "Opening stock"
+  return house.kind === "NEIGHBOR" ? "Neighbouring shop" : "Carton supplier"
+}
+
+function houseStatus(house: House) {
+  if (house.openingValue > 0 && house.bills.length === 0 && house.surplus <= 0) return "Opening stock · not owed"
+  if (house.surplus > 0) return "They owe us"
+  if (house.owed === 0) return "Settled"
+  return "We owe"
+}
+
+/**
+ * The suppliers on screen as a sheet. The client could not take the supplier
+ * accounts to Excel. Plain numbers, not "₦1.2m", so the columns add up in
+ * Excel; the chip and the search on screen decide which suppliers go in.
+ */
+function supplierSheet(houses: House[]): Array<Array<string | number>> {
+  const sum = (pick: (house: House) => number) => houses.reduce((total, house) => total + pick(house), 0)
+  return [
+    ["Supplier", "Type", "Phone", "From", "Bills", "Bought (₦)", "Opening stock value (₦)", "Paid (₦)", "Sent back (₦)", "We owe (₦)", "They owe us (₦)", "Status"],
+    ...houses.map((house) => [
+      house.name,
+      houseKind(house),
+      house.openingNames.length ? "" : house.phone,
+      house.from,
+      house.bills.length,
+      house.purchased,
+      house.openingValue,
+      house.paid,
+      house.sentBack,
+      house.owed,
+      house.surplus,
+      houseStatus(house),
+    ]),
+    [
+      `Total (${houses.length} supplier${houses.length === 1 ? "" : "s"})`,
+      "",
+      "",
+      "",
+      sum((house) => house.bills.length),
+      sum((house) => house.purchased),
+      sum((house) => house.openingValue),
+      sum((house) => house.paid),
+      sum((house) => house.sentBack),
+      sum((house) => house.owed),
+      sum((house) => house.surplus),
+      "",
+    ],
+  ]
+}
+
+/** Every bill behind those suppliers, one line each, as on the supplier page. */
+function billSheet(houses: House[]): Array<Array<string | number>> {
+  return [
+    ["Supplier", "Bill number", "Date", "Shop", "Uploaded value (₦)", "Shipping fee (₦)", "Payable value (₦)", "Paid (₦)", "Sent back (₦)", "We owe (₦)", "They owe us (₦)", "Status"],
+    ...houses.flatMap((house) => [
+      ...house.bills.map((bill) => {
+        const bal = purchaseBalance(bill)
+        return [
+          house.name,
+          bill.invoiceNumber,
+          watDayKey(new Date(bill.createdAt)),
+          bill.branchName || bill.branchCode,
+          bal.billed,
+          bal.shipping,
+          bal.payable,
+          bal.paid,
+          bal.sentBack,
+          bal.owed,
+          bal.surplus,
+          statusLabel(bill.status),
+        ]
+      }),
+      ...house.openingBills.map((bill) => [
+        house.name,
+        bill.invoiceNumber,
+        watDayKey(new Date(bill.createdAt)),
+        bill.branchName || bill.branchCode,
+        bill.totalAmount,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        "Opening stock · not owed",
+      ]),
+    ]),
+  ]
+}
+
 export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
   const houses = useMemo(() => buildHouses(suppliers), [suppliers])
   const [filter, setFilter] = useState<HouseFilter>("all")
   const [open, setOpen] = useState<House | null>(null)
+  const [query, setQuery] = useState("")
 
   const totalInvoiced = houses.reduce((sum, house) => sum + house.purchased, 0)
   const totalPaid = houses.reduce((sum, house) => sum + house.paid, 0)
@@ -182,6 +291,17 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
       return true
     })
   }, [houses, filter])
+
+  // What the table shows after the chip and the search, so the file matches the screen.
+  function shownHouses() {
+    const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    if (!words.length) return filtered
+    return filtered.filter((house) => {
+      const hay = houseSearchText(house).toLowerCase()
+      return words.every((word) => hay.includes(word))
+    })
+  }
+  const fileName = () => `suppliers-${FILTER_NAMES[filter]}-${watDayKey()}`
 
   function pickFilter(next: HouseFilter) {
     setFilter(next)
@@ -292,10 +412,39 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
           noun="suppliers"
           filterKey={filter}
           onRowClick={setOpen}
-          searchText={(house) =>
-            [house.name, house.phone, house.from, ...house.copies.map((copy) => copy.name), ...house.bills.map((bill) => bill.invoiceNumber)].join(" ")
-          }
+          searchText={houseSearchText}
           searchPlaceholder="Search supplier, phone, place or bill number"
+          query={query}
+          onQueryChange={setQuery}
+          actions={
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const shown = shownHouses()
+                  void downloadWorkbook(
+                    [
+                      { name: "Suppliers", rows: supplierSheet(shown) },
+                      { name: "Bills", rows: billSheet(shown) },
+                    ],
+                    `${fileName()}.xlsx`
+                  )
+                }}
+              >
+                <FileSpreadsheet className="mr-1.5 h-4 w-4" aria-hidden /> Excel
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void downloadTable(supplierSheet(shownHouses()), `${fileName()}.csv`, "csv")}
+              >
+                CSV
+              </Button>
+            </>
+          }
           filters={
             <FilterChips
               label="Show"

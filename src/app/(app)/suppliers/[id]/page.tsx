@@ -5,6 +5,9 @@ import { EditDetailsButton } from "@/components/edit-details-button"
 import { canHardDelete } from "@/lib/rbac"
 import { requireUser } from "@/lib/session"
 import { SupplierOpeningCard } from "./supplier-opening-card"
+import { SupplierBillsDownload } from "./supplier-bills-download"
+import { watDayKey } from "@/lib/lagos-day"
+import { statusLabel } from "@/lib/status"
 import { PageHeader, StatCard, StatGrid, StatusBadge } from "@/components/shared"
 import { formatCurrency, formatDate, money } from "@/lib/utils"
 import {
@@ -46,6 +49,70 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
   const openingValue = supplier.openingBills.reduce((sum, row) => sum + money(row.totalAmount), 0) + unbilled.value
   const openingUnits = supplier.openingBills.reduce((sum, row) => sum + row._count.imeiRecords, 0) + unbilled.units
   const hasOpening = supplier.openingBills.length > 0 || unbilled.units > 0
+
+  // The account as a sheet: every bill as on screen, opening stock (never
+  // owed), then the totals. Plain numbers, so the columns add up in Excel.
+  const billTotals = supplier.purchases.reduce(
+    (acc, row) => {
+      const bal = purchaseBalance(row)
+      acc.billed += bal.billed
+      acc.shipping += bal.shipping
+      acc.payable += bal.payable
+      acc.paid += bal.paid
+      acc.sentBack += bal.sentBack
+      return acc
+    },
+    { billed: 0, shipping: 0, payable: 0, paid: 0, sentBack: 0 }
+  )
+  const accountRows: Array<Array<string | number>> = [
+    ["Bill number", "Date", "Shop", "Uploaded value (₦)", "Shipping fee (₦)", "Payable value (₦)", "Payment (₦)", "Stock return (₦)", "We owe (₦)", "They owe us (₦)", "Status"],
+    ...supplier.purchases.map((row) => {
+      const bal = purchaseBalance(row)
+      return [
+        row.invoiceNumber,
+        watDayKey(row.createdAt),
+        row.branch.name || row.branch.code,
+        bal.billed,
+        bal.shipping,
+        bal.payable,
+        bal.paid,
+        bal.sentBack,
+        bal.owed,
+        bal.surplus,
+        statusLabel(row.status),
+      ]
+    }),
+    ...supplier.openingBills.map((row) => [
+      row.invoiceNumber,
+      watDayKey(row.createdAt),
+      row.branch.name || row.branch.code,
+      money(row.totalAmount),
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      "Opening stock · not owed",
+    ]),
+    ...(unbilled.units > 0
+      ? [[`${unbilled.units} phone${unbilled.units === 1 ? "" : "s"} added without a bill`, "", "", unbilled.value, 0, 0, 0, 0, 0, 0, "Opening stock · not owed"]]
+      : []),
+    [
+      `Total (${supplier.purchases.length} bill${supplier.purchases.length === 1 ? "" : "s"})`,
+      "",
+      "",
+      billTotals.billed,
+      billTotals.shipping,
+      billTotals.payable,
+      billTotals.paid,
+      billTotals.sentBack,
+      totalOwed,
+      totalSurplus,
+      money(supplier.creditBalance) > 0 ? `Includes ${formatCurrency(money(supplier.creditBalance))} send-back credit not on a bill` : "",
+    ],
+  ]
+  const accountFile = `supplier-${supplier.name.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "account"}-${watDayKey()}`
 
   return (
     <div className="space-y-6">
@@ -207,6 +274,7 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
       <div id="supplier-bills" className="surface-card scroll-mt-4 overflow-hidden">
         <div className="flex items-center justify-between border-b border-border px-5 py-4">
           <h3 className="font-semibold">Every bill from this supplier</h3>
+          <SupplierBillsDownload filename={accountFile} rows={accountRows} />
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[960px] text-sm">
