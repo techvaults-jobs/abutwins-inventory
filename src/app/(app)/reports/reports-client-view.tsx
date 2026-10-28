@@ -133,6 +133,7 @@ export function ReportsClientView({
   branches,
   selectedBranchId,
   range = "month",
+  from,
   date,
   stockSince,
 }: {
@@ -147,7 +148,10 @@ export function ReportsClientView({
   opening: OpeningReport
   branches: BranchOption[]
   selectedBranchId?: string
-  range?: "day" | "week" | "month"
+  range?: "day" | "week" | "month" | "custom"
+  /** First day of the period on screen. Kept in the link only for a chosen stretch. */
+  from: string
+  /** Last day of the period on screen. */
   date: string
   /** First day the stock ledger can answer "what was on the shelf then". */
   stockSince: string
@@ -162,14 +166,31 @@ export function ReportsClientView({
   const supplierCredit = (pack.supplierCredits ?? []).reduce((sum, row) => sum + row.owed, 0)
   const owedHouses = useMemo(() => groupOwedHouses(pack.creditors), [pack.creditors])
   const creditHouses = useMemo(() => groupOwedHouses(pack.supplierCredits ?? []), [pack.supplierCredits])
-  const scopeKey = `${selectedBranchId ?? "all"}:${range}:${date}`
-  function reportsHref(next: { branchId?: string; range?: string; date?: string }) {
+  const scopeKey = `${selectedBranchId ?? "all"}:${range}:${from}:${date}`
+  function reportsHref(next: { branchId?: string; range?: string; date?: string; from?: string }) {
     const params = new URLSearchParams()
     const shop = next.branchId !== undefined ? next.branchId : selectedBranchId
     if (shop) params.set("branchId", shop)
-    params.set("range", next.range ?? range)
+    const nextRange = next.range ?? range
+    params.set("range", nextRange)
+    // A chosen stretch carries its first day; the date is always the last day.
+    if (nextRange === "custom") params.set("from", next.from ?? from)
     params.set("date", next.date ?? date)
     return `/reports?${params.toString()}`
+  }
+  // The client asked to pick any first day and any last day, across months,
+  // not only One day, Last 7 days or This month so far. Picking a first day
+  // after the last day (or the reverse) moves the other one with it, so the
+  // stretch never turns inside out.
+  function pickStretch(next: { from?: string; to?: string }) {
+    let first = next.from ?? from
+    let last = next.to ?? date
+    if (!first || !last) return
+    if (first > last) {
+      if (next.from) last = first
+      else first = last
+    }
+    router.push(reportsHref({ range: "custom", from: first, date: last }))
   }
   const movement = (now: number, then: number) => {
     const change = now - then
@@ -447,22 +468,49 @@ export function ReportsClientView({
               <Select
                 value={range}
                 onChange={(event) => router.push(reportsHref({ range: event.target.value }))}
-                className="h-9 w-full sm:w-40"
+                className="h-9 w-full sm:w-44"
               >
                 <option value="day">One day</option>
                 <option value="week">Last 7 days</option>
                 <option value="month">This month so far</option>
+                {/* Opens on the period already on screen, so nothing jumps. */}
+                <option value="custom">Pick dates (from – to)</option>
               </Select>
             </label>
-            <label className="flex flex-col gap-1 text-sm sm:flex-row sm:items-center sm:gap-2">
-              <span className="eyebrow">Ending on</span>
-              <input
-                type="date"
-                value={date}
-                onChange={(event) => router.push(reportsHref({ date: event.target.value }))}
-                className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm sm:w-auto"
-              />
-            </label>
+            {range === "custom" ? (
+              <>
+                <label className="flex flex-col gap-1 text-sm sm:flex-row sm:items-center sm:gap-2">
+                  <span className="eyebrow">From</span>
+                  <input
+                    type="date"
+                    value={from}
+                    max={date}
+                    onChange={(event) => pickStretch({ from: event.target.value })}
+                    className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm sm:w-auto"
+                  />
+                </label>
+                <label className="flex flex-col gap-1 text-sm sm:flex-row sm:items-center sm:gap-2">
+                  <span className="eyebrow">To</span>
+                  <input
+                    type="date"
+                    value={date}
+                    min={from}
+                    onChange={(event) => pickStretch({ to: event.target.value })}
+                    className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm sm:w-auto"
+                  />
+                </label>
+              </>
+            ) : (
+              <label className="flex flex-col gap-1 text-sm sm:flex-row sm:items-center sm:gap-2">
+                <span className="eyebrow">Ending on</span>
+                <input
+                  type="date"
+                  value={date}
+                  onChange={(event) => router.push(reportsHref({ date: event.target.value }))}
+                  className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm sm:w-auto"
+                />
+              </label>
+            )}
             <span className="hidden sm:inline-flex">
               <TonePill tone={selectedBranchId ? "primary" : "neutral"}>{pack.scope}</TonePill>
             </span>
@@ -560,7 +608,7 @@ export function ReportsClientView({
           <div>
             <p className="eyebrow">Compared with</p>
             <p className="mt-1 text-sm font-semibold">
-              {pack.range === "day" ? formatWatLong(pack.compare.from) : `${formatWatLong(pack.compare.from)} to ${formatWatLong(pack.compare.to)}`}
+              {pack.compare.from === pack.compare.to ? formatWatLong(pack.compare.from) : `${formatWatLong(pack.compare.from)} to ${formatWatLong(pack.compare.to)}`}
             </p>
             <p className="mt-1 text-sm text-muted-foreground">Sales {formatCurrency(pack.compare.revenue)}</p>
           </div>

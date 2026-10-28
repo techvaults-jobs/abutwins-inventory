@@ -21,6 +21,7 @@ import { shopError } from "@/lib/shop-speak"
 import { canReachBranch, OTHER_SHOP, resolveWritableShopId, viewBranchFilter } from "@/lib/branch-scope"
 import { ConflictError, claimImei, claimImeis, drawStock, recordMovement, returnStock, shiftCustomerBalance } from "@/lib/concurrency"
 import { warrantyState } from "@/lib/warranty"
+import { statusLabel } from "@/lib/status"
 import { cell, readTableFile } from "@/lib/table-file"
 import { bucketImeiStatus, buildBillTrace, type SupplierBillTrace } from "@/lib/supplier-trace"
 import { earlierReturnMoney, overLimit, refundSplit, returnedSoFar, returnQtyOf, returnValueLimit, saleReturnRoom } from "@/lib/return-limits"
@@ -1358,6 +1359,61 @@ export async function getInStockForReplace() {
     )
   )
   return perShop.flat()
+}
+
+/**
+ * The replacement going out on a return, found by the IMEI or serial typed or
+ * scanned at the counter. The list on the form holds only the newest units of
+ * each shop, so a phone in hand may not be in it; this reads the whole stock
+ * and says plainly why a unit cannot go out (sold, another shop, faulty).
+ */
+export async function findReplacementUnit(code: string, returnBranchId?: string | null) {
+  const user = await requireUser()
+  if (!(await can(user.role, "action.return"))) {
+    return { error: "You are not allowed to record a return. Ask the main admin." }
+  }
+  const cleaned = code.replace(/[\s-]/g, "").trim()
+  if (!cleaned) return { error: "Type or scan the IMEI of the item going out." }
+  const scoped = await scopedBranchId(user.role, user.branchId)
+  const shopId = returnBranchId || scoped
+  if (scoped && shopId !== scoped) return { error: "The replacement must be in the same shop as the return." }
+
+  const rows = await prisma.imeiRecord.findMany({
+    where: { OR: [{ imei1: cleaned }, { imei2: cleaned }, { serialNumber: cleaned }, { imei1: { endsWith: cleaned } }] },
+    include: { product: true, branch: { select: { name: true, code: true } } },
+    take: 20,
+  })
+  if (!rows.length) {
+    return { error: `${cleaned} is not on the system. Add the phone to stock first, then give it out.` }
+  }
+  // An exact code beats a match on the last digits; the return's shop and In shop come first.
+  const exact = rows.filter((row) => row.imei1 === cleaned || row.imei2 === cleaned || row.serialNumber === cleaned)
+  const pool = exact.length ? exact : rows
+  const usable = (row: (typeof rows)[number]) =>
+    row.status === "IN_STOCK" && row.cosmeticGrade !== "FAULTY" && row.product.condition !== "FAULTY"
+  const here = pool.filter((row) => !shopId || row.branchId === shopId)
+  const ready = here.filter(usable)
+  if (ready.length > 1) return { error: "More than one item ends with those digits. Type or scan the full IMEI." }
+  const hit = ready[0]
+  if (hit) {
+    return {
+      unit: {
+        id: hit.id,
+        imei1: hit.imei1,
+        serialNumber: hit.serialNumber,
+        branchId: hit.branchId,
+        product: { name: hit.product.name, sellingPrice: money(hit.product.sellingPrice) },
+      },
+    }
+  }
+  const seen = here[0] ?? pool[0]
+  if (shopId && seen.branchId !== shopId) {
+    return { error: `${seen.imei1} (${seen.product.name}) is in ${seen.branch.name}, not this shop. Move it here first.` }
+  }
+  if (seen.status !== "IN_STOCK") {
+    return { error: `${seen.imei1} (${seen.product.name}) is ${statusLabel(seen.status)}, not In shop, so it cannot go out.` }
+  }
+  return { error: `${seen.imei1} (${seen.product.name}) is marked Faulty, so it cannot go out as a replacement.` }
 }
 
 /** The reasons a return inward from the shop floor may give. */

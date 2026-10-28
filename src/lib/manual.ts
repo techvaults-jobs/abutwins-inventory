@@ -589,9 +589,9 @@ const PAGES: Array<
     id: "reports",
     href: "/reports",
     title: "Reports",
-    what: "Sales, money collected, stock, swaps, returns, who still owes you, and which suppliers owe you after send-backs, for the day, week, or month you pick. Last period sits beside this period. Still owed to suppliers shows the house name and the amount. Click the house and the bills drop down. Suppliers who owe us is the surplus after phones went back. On the screen it is cards and tables. When you print or download it, you get a clean paper for the boss.",
+    what: "Sales, money collected, stock, swaps, returns, who still owes you, and which suppliers owe you after send-backs, for the day, week, month, or any from-and-to dates you pick. Last period sits beside this period. Still owed to suppliers shows the house name and the amount. Click the house and the bills drop down. Suppliers who owe us is the surplus after phones went back. On the screen it is cards and tables. When you print or download it, you get a clean paper for the boss.",
     doThis: [
-      "Pick One day, Last 7 days, or This month so far.",
+      "Pick One day, Last 7 days, or This month so far. Or pick Pick dates (from – to), then choose the first day under From and the last day under To. They can be in different months.",
       "Read this period next to last period.",
       "Read the cards and the shop-by-shop table.",
       "On Still owed to suppliers, read the house name and the amount. Click the house to open its bills.",

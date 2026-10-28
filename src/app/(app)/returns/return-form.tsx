@@ -1,9 +1,9 @@
 "use client"
 
 import { useMemo, useState } from "react"
-import { Package, Smartphone, Search, ReceiptText, Info, AlertCircle } from "lucide-react"
+import { Package, Smartphone, Search, ReceiptText, Info, AlertCircle, ScanLine, X } from "lucide-react"
 import { toast } from "sonner"
-import { createReturn, findSoldImei, findSaleByInvoice } from "@/app/actions/ops"
+import { createReturn, findReplacementUnit, findSoldImei, findSaleByInvoice } from "@/app/actions/ops"
 import type { SaleReturnRoom } from "@/lib/return-limits"
 import { ActionForm } from "@/components/action-form"
 import { DifferenceSettle } from "@/components/difference-settle"
@@ -254,6 +254,158 @@ function TabBar({
   )
 }
 
+// ─── Replacement going out: scan or type its IMEI ─────────────────────────────
+
+const unitCode = (value: string) => value.replace(/[\s-]/g, "").toUpperCase()
+
+/**
+ * The client asked not to scroll a drop-down of nearly every item in the shop:
+ * "we just scan in, it logs that particular phone's details, provided it has
+ * been uploaded on the system". Scan or type the IMEI (or serial) of the item
+ * in hand. A full code fills it in at once; part of a code, a serial or a
+ * model name lists the few that match. A code not in the loaded list is looked
+ * up across the whole stock, which also says why a unit cannot go out.
+ */
+function ReplacementPicker({
+  stock,
+  branchId,
+  picked,
+  onPick,
+}: {
+  stock: StockUnit[]
+  branchId: string | null
+  picked: StockUnit | null
+  onPick: (unit: StockUnit | null) => void
+}) {
+  const [query, setQuery] = useState("")
+  const [finding, setFinding] = useState(false)
+  const code = unitCode(query)
+  const words = query.trim().toLowerCase()
+
+  const exactHit = (value: string) =>
+    stock.find((row) => unitCode(row.imei1) === value || (row.serialNumber && unitCode(row.serialNumber) === value))
+
+  const matches = useMemo(() => {
+    if (code.length < 3 && words.length < 3) return []
+    return stock
+      .filter(
+        (row) =>
+          (code.length >= 3 &&
+            (unitCode(row.imei1).includes(code) || (row.serialNumber ? unitCode(row.serialNumber).includes(code) : false))) ||
+          (words.length >= 3 && row.product.name.toLowerCase().includes(words))
+      )
+      .slice(0, 8)
+  }, [stock, code, words])
+
+  function choose(unit: StockUnit) {
+    onPick(unit)
+    setQuery("")
+  }
+
+  async function lookUp() {
+    if (!code) {
+      toast.error("Type or scan the IMEI of the item going out.")
+      return
+    }
+    const local = exactHit(code)
+    if (local) return choose(local)
+    // Part of a code that points at one unit only is enough.
+    if (matches.length === 1) return choose(matches[0])
+    setFinding(true)
+    const result = await findReplacementUnit(code, branchId)
+    setFinding(false)
+    if ("error" in result && result.error) {
+      toast.error(result.error)
+      return
+    }
+    if ("unit" in result && result.unit) {
+      choose(result.unit)
+      toast.success("Item found. Check the details below.")
+    }
+  }
+
+  function onType(value: string) {
+    setQuery(value)
+    // A scanner that sends no Enter still lands: a full code that only one
+    // unit has (and that is not the start of a longer one) is taken at once.
+    const next = unitCode(value)
+    const hit = next.length >= 5 ? exactHit(next) : undefined
+    const longer = stock.some(
+      (row) =>
+        (unitCode(row.imei1).startsWith(next) && unitCode(row.imei1) !== next) ||
+        (row.serialNumber ? unitCode(row.serialNumber).startsWith(next) && unitCode(row.serialNumber) !== next : false)
+    )
+    if (hit && !longer) choose(hit)
+  }
+
+  if (picked) {
+    return (
+      <div className="flex items-start justify-between gap-3 rounded-lg border border-border bg-background px-3 py-2.5">
+        <input type="hidden" name="replacementImeiId" value={picked.id} />
+        <div className="min-w-0">
+          <p className="text-sm font-semibold">{picked.product.name}</p>
+          <p className="mt-0.5 break-all text-xs text-muted-foreground">
+            {deviceLabel(picked)} · {formatCurrency(picked.product.sellingPrice)}
+          </p>
+        </div>
+        <Button type="button" variant="ghost" size="sm" onClick={() => onPick(null)} className="shrink-0">
+          <X className="h-4 w-4" /> Change
+        </Button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex gap-2">
+        <Input
+          id="replacement-scan-input"
+          value={query}
+          onChange={(e) => onType(e.target.value)}
+          placeholder="Type or scan the IMEI or serial"
+          aria-label="Type or scan the IMEI or serial of the item going out"
+          autoComplete="off"
+          className="flex-1"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault()
+              void lookUp()
+            }
+          }}
+        />
+        <Button type="button" variant="outline" onClick={() => void lookUp()} disabled={finding} className="shrink-0">
+          {finding ? "Looking up" : <><Search className="h-4 w-4" /> Find</>}
+        </Button>
+      </div>
+      {matches.length ? (
+        <ul className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-background">
+          {matches.map((row) => (
+            <li key={row.id}>
+              <button
+                type="button"
+                onClick={() => choose(row)}
+                className="w-full px-3 py-2 text-left text-sm hover:bg-muted/50 focus:bg-muted/50 focus:outline-none"
+              >
+                <span className="font-medium">{row.product.name}</span>
+                <span className="block break-all text-xs text-muted-foreground">
+                  {deviceLabel(row)} · {formatCurrency(row.product.sellingPrice)}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <ScanLine className="h-3.5 w-3.5 shrink-0" />
+          {words.length >= 3
+            ? "Nothing in the list matches. Press Enter or Find to look it up in the whole stock."
+            : "Scan the phone, or type its IMEI, serial or model. Its details fill in from the system."}
+        </p>
+      )}
+    </div>
+  )
+}
+
 // ─── Shared outcome + fault + notes fields ────────────────────────────────────
 
 function OutcomeFields({
@@ -283,13 +435,15 @@ function OutcomeFields({
   /** Vault Manager, Manager, CEO, main admin: every reason and outcome. */
   fullControl: boolean
 }) {
-  const [replacementId, setReplacementId] = useState("")
+  const [picked, setPicked] = useState<StockUnit | null>(null)
   const [reason, setReason] = useState("FAULTY")
   const [replacementValue, setReplacementValue] = useState("")
   const [payMethod, setPayMethod] = useState("CASH")
 
   const filteredStock = branchId ? shopStock.filter((r) => r.branchId === branchId) : shopStock
-  const pickedReplacement = filteredStock.find((r) => r.id === replacementId)
+  // A unit from another shop drops away when the sold device changes shop.
+  const pickedReplacement = picked && (!branchId || picked.branchId === branchId) ? picked : null
+  const replacementId = pickedReplacement?.id ?? ""
   const returnAmount = Number(returnValue !== "" ? returnValue : suggestedReturn || 0)
   const givenAmount = Number(replacementValue || 0)
   const balance = givenAmount - returnAmount
@@ -298,7 +452,7 @@ function OutcomeFields({
   // Reset replacement when outcome changes
   const handleOutcome = (v: string) => {
     onOutcomeChange(v)
-    setReplacementId("")
+    setPicked(null)
     setReplacementValue("")
   }
 
@@ -419,27 +573,16 @@ function OutcomeFields({
         <div className="rounded-xl border border-border bg-muted/30 p-3.5 space-y-3">
           <p className="text-sm font-medium">Replacement item going out</p>
           <div className="space-y-1.5">
-            <Label htmlFor="replacement-select">Pick In shop item</Label>
-            <Select
-              id="replacement-select"
-              name="replacementImeiId"
-              value={replacementId}
-              onChange={(e) => {
-                const next = e.target.value
-                setReplacementId(next)
-                const hit = filteredStock.find((r) => r.id === next)
-                if (hit) setReplacementValue(String(hit.product.sellingPrice))
+            <Label htmlFor="replacement-scan-input">Item going out (In shop)</Label>
+            <ReplacementPicker
+              stock={filteredStock}
+              branchId={branchId}
+              picked={pickedReplacement}
+              onPick={(unit) => {
+                setPicked(unit)
+                setReplacementValue(unit ? String(unit.product.sellingPrice) : "")
               }}
-              required
-              emptyLabel="No In shop item is ready to give out."
-            >
-              <option value="">Pick the item to give out</option>
-              {filteredStock.map((row) => (
-                <option key={row.id} value={row.id}>
-                  {deviceLabel(row)} · {row.product.name} · {formatCurrency(row.product.sellingPrice)}
-                </option>
-              ))}
-            </Select>
+            />
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="replacement-value-input">Value of item given out (₦)</Label>

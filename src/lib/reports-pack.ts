@@ -7,7 +7,7 @@ export type ReportsPack = {
   preparedBy: string
   statementRef: string
   periodLabel: string
-  range: "day" | "week" | "month"
+  range: "day" | "week" | "month" | "custom"
   /**
    * What the stock figure is worth at. Cost for the CEO; at sell price for
    * everyone else, who may not see what items cost us.

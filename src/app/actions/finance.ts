@@ -15,7 +15,7 @@ import { lineValueAfterOrderDiscount, saleTenders, sumSaleTenders } from "@/lib/
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
 import { openingStockSupplierWhere, payablePurchaseWhere, groupSupplierLedgers, purchaseBalance, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
 import { listPayingBanks, resolveSupplierPayChannel, SUPPLIER_PAYMENT_UNDO_NOTE } from "@/lib/supplier-pay"
-import { shopPeriodWindow, shopPreviousWindow, watDayKey, type ShopRange } from "@/lib/lagos-day"
+import { reportPeriodWindow, reportPreviousWindow, shopPeriodWindow, shopPreviousWindow, watDayKey, type ReportRange } from "@/lib/lagos-day"
 import { writeAudit } from "@/lib/audit"
 import {
   displayAccountNumber,
@@ -2025,8 +2025,10 @@ export async function saveLetterhead(formData: FormData) {
 
 export async function getReportData(
   requestedBranchId?: string,
-  range: ShopRange = "month",
-  businessDate?: string
+  range: ReportRange = "month",
+  businessDate?: string,
+  /** First day, when the range is a chosen stretch; `businessDate` is then the last day. */
+  fromDate?: string
 ) {
   const user = await requireUser()
   if (!(await can(user.role, "view.reports"))) {
@@ -2052,9 +2054,9 @@ export async function getReportData(
   const scoped = await scopedBranchId(user.role, user.branchId, requestedBranchId)
   const branchId = scoped || requestedBranchId || (await viewBranchFilter(user))
   const day = businessDate && /^\d{4}-\d{2}-\d{2}$/.test(businessDate) ? businessDate : watDayKey()
-  const span: ShopRange = range === "week" || range === "day" ? range : "month"
-  const period = shopPeriodWindow(day, span)
-  const prior = shopPreviousWindow(period.from, span)
+  const span: ReportRange = range === "week" || range === "day" || range === "custom" ? range : "month"
+  const period = reportPeriodWindow(day, span, fromDate)
+  const prior = reportPreviousWindow(period, span)
   const shopWhere = branchId ? { branchId } : {}
   await healOpeningStockBills()
   const [sales, expenses, swaps, returns, inventory, debtors, purchases, priorSales, priorExpenses, creditHouses] = await Promise.all([

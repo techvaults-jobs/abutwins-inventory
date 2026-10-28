@@ -5,7 +5,7 @@ import { requireUser } from "@/lib/session"
 import { can } from "@/lib/permissions"
 import { scopedBranchId } from "@/lib/rbac"
 import { viewBranchFilter } from "@/lib/branch-scope"
-import { shopPeriodWindow, watDayKey, type ShopRange } from "@/lib/lagos-day"
+import { asReportRange, reportPeriodWindow, watDayKey } from "@/lib/lagos-day"
 import { backfillSupplierReturnLines, moneyEffectWords } from "@/lib/supplier-returns"
 import { money } from "@/lib/utils"
 
@@ -30,7 +30,7 @@ export type SupplierReturnRow = {
  * period, for the shop in view, newest first. Managers follow up with the
  * supplier from this: what went back, how many, to whom, and the value.
  */
-export async function getSupplierReturnsReport(requestedBranchId?: string, range?: string, businessDate?: string) {
+export async function getSupplierReturnsReport(requestedBranchId?: string, range?: string, businessDate?: string, fromDate?: string) {
   const user = await requireUser()
   if (!(await can(user.role, "view.reports"))) return { rows: [] as SupplierReturnRow[], from: "", to: "" }
   await backfillSupplierReturnLines()
@@ -38,8 +38,7 @@ export async function getSupplierReturnsReport(requestedBranchId?: string, range
   const scoped = await scopedBranchId(user.role, user.branchId, requestedBranchId)
   const branchId = scoped || requestedBranchId || (await viewBranchFilter(user))
   const day = businessDate && /^\d{4}-\d{2}-\d{2}$/.test(businessDate) ? businessDate : watDayKey()
-  const span: ShopRange = range === "week" || range === "day" ? range : "month"
-  const period = shopPeriodWindow(day, span)
+  const period = reportPeriodWindow(day, asReportRange(range), fromDate)
 
   const lines = await prisma.supplierReturnLine.findMany({
     where: { sentAt: { gte: period.start, lt: period.end }, ...(branchId ? { branchId } : {}) },

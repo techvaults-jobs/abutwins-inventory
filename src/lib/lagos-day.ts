@@ -163,6 +163,30 @@ export function shopPreviousWindow(from: string, range: ShopRange) {
   return shopPeriodWindow(last.toISOString().slice(0, 10), "month")
 }
 
+/** The Reports period: one of the shop ranges, or any first day to any last day. */
+export type ReportRange = ShopRange | "custom"
+
+export function asReportRange(value?: string): ReportRange {
+  return value === "day" || value === "week" || value === "custom" ? value : "month"
+}
+
+/** `day` is the last day. A chosen stretch starts on `from` (swapped if after `day`). */
+export function reportPeriodWindow(day: string, range: ReportRange, from?: string) {
+  if (range !== "custom") return shopPeriodWindow(day, range)
+  const ordered = orderedDayRange(from && isWatDayKey(from) ? from : day, day)
+  return { from: ordered.from, to: ordered.to, start: watBounds(ordered.from).start, end: watBounds(ordered.to).end }
+}
+
+/** The period before: a chosen stretch is compared with the same number of days just before it. */
+export function reportPreviousWindow(period: { from: string; to: string }, range: ReportRange) {
+  if (range !== "custom") return shopPreviousWindow(period.from, range)
+  const [fy, fm, fd] = period.from.split("-").map(Number)
+  const [ty, tm, td] = period.to.split("-").map(Number)
+  const days = Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86_400_000) + 1
+  const to = shiftWatDay(period.from, -1)
+  return reportPeriodWindow(to, "custom", shiftWatDay(to, -(days - 1)))
+}
+
 export function matchesWhenFilter(date: Date | string | null | undefined, when: WhenFilter) {
   if (when === "all") return true
   if (!date) return false

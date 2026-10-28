@@ -6,7 +6,7 @@ import { shopConditionLabel } from "@/lib/conditions"
 import { getOpeningReport } from "@/app/actions/opening-stock"
 import { getBranches } from "@/app/actions/parties"
 import { PageHeader } from "@/components/shared"
-import { formatWatLong, watDayKey, type ShopRange } from "@/lib/lagos-day"
+import { asReportRange, formatWatLong, isWatDayKey, watDayKey, type ReportRange } from "@/lib/lagos-day"
 import type { ReportsPack } from "@/lib/reports-pack"
 import { getAppSettings } from "@/lib/settings"
 import { requireUser } from "@/lib/session"
@@ -25,32 +25,30 @@ function shopOf(branch: { name: string; code: string }) {
   return { name: branch.name, code: branch.code }
 }
 
-function asRange(value?: string): ShopRange {
-  return value === "week" || value === "day" ? value : "month"
-}
-
-function periodLabel(range: ShopRange, from: string, to: string) {
-  if (range === "day") return formatWatLong(from)
+function periodLabel(range: ReportRange, from: string, to: string) {
+  if (range === "day" || from === to) return formatWatLong(from)
   return `${formatWatLong(from)} to ${formatWatLong(to)}`
 }
 
 export default async function ReportsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ branchId?: string; range?: string; date?: string }>
+  searchParams: Promise<{ branchId?: string; range?: string; date?: string; from?: string }>
 }) {
   const params = await searchParams
   const selectedBranchId = params.branchId || undefined
-  const range = asRange(params.range)
-  const date = params.date && /^\d{4}-\d{2}-\d{2}$/.test(params.date) ? params.date : watDayKey()
+  const range = asReportRange(params.range)
+  const date = params.date && isWatDayKey(params.date) ? params.date : watDayKey()
+  // A chosen stretch runs from `from` to `date`. Without a first day it is that one day.
+  const from = range === "custom" && params.from && isWatDayKey(params.from) ? params.from : undefined
 
   const [data, settings, user, branches, opening, supplierReturns, firstMove] = await Promise.all([
-    getReportData(selectedBranchId, range, date),
+    getReportData(selectedBranchId, range, date, from),
     getAppSettings(),
     requireUser(),
     getBranches(),
     getOpeningReport(selectedBranchId),
-    getSupplierReturnsReport(selectedBranchId, range, date),
+    getSupplierReturnsReport(selectedBranchId, range, date, from),
     // The stock ledger's first day: Shop stock value can be read back to here.
     prisma.stockMovement.findFirst({ orderBy: { businessDate: "asc" }, select: { businessDate: true } }),
   ])
@@ -184,7 +182,7 @@ export default async function ReportsPage({
     scope,
     preparedAt: new Date().toISOString(),
     preparedBy: user.name || user.email,
-    statementRef: `RP-${selectedBranch ? selectedBranch.code : "ALL"}-${range.toUpperCase()}-${data.period.from.replaceAll("-", "")}`,
+    statementRef: `RP-${selectedBranch ? selectedBranch.code : "ALL"}-${range.toUpperCase()}-${data.period.from.replaceAll("-", "")}${range === "custom" ? `-${data.period.to.replaceAll("-", "")}` : ""}`,
     periodLabel: label,
     range,
     stockBasis: showCost ? "cost" : "sell",
@@ -317,7 +315,8 @@ export default async function ReportsPage({
         branches={branches.map(({ id, name, code }) => ({ id, name, code }))}
         selectedBranchId={selectedBranchId}
         range={range}
-        date={date}
+        from={data.period.from}
+        date={data.period.to}
         stockSince={firstMove?.businessDate ?? watDayKey()}
       />
       {/* Returns outward: what went back to which supplier, how many, and the value. */}
