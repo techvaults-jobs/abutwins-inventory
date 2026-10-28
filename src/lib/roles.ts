@@ -61,6 +61,20 @@ export function canSeeShopTotals(role: UserRole) {
 }
 
 /**
+ * The business's totals on Home and Business today: the shop's sales and
+ * takings, what customers and suppliers are owed, stock value, the month and
+ * the shop ranking. The CEO found sales staff and other staff reading these
+ * on their Home and asked that only the CEO, the Accountant and the main admin
+ * see them. Everyone else keeps their own work: their sales today, what needs
+ * them, recent sales and stock counts.
+ */
+export const TOTALS_ROLES: readonly UserRole[] = ["CEO", "SUPER_ADMIN", "ACCOUNTANT"]
+
+export function canSeeBusinessTotals(role: UserRole) {
+  return TOTALS_ROLES.includes(role)
+}
+
+/**
  * What an item cost us, on the price list, stock value and reports. People
  * loading stock still type the cost from the supplier bill as they enter it.
  */

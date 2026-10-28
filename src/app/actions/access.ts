@@ -7,7 +7,8 @@ import { prisma } from "@/lib/prisma"
 import { ConflictError, shiftCustomerBalance } from "@/lib/concurrency"
 import { requireUser } from "@/lib/session"
 import { canHardDelete, isShopOwner } from "@/lib/rbac"
-import { ALL_PERM_KEYS, CEO_ONLY_KEYS, ensureRolePermissions } from "@/lib/permissions"
+import { ALL_PERM_KEYS, CEO_ONLY_KEYS, TOTALS_ONLY_KEYS, ensureRolePermissions } from "@/lib/permissions"
+import { canSeeBusinessTotals } from "@/lib/roles"
 import { isOpeningStockPurchase, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
 import { assertCashAvailable, UNDO_COLLECTION_NOTE } from "@/lib/shop-cash"
 import { canReachBranch, OTHER_SHOP } from "@/lib/branch-scope"
@@ -34,7 +35,8 @@ export async function saveRoleAccess(formData: FormData) {
   // Each job keeps its own ticks. Auditor and accountant are no longer written together.
   for (const key of ALL_PERM_KEYS) {
     // Who can see what stays with the owners; profit and cost stay with the CEO.
-    if (key === "view.access" || CEO_ONLY_KEYS.includes(key)) {
+    // Business totals stay with the CEO, the Accountant and the main admin.
+    if (key === "view.access" || CEO_ONLY_KEYS.includes(key) || (TOTALS_ONLY_KEYS.includes(key) && !canSeeBusinessTotals(role))) {
       await prisma.rolePermission.upsert({
         where: { role_permKey: { role, permKey: key } },
         update: { allowed: false },

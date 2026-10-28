@@ -3,7 +3,8 @@ import { redirect } from "next/navigation"
 import { getRoleMatrix, saveRoleAccess } from "@/app/actions/access"
 import { ActionForm } from "@/components/action-form"
 import { PageHeader } from "@/components/shared"
-import { ACTION_PERMS, CEO_ONLY_KEYS, VIEW_PERMS } from "@/lib/permissions"
+import { ACTION_PERMS, CEO_ONLY_KEYS, TOTALS_ONLY_KEYS, VIEW_PERMS } from "@/lib/permissions"
+import { canSeeBusinessTotals } from "@/lib/roles"
 import { ROLE_LABELS, isShopOwner } from "@/lib/rbac"
 import { requireUser } from "@/lib/session"
 import { cn } from "@/lib/utils"
@@ -35,7 +36,12 @@ function RoleAccessCard({
             Pages they can open
           </p>
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-            {VIEW_PERMS.filter((row) => row.key !== "view.access" && !CEO_ONLY_KEYS.includes(row.key)).map((row) => (
+            {VIEW_PERMS.filter(
+              (row) =>
+                row.key !== "view.access" &&
+                !CEO_ONLY_KEYS.includes(row.key) &&
+                !(TOTALS_ONLY_KEYS.includes(row.key) && !canSeeBusinessTotals(role))
+            ).map((row) => (
               <label key={row.key} className="flex items-center gap-2 text-sm">
                 <input type="checkbox" name={row.key} defaultChecked={allowed.get(`${role}:${row.key}`) === true} />
                 {row.label}
@@ -85,7 +91,7 @@ export default async function AccessPage({ searchParams }: { searchParams: Promi
     <div className="space-y-6">
       <PageHeader
         title="Who can see what"
-        description="Pick a job, then tick the pages it may open. The left menu only shows what is ticked for that job. The main admin and the CEO keep every page; profit and what items cost are seen by the CEO, the main admin, the Accountant and the Auditor."
+        description="Pick a job, then tick the pages it may open. The left menu only shows what is ticked for that job. The main admin and the CEO keep every page; profit and what items cost are seen by the CEO, the main admin, the Accountant and the Auditor. The business's totals (Home's totals and Business today) are seen by the CEO, the main admin and the Accountant only."
       />
 
       <nav aria-label="Pick a job" className="flex flex-wrap gap-2">

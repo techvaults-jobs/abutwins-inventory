@@ -1,7 +1,7 @@
 import { cache } from "react"
 import { UserRole } from "@prisma/client"
 import { prisma } from "@/lib/prisma"
-import { canSeeProfit, isCEO, isShopOwner, PROFIT_ROLES } from "@/lib/roles"
+import { canSeeBusinessTotals, canSeeProfit, isCEO, isShopOwner, PROFIT_ROLES } from "@/lib/roles"
 
 export { isSuperAdmin, isShopOwner, isCEO, isBooksDesk, BOOKS_DESK_ROLES } from "@/lib/roles"
 
@@ -67,6 +67,13 @@ export const ALL_PERM_KEYS = [...VIEW_PERMS, ...ACTION_PERMS].map((row) => row.k
  * canSeeCost in lib/roles.
  */
 export const CEO_ONLY_KEYS: readonly string[] = ["view.profits", "action.see_cost"]
+
+/**
+ * Pages made of the business's totals (Business today): the CEO, the
+ * Accountant and the main admin only, decided in code by canSeeBusinessTotals.
+ * A tick on Who can see what cannot open them for anyone else.
+ */
+export const TOTALS_ONLY_KEYS: readonly string[] = ["view.owner"]
 // Named for history: these are the profit keys, held by PROFIT_ROLES (the CEO
 // the main admin and the books desk), decided in code by canSeeProfit, never by a box.
 
@@ -333,6 +340,7 @@ export async function getAllowedKeys(role: UserRole) {
     if (canSeeProfit(role)) allowed.add(key)
     else allowed.delete(key)
   }
+  if (!canSeeBusinessTotals(role)) for (const key of TOTALS_ONLY_KEYS) allowed.delete(key)
   if (isShopOwner(role)) allowed.add("view.access")
   return allowed
 }
@@ -340,6 +348,7 @@ export async function getAllowedKeys(role: UserRole) {
 export async function can(role: UserRole, key: string) {
   if (isCEO(role)) return true
   if (CEO_ONLY_KEYS.includes(key)) return canSeeProfit(role)
+  if (TOTALS_ONLY_KEYS.includes(key) && !canSeeBusinessTotals(role)) return false
   if (role === "SUPER_ADMIN") return true
   // Undoing a collection or a supplier payment: the CEO and the main admin.
   if (key === "action.undo") return false

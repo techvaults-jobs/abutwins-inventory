@@ -5,7 +5,7 @@ import { prisma } from "@/lib/prisma"
 import { viewBranchFilter } from "@/lib/branch-scope"
 import { requireUser } from "@/lib/session"
 import { can } from "@/lib/permissions"
-import { canSeeProfit } from "@/lib/roles"
+import { canSeeBusinessTotals, canSeeProfit } from "@/lib/roles"
 import { money } from "@/lib/utils"
 import { lineValueAfterOrderDiscount } from "@/lib/sale-money"
 import { recentWatDays, shiftWatDay, watBounds, watDayKey } from "@/lib/lagos-day"
@@ -86,9 +86,10 @@ function spanWindow(fromDay: string, toDay: string) {
 
 export async function getOwnerBoard(dayKey?: string) {
   const user = await requireUser()
-  // The board is the owner's and the books desk's view. Anyone who may see
-  // profit or reports may see it.
-  const allowed = (await can(user.role, "view.profits")) || (await can(user.role, "view.reports"))
+  // The board is the business's totals: the CEO, the Accountant and the main
+  // admin only (see canSeeBusinessTotals). Seeing Reports is not enough; a
+  // branch manager used to open it that way.
+  const allowed = canSeeBusinessTotals(user.role) && ((await can(user.role, "view.profits")) || (await can(user.role, "view.reports")))
   if (!allowed) return null
 
   const day = dayKey && /^\d{4}-\d{2}-\d{2}$/.test(dayKey) ? dayKey : watDayKey()

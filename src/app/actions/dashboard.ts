@@ -5,6 +5,7 @@ import { viewBranchFilter } from "@/lib/branch-scope"
 import { requireUser } from "@/lib/session"
 import { canSeeAllBranches, canSeeCost, scopedBranchId } from "@/lib/rbac"
 import { isShopOwner } from "@/lib/permissions"
+import { canSeeBusinessTotals } from "@/lib/roles"
 import { money } from "@/lib/utils"
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
 import { payablePurchaseWhere, groupSupplierLedgers } from "@/lib/purchase-money"
@@ -402,7 +403,7 @@ export async function getDashboardData() {
     })
     .sort((a, b) => b.salesValue - a.salesValue)
 
-  return {
+  const result = {
     user,
     unread,
     today: {
@@ -499,6 +500,20 @@ export async function getDashboardData() {
       },
       { href: "/approvals", label: "Needs approval", count: pendingApprovals },
     ].filter((task) => task.count > 0),
+  }
+  // The business's totals are for the CEO, the Accountant and the main admin
+  // (canSeeBusinessTotals). For everyone else they are not even sent: Home
+  // keeps their own sales today, what needs them, recent sales and stock.
+  if (canSeeBusinessTotals(user.role)) return result
+  return {
+    ...result,
+    today: { ...result.today, sales: 0, paid: 0, debtsCollected: 0, count: 0, week: [], lastWeekSales: 0, lastWeekTaken: 0, owed: 0, owedCustomers: 0 },
+    kpis: { ...result.kpis, totalSales: 0, totalExpense: 0, paymentSent: 0, paymentReceived: 0, stockValue: 0, outstanding: 0, salesCount: 0 },
+    chartSales: [],
+    devices: [],
+    ranking: [],
+    salesByStaff: [],
+    exceptions: { ...result.exceptions, creditorOwed: 0, supplierCredit: 0 },
   }
 }
 

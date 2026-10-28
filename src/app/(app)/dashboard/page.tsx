@@ -31,7 +31,7 @@ import { KpiCard, Sparkline, StatCard, StatGrid } from "@/components/shared"
 import { Badge } from "@/components/ui/badge"
 import { formatShopWhen, formatWatLong, watDayKey } from "@/lib/lagos-day"
 import { getAllowedKeys, hrefsForKeys } from "@/lib/permissions"
-import { canSeeShopTotals } from "@/lib/roles"
+import { canSeeBusinessTotals } from "@/lib/roles"
 import { getAppSettings, lowStockLimit } from "@/lib/settings"
 import { InstallAppBanner } from "@/components/install-app"
 import { UpdatedStamp } from "@/components/updated-stamp"
@@ -131,8 +131,11 @@ export default async function DashboardPage() {
   // Sales, money and stock figures are for people who work the business. A
   // system-only main admin gets their jobs and what needs them, nothing more.
   const seesBusiness = ["/sales", "/finance", "/reports", "/owner", "/inventory", "/pos"].some((href) => allowed.has(href))
-  // The till and the shop floor see today, not the month or the shop's totals.
-  const seesTotals = seesBusiness && canSeeShopTotals(data.user.role)
+  // The business's totals (the shop's sales and takings today, what customers
+  // and suppliers are owed, the month, stock value, the ranking) are for the
+  // CEO, the Accountant and the main admin. The CEO found sales staff and
+  // other staff reading them on Home. Everyone else sees their own sales.
+  const seesTotals = seesBusiness && canSeeBusinessTotals(data.user.role)
   const tasks = data.tasks
     .filter((task) => allowed.has(task.href.split("?")[0]))
     .map((task) => ({ ...task, urgency: URGENCY[task.href] ?? TIDY }))
@@ -140,6 +143,7 @@ export default async function DashboardPage() {
   // "Your sales today" is for people who sell. The office sees it only on a
   // day they rang something up themselves.
   const showMine = sellsHere && (!OFFICE_ROLES.includes(data.user.role) || data.today.mine > 0)
+  const showToday = seesTotals || showMine
 
   return (
     <div className="motion-stagger space-y-6">
@@ -180,10 +184,12 @@ export default async function DashboardPage() {
         </div>
       ) : null}
 
-      {seesBusiness ? (
+      {seesBusiness && showToday ? (
       <section>
         <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Today</h3>
-        <StatGrid className={showMine ? "xl:grid-cols-4" : "xl:grid-cols-3"}>
+        <StatGrid className={!seesTotals ? "xl:grid-cols-4" : showMine ? "xl:grid-cols-4" : "xl:grid-cols-3"}>
+          {seesTotals ? (
+          <>
           <StatCard
             lead
             label="Sales today"
@@ -215,6 +221,8 @@ export default async function DashboardPage() {
             }
             href="/customers"
           />
+          </>
+          ) : null}
           {showMine ? (
             <StatCard
               label="Your sales today"
