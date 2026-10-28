@@ -48,7 +48,25 @@ export type ReportsPack = {
    * from the cost copied onto each line at checkout; 0 for anyone who may not
    * see cost (stockBasis "sell").
    */
-  byShop: Array<{ id: string; code: string; name: string; tickets: number; revenue: number; cost: number; collected: number }>
+  byShop: Array<{
+    id: string
+    code: string
+    name: string
+    /** Invoices in the period. */
+    tickets: number
+    /** Items on those invoices (pieces, phones count one each). */
+    items: number
+    /** Total sales: the invoices as written. */
+    revenue: number
+    /** Cost of everything on those invoices (0 for a role that may not see cost). */
+    cost: number
+    collected: number
+    /** Refunds and credit notes finished in the period: what was taken back. */
+    returns: number
+    returnedItems: number
+    /** What the returned items cost us when sold. */
+    returnCost: number
+  }>
   debtors: Array<{ id: string; name: string; shop: string; amount: number }>
   creditors: Array<{ id: string; invoice: string; supplier: string; shop: string; owed: number }>
   supplierCredits: Array<{ id: string; invoice: string; supplier: string; shop: string; owed: number }>
@@ -73,4 +91,35 @@ export function reportsKpis(data: ReportsPack) {
     { label: "Customers still owe, in total", value: data.totals.owing, money: true },
     { label: "Swap Deal value", value: data.totals.swaps, money: true },
   ]
+}
+
+/**
+ * Sales by shop, from the invoices to what really happened: the client asked
+ * that what customers returned comes off, and that the cost is the cost of
+ * those actual sales. Total sales less refunds and credit notes finished in
+ * the period is the actual sales; the cost of what was sold less the cost of
+ * what came back is the cost of the actual sales. One shop's line, or several
+ * added up (the All shops line).
+ */
+export function shopActuals(rows: ReportsPack["byShop"]) {
+  const sum = (pick: (row: ReportsPack["byShop"][number]) => number) => rows.reduce((total, row) => total + pick(row), 0)
+  const revenue = sum((row) => row.revenue)
+  const returns = sum((row) => row.returns ?? 0)
+  const cost = sum((row) => row.cost)
+  const returnCost = sum((row) => row.returnCost ?? 0)
+  const actualSales = revenue - returns
+  const actualCost = cost - returnCost
+  return {
+    invoices: sum((row) => row.tickets),
+    items: sum((row) => row.items ?? 0),
+    revenue,
+    returns,
+    returnedItems: sum((row) => row.returnedItems ?? 0),
+    actualSales,
+    cost,
+    returnCost,
+    actualCost,
+    profit: actualSales - actualCost,
+    collected: sum((row) => row.collected),
+  }
 }

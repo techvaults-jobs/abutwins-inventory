@@ -1,5 +1,5 @@
 import type { ReportsPack } from "@/lib/reports-pack"
-import { reportsKpis } from "@/lib/reports-pack"
+import { reportsKpis, shopActuals } from "@/lib/reports-pack"
 import { formatLagosStamp } from "@/lib/lagos-day"
 import { letterheadFromCompany } from "@/lib/letterhead"
 import { formatCurrency } from "@/lib/utils"
@@ -51,26 +51,41 @@ export function ReportsStatement({ data }: { data: ReportsPack }) {
           <thead>
             <tr className="border-y border-slate-200 bg-slate-50 text-left text-[10px] uppercase tracking-wider text-slate-500">
               <th className="py-1.5 pr-2">Branch</th>
-              <th className="py-1.5 pr-2 text-right">Sales Volume</th>
+              <th className="py-1.5 pr-2 text-right">Invoices</th>
               <th className="py-1.5 pr-2 text-right">Total Sales</th>
-              {data.stockBasis === "cost" ? <th className="py-1.5 pr-2 text-right">Total Cost</th> : null}
+              <th className="py-1.5 pr-2 text-right">Returns</th>
+              <th className="py-1.5 pr-2 text-right">Actual Sales</th>
+              {data.stockBasis === "cost" ? (
+                <>
+                  <th className="py-1.5 pr-2 text-right">Cost of Actual Sales</th>
+                  <th className="py-1.5 pr-2 text-right">Gross Profit</th>
+                </>
+              ) : null}
               <th className="py-1.5 text-right">Payments Received</th>
             </tr>
           </thead>
           <tbody>
-            {data.byShop.map((row) => (
-              <tr key={row.name} className="border-b border-slate-100">
-                <td className="py-1.5 pr-2 font-medium">{row.name}</td>
-                <td className="py-1.5 pr-2 text-right tabular-nums">{row.tickets}</td>
-                <td className="py-1.5 pr-2 text-right tabular-nums">{formatCurrency(row.revenue)}</td>
-                {data.stockBasis === "cost" ? (
-                  <td className="py-1.5 pr-2 text-right tabular-nums">{formatCurrency(row.cost)}</td>
-                ) : null}
-                <td className="py-1.5 text-right tabular-nums">{formatCurrency(row.collected)}</td>
-              </tr>
-            ))}
+            {data.byShop.map((row) => {
+              const figures = shopActuals([row])
+              return (
+                <tr key={row.name} className="border-b border-slate-100">
+                  <td className="py-1.5 pr-2 font-medium">{row.name}</td>
+                  <td className="py-1.5 pr-2 text-right tabular-nums">{row.tickets}</td>
+                  <td className="py-1.5 pr-2 text-right tabular-nums">{formatCurrency(row.revenue)}</td>
+                  <td className="py-1.5 pr-2 text-right tabular-nums">{figures.returns > 0 ? `−${formatCurrency(figures.returns)}` : "—"}</td>
+                  <td className="py-1.5 pr-2 text-right font-semibold tabular-nums">{formatCurrency(figures.actualSales)}</td>
+                  {data.stockBasis === "cost" ? (
+                    <>
+                      <td className="py-1.5 pr-2 text-right tabular-nums">{formatCurrency(figures.actualCost)}</td>
+                      <td className="py-1.5 pr-2 text-right tabular-nums">{formatCurrency(figures.profit)}</td>
+                    </>
+                  ) : null}
+                  <td className="py-1.5 text-right tabular-nums">{formatCurrency(row.collected)}</td>
+                </tr>
+              )
+            })}
             {data.byShop.length === 0 ? (
-              <tr><td colSpan={data.stockBasis === "cost" ? 5 : 4} className="py-3 text-slate-500">No completed sales in this scope.</td></tr>
+              <tr><td colSpan={data.stockBasis === "cost" ? 8 : 6} className="py-3 text-slate-500">No completed sales in this scope.</td></tr>
             ) : null}
           </tbody>
         </table>

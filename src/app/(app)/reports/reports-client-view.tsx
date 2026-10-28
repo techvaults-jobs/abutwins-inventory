@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation"
 import { Banknote, ChevronDown, ChevronRight, Lock, Package, PackagePlus, TrendingDown, TrendingUp } from "lucide-react"
 import type { OpeningReport } from "@/app/actions/opening-stock"
 import { getStockAsAt, type StockAsAt } from "@/app/actions/stock-as-at"
-import { formatCurrency, formatDate, money } from "@/lib/utils"
+import { cn, formatCurrency, formatDate, money } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Select } from "@/components/ui/select"
 import { ReportsStatement } from "@/components/reports-statement"
@@ -25,7 +25,7 @@ import {
   Toolbar,
 } from "@/components/shared"
 import { TablePager, usePagedRows } from "@/components/table-pager"
-import type { ReportsPack } from "@/lib/reports-pack"
+import { shopActuals, type ReportsPack } from "@/lib/reports-pack"
 import { formatWatLong, watDayKey } from "@/lib/lagos-day"
 import { groupOwedHouses, type OwedHouse } from "@/lib/purchase-money"
 import { ShopSalesDetail, type ShopSaleLine } from "./shop-sales-detail"
@@ -216,19 +216,7 @@ export function ReportsClientView({
   const fileScope = `${pack.statementRef}`
 
   const byShopPager = usePagedRows(pack.byShop, scopeKey)
-  const byShopTotal = useMemo(
-    () =>
-      pack.byShop.reduce(
-        (sum, row) => ({
-          tickets: sum.tickets + row.tickets,
-          revenue: sum.revenue + row.revenue,
-          cost: sum.cost + row.cost,
-          collected: sum.collected + row.collected,
-        }),
-        { tickets: 0, revenue: 0, cost: 0, collected: 0 }
-      ),
-    [pack.byShop]
-  )
+  const byShopTotal = useMemo(() => shopActuals(pack.byShop), [pack.byShop])
   const debtorsPager = usePagedRows(pack.debtors, scopeKey)
   const creditorsPager = usePagedRows(owedHouses, scopeKey)
   const creditsPager = usePagedRows(creditHouses, `${scopeKey}-credits`)
@@ -694,121 +682,143 @@ export function ReportsClientView({
           </div>
         </details>
 
-        <div className="grid gap-4 xl:grid-cols-2">
-          <TableShell
-            caption={
-              <>
-                <div>
-                  <h2 className="text-sm font-semibold tracking-tight">Sales by shop</h2>
-                  <p className="text-xs text-muted-foreground">Tap a shop to see every sale behind its figures.</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground">
-                    {pack.byShop.length} branch location{pack.byShop.length === 1 ? "" : "s"}
-                  </span>
-                  <TableDownload
-                    filename={`${fileScope}-branch-breakdown`}
-                    rows={() => [
-                      ["Branch", "Sales Volume", "Total Sales", ...(showCost ? ["Total Cost", "Gross Profit"] : []), "Payments Received"],
-                      ...pack.byShop.map((row) => [
-                        row.name,
-                        row.tickets,
-                        row.revenue,
-                        ...(showCost ? [row.cost, row.revenue - row.cost] : []),
-                        row.collected,
-                      ]),
-                      [],
+        {/* The client: total sales "shows what was sold truly, but not the
+            actual sales made, because we made some returns". Each shop goes
+            from its invoices to its actual sales (less refunds and credit
+            notes finished in the period, as the Total sales card), and its
+            cost is the cost of those actual sales. Full width: it has more
+            columns than half the screen can hold. */}
+        <TableShell
+          caption={
+            <>
+              <div>
+                <h2 className="text-sm font-semibold tracking-tight">Sales by shop</h2>
+                <p className="text-xs text-muted-foreground">
+                  Actual sales are total sales less refunds and credit notes finished in this period
+                  {showCost ? ". Their cost leaves out what came back" : ""}. Tap a shop to see every sale behind its figures.
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-muted-foreground">
+                  {pack.byShop.length} branch location{pack.byShop.length === 1 ? "" : "s"}
+                </span>
+                <TableDownload
+                  filename={`${fileScope}-branch-breakdown`}
+                  rows={() => {
+                    const line = (name: string, row: ReturnType<typeof shopActuals>) => [
+                      name,
+                      row.invoices,
+                      row.items,
+                      row.revenue,
+                      row.returns,
+                      row.returnedItems,
+                      row.actualSales,
+                      ...(showCost ? [row.cost, row.returnCost, row.actualCost, row.profit] : []),
+                      row.collected,
+                    ]
+                    return [
                       [
-                        "All shops",
-                        byShopTotal.tickets,
-                        byShopTotal.revenue,
-                        ...(showCost ? [byShopTotal.cost, byShopTotal.revenue - byShopTotal.cost] : []),
-                        byShopTotal.collected,
+                        "Branch",
+                        "Invoices",
+                        "Items sold",
+                        "Total sales",
+                        "Returns (refunds and credit notes)",
+                        "Items returned",
+                        "Actual sales",
+                        ...(showCost ? ["Total cost", "Cost of items returned", "Cost of actual sales", "Gross profit"] : []),
+                        "Payments received",
                       ],
-                    ]}
-                  />
-                </div>
-              </>
-            }
-            columns={[
-              { label: "Branch" },
-              { label: "Sales Volume", align: "right" },
-              { label: "Total Sales", align: "right" },
-              ...(showCost ? [{ label: "Total Cost", align: "right" as const }] : []),
-              { label: "Payments Received", align: "right" },
-            ]}
-            footer={
-              <TablePager
-                page={byShopPager.page}
-                pageCount={byShopPager.pageCount}
-                pageSize={byShopPager.pageSize}
-                total={byShopPager.total}
-                start={byShopPager.start}
-                end={byShopPager.end}
-                onPageChange={byShopPager.setPage}
-                onPageSizeChange={byShopPager.setPageSize}
-                noun="shops"
-              />
-            }
-          >
-            {byShopPager.pageRows.map((row) => (
-              <tr
-                key={row.id}
-                tabIndex={0}
-                role="button"
-                aria-label={`See every sale at ${row.name}`}
-                onClick={() => setOpenShop(row.id)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault()
-                    setOpenShop(row.id)
-                  }
-                }}
-                className="group cursor-pointer transition-colors hover:bg-primary/5 focus-visible:bg-primary/5 focus-visible:outline-none"
-              >
-                <td>
-                  <span className="inline-flex items-center gap-1 font-medium text-primary group-hover:underline">
-                    {row.name}
-                    <ChevronRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" aria-hidden />
-                  </span>
-                </td>
-                <td className="text-right num">{row.tickets}</td>
-                <td className="text-right num">{formatCurrency(row.revenue)}</td>
-                {showCost ? <td className="text-right num">{formatCurrency(row.cost)}</td> : null}
-                <td className="text-right num font-semibold text-success">{formatCurrency(row.collected)}</td>
-              </tr>
-            ))}
-            {pack.byShop.length > 1 ? (
-              <tr
-                tabIndex={0}
-                role="button"
-                aria-label="See every sale at every shop"
-                onClick={() => setOpenShop("ALL")}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault()
-                    setOpenShop("ALL")
-                  }
-                }}
-                className="group cursor-pointer border-t-2 border-border bg-muted/40 font-semibold transition-colors hover:bg-primary/5 focus-visible:bg-primary/5 focus-visible:outline-none"
-              >
-                <td>
-                  <span className="inline-flex items-center gap-1 text-primary group-hover:underline">
-                    All shops
-                    <ChevronRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" aria-hidden />
-                  </span>
-                </td>
-                <td className="text-right num">{byShopTotal.tickets}</td>
-                <td className="text-right num">{formatCurrency(byShopTotal.revenue)}</td>
-                {showCost ? <td className="text-right num">{formatCurrency(byShopTotal.cost)}</td> : null}
-                <td className="text-right num text-success">{formatCurrency(byShopTotal.collected)}</td>
-              </tr>
-            ) : null}
-            {pack.byShop.length === 0 ? (
-              <TableEmpty colSpan={showCost ? 5 : 4}>This shop made no sale in this time.</TableEmpty>
-            ) : null}
-          </TableShell>
+                      ...pack.byShop.map((row) => line(row.name, shopActuals([row]))),
+                      [],
+                      line("All shops", byShopTotal),
+                    ]
+                  }}
+                />
+              </div>
+            </>
+          }
+          columns={[
+            { label: "Branch" },
+            { label: "Invoices", align: "right" },
+            { label: "Items sold", align: "right" },
+            { label: "Total sales", align: "right" },
+            { label: "Returns", align: "right" },
+            { label: "Actual sales", align: "right" },
+            ...(showCost
+              ? [
+                  { label: "Cost of actual sales", align: "right" as const },
+                  { label: "Gross profit", align: "right" as const },
+                ]
+              : []),
+            { label: "Payments received", align: "right" },
+          ]}
+          footer={
+            <TablePager
+              page={byShopPager.page}
+              pageCount={byShopPager.pageCount}
+              pageSize={byShopPager.pageSize}
+              total={byShopPager.total}
+              start={byShopPager.start}
+              end={byShopPager.end}
+              onPageChange={byShopPager.setPage}
+              onPageSizeChange={byShopPager.setPageSize}
+              noun="shops"
+            />
+          }
+        >
+          {byShopPager.pageRows.map((row) => (
+            <tr
+              key={row.id}
+              tabIndex={0}
+              role="button"
+              aria-label={`See every sale at ${row.name}`}
+              onClick={() => setOpenShop(row.id)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault()
+                  setOpenShop(row.id)
+                }
+              }}
+              className="group cursor-pointer transition-colors hover:bg-primary/5 focus-visible:bg-primary/5 focus-visible:outline-none"
+            >
+              <td>
+                <span className="inline-flex items-center gap-1 font-medium text-primary group-hover:underline">
+                  {row.name}
+                  <ChevronRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" aria-hidden />
+                </span>
+              </td>
+              <ShopFigures row={shopActuals([row])} showCost={showCost} />
+            </tr>
+          ))}
+          {pack.byShop.length > 1 ? (
+            <tr
+              tabIndex={0}
+              role="button"
+              aria-label="See every sale at every shop"
+              onClick={() => setOpenShop("ALL")}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault()
+                  setOpenShop("ALL")
+                }
+              }}
+              className="group cursor-pointer border-t-2 border-border bg-muted/40 font-semibold transition-colors hover:bg-primary/5 focus-visible:bg-primary/5 focus-visible:outline-none"
+            >
+              <td>
+                <span className="inline-flex items-center gap-1 text-primary group-hover:underline">
+                  All shops
+                  <ChevronRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" aria-hidden />
+                </span>
+              </td>
+              <ShopFigures row={byShopTotal} showCost={showCost} />
+            </tr>
+          ) : null}
+          {pack.byShop.length === 0 ? (
+            <TableEmpty colSpan={showCost ? 9 : 7}>This shop made no sale in this time.</TableEmpty>
+          ) : null}
+        </TableShell>
 
+        <div className="grid gap-4 xl:grid-cols-2">
           <TableShell
             caption={
               <>
@@ -1709,6 +1719,41 @@ function OwedHouseRows({
           </td>
         </tr>
       ) : null}
+    </>
+  )
+}
+
+/** One line of Sales by shop, from its invoices to its actual sales and their cost. */
+function ShopFigures({ row, showCost }: { row: ReturnType<typeof shopActuals>; showCost: boolean }) {
+  return (
+    <>
+      <td className="text-right num">{row.invoices}</td>
+      <td className="text-right num">
+        {row.items}
+        {row.returnedItems > 0 ? <span className="block text-xs font-normal text-muted-foreground">{row.returnedItems} returned</span> : null}
+      </td>
+      <td className="text-right num">{formatCurrency(row.revenue)}</td>
+      <td className="text-right num text-warning">{row.returns > 0 ? `−${formatCurrency(row.returns)}` : "—"}</td>
+      <td className="text-right num font-semibold">{formatCurrency(row.actualSales)}</td>
+      {showCost ? (
+        <>
+          <td className="text-right num">
+            {formatCurrency(row.actualCost)}
+            {row.returnCost > 0 ? (
+              <span className="block text-xs font-normal text-muted-foreground">
+                {formatCurrency(row.cost)} less {formatCurrency(row.returnCost)} returned
+              </span>
+            ) : null}
+          </td>
+          <td className={cn("text-right num font-semibold", row.profit < 0 ? "text-danger" : "text-success")}>
+            {formatCurrency(row.profit)}
+            {row.actualSales > 0 ? (
+              <span className="block text-xs font-normal text-muted-foreground">{((row.profit / row.actualSales) * 100).toFixed(1)}%</span>
+            ) : null}
+          </td>
+        </>
+      ) : null}
+      <td className="text-right num text-success">{formatCurrency(row.collected)}</td>
     </>
   )
 }

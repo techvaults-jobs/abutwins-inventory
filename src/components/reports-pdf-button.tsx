@@ -8,7 +8,7 @@ import { formatLagosStamp } from "@/lib/lagos-day"
 import { letterheadFromCompany } from "@/lib/letterhead"
 import { drawPdfLetterhead, drawPdfPaperFooter, loadLogoDataUrl } from "@/lib/pdf-letterhead"
 import type { ReportsPack } from "@/lib/reports-pack"
-import { reportsKpis } from "@/lib/reports-pack"
+import { reportsKpis, shopActuals } from "@/lib/reports-pack"
 import { groupOwedHouses } from "@/lib/purchase-money"
 
 const NAVY: [number, number, number] = [0, 27, 206]
@@ -112,18 +112,20 @@ export function ReportsPdfButton({ data }: { data: ReportsPack }) {
       y += 34
 
       section("Sales by shop")
-      // Total Cost goes in for the people who see cost; the columns close up
-      // to make room.
+      // Total sales, less returns, is the actual sales; the cost of the actual
+      // sales goes in for the people who see cost, and the columns close up.
       const withCost = data.stockBasis === "cost"
       const col = withCost
-        ? { sales: left + 76, revenue: left + 112, cost: left + 146 }
-        : { sales: left + 92, revenue: left + 138, cost: 0 }
+        ? { sales: left + 50, revenue: left + 78, returns: left + 103, actual: left + 130, cost: left + 157 }
+        : { sales: left + 60, revenue: left + 94, returns: left + 122, actual: left + 152, cost: 0 }
       doc.setTextColor(...MUTED)
       doc.setFontSize(7)
       doc.text("Branch", left + 1, y)
-      doc.text("Sales", col.sales, y, { align: "right" })
+      doc.text("Invoices", col.sales, y, { align: "right" })
       doc.text("Total Sales", col.revenue, y, { align: "right" })
-      if (withCost) doc.text("Total Cost", col.cost, y, { align: "right" })
+      doc.text("Returns", col.returns, y, { align: "right" })
+      doc.text("Actual Sales", col.actual, y, { align: "right" })
+      if (withCost) doc.text("Cost of Actual", col.cost, y, { align: "right" })
       doc.text("Payments Received", right - 1, y, { align: "right" })
       y += 5
       if (data.byShop.length === 0) {
@@ -138,11 +140,14 @@ export function ReportsPdfButton({ data }: { data: ReportsPack }) {
           doc.setTextColor(...INK)
           doc.setFont("helvetica", "normal")
           doc.setFontSize(8)
+          const figures = shopActuals([item])
           doc.text(item.name, left + 1, y)
           doc.text(String(item.tickets), col.sales, y, { align: "right" })
-          doc.setFont("helvetica", "bold")
           doc.text(formatPdfMoney(item.revenue), col.revenue, y, { align: "right" })
-          if (withCost) doc.text(formatPdfMoney(item.cost), col.cost, y, { align: "right" })
+          doc.text(figures.returns > 0 ? `-${formatPdfMoney(figures.returns)}` : "-", col.returns, y, { align: "right" })
+          doc.setFont("helvetica", "bold")
+          doc.text(formatPdfMoney(figures.actualSales), col.actual, y, { align: "right" })
+          if (withCost) doc.text(formatPdfMoney(figures.actualCost), col.cost, y, { align: "right" })
           doc.text(formatPdfMoney(item.collected), right - 1, y, { align: "right" })
           y += 5.6
         })

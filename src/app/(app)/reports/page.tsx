@@ -21,6 +21,12 @@ import { ReportsClientView } from "./reports-client-view"
 import { SupplierReturnsReport } from "./supplier-returns-report"
 import { getSupplierReturnsReport } from "@/app/actions/supplier-returns"
 
+type ShopRow = ReportsPack["byShop"][number]
+
+function emptyShopRow(branch: { id: string; code: string; name: string }): ShopRow {
+  return { id: branch.id, code: branch.code, name: branch.name, revenue: 0, cost: 0, collected: 0, tickets: 0, items: 0, returns: 0, returnedItems: 0, returnCost: 0 }
+}
+
 function shopOf(branch: { name: string; code: string }) {
   return { name: branch.name, code: branch.code }
 }
@@ -135,16 +141,18 @@ export default async function ReportsPage({
   shopLines.sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : a.invoice.localeCompare(b.invoice)))
 
   const shopRows = data.sales.reduce<
-    Record<string, { id: string; code: string; name: string; revenue: number; cost: number; collected: number; tickets: number }>
+    Record<string, ShopRow>
   >((acc, sale) => {
     const key = sale.branch.id
-    acc[key] = acc[key] ?? { id: key, code: sale.branch.code, name: sale.branch.name, revenue: 0, cost: 0, collected: 0, tickets: 0 }
+    acc[key] = acc[key] ?? emptyShopRow({ id: key, code: sale.branch.code, name: sale.branch.name })
     acc[key].revenue += money(sale.totalAmount)
     acc[key].tickets += 1
     return acc
   }, {})
   for (const line of shopLines) {
-    if (shopRows[line.shopId]) shopRows[line.shopId].cost += line.cost
+    if (!shopRows[line.shopId]) continue
+    shopRows[line.shopId].cost += line.cost
+    shopRows[line.shopId].items += line.quantity
   }
   // Money in per shop on the same footing as the report's total: by the day
   // it arrived, over the report's own period. (This used to rebuild the
@@ -159,10 +167,21 @@ export default async function ReportsPage({
     shopsInScope.map(async (branch) => {
       const collected = (await receiptsInWindow({ branchId: branch.id, start: data.period.start, end: data.period.end })).total
       if (!shopRows[branch.id] && collected <= 0) return
-      shopRows[branch.id] ??= { id: branch.id, code: branch.code, name: branch.name, revenue: 0, cost: 0, collected: 0, tickets: 0 }
+      shopRows[branch.id] ??= emptyShopRow(branch)
       shopRows[branch.id].collected = collected
     })
   )
+  // Refunds and credit notes finished in the period, shop by shop: the same
+  // returns as the Total sales card's "after returns", so the shop lines add
+  // up to it. A shop that only took returns in the period still gets a line.
+  for (const row of data.returnsByShop) {
+    const branch = branches.find((shop) => shop.id === row.branchId)
+    if (!shopRows[row.branchId] && !branch) continue
+    shopRows[row.branchId] ??= emptyShopRow(branch!)
+    shopRows[row.branchId].returns = row.value
+    shopRows[row.branchId].returnedItems = row.items
+    shopRows[row.branchId].returnCost = showCost ? row.cost : 0
+  }
   const byShop = Object.values(shopRows).sort((a, b) => b.revenue - a.revenue)
 
   const selectedBranch = branches.find((b) => b.id === selectedBranchId)

@@ -2041,6 +2041,7 @@ export async function getReportData(
       returns: [],
       loggedReturns: 0,
       salesReturns: 0,
+      returnsByShop: [] as Array<{ branchId: string; value: number; items: number; cost: number }>,
       receipts: { total: 0, onPeriodSales: 0, debtsCollected: 0, cash: 0, transfer: 0, pos: 0, bank: 0 },
       waiting: { swaps: 0, swapBalance: 0, returns: 0, returnValue: 0, periodDue: 0 },
       inventory: [],
@@ -2234,12 +2235,49 @@ export async function getReportData(
       outcome: { in: ["REFUND", "CREDIT_NOTE"] },
       completedAt: { gte: period.start, lt: period.end },
     },
-    select: { returnValue: true, refundAmount: true },
+    select: {
+      branchId: true,
+      returnValue: true,
+      refundAmount: true,
+      quantity: true,
+      saleId: true,
+      imeiId: true,
+      saleItem: { select: { quantity: true, costPrice: true, product: { select: { costPrice: true } } } },
+      imei: { select: { product: { select: { costPrice: true } } } },
+    },
   })
   const salesReturns = finishedReturns.reduce(
     (sum, row) => sum + (money(row.returnValue) || money(row.refundAmount)),
     0
   )
+  // The same returns shop by shop, with how many items came back and what
+  // they cost us when sold, so Sales by shop can go from total sales to the
+  // actual sales and the cost of the actual sales. A phone's return points at
+  // its sale and IMEI, not the sale line, so that line is looked up.
+  const phoneLines = finishedReturns.filter((row) => !row.saleItem && row.saleId && row.imeiId)
+  const phoneLineCost = new Map(
+    (phoneLines.length
+      ? await prisma.saleItem.findMany({
+          where: { OR: phoneLines.map((row) => ({ saleId: row.saleId!, imeiId: row.imeiId! })) },
+          select: { saleId: true, imeiId: true, costPrice: true, product: { select: { costPrice: true } } },
+        })
+      : []
+    ).map((line) => [`${line.saleId}:${line.imeiId}`, money(line.costPrice) || money(line.product.costPrice)])
+  )
+  const returnsByShop = new Map<string, { value: number; items: number; cost: number }>()
+  for (const row of finishedReturns) {
+    const items = row.saleItem ? row.quantity || row.saleItem.quantity : 1
+    // The cost written on the sale line the day it sold, as Profit uses;
+    // older lines without one fall back to the item's cost today.
+    const unitCost = row.saleItem
+      ? money(row.saleItem.costPrice) || money(row.saleItem.product.costPrice)
+      : phoneLineCost.get(`${row.saleId}:${row.imeiId}`) || money(row.imei?.product.costPrice)
+    const entry = returnsByShop.get(row.branchId) ?? { value: 0, items: 0, cost: 0 }
+    entry.value += money(row.returnValue) || money(row.refundAmount)
+    entry.items += items
+    entry.cost += unitCost * items
+    returnsByShop.set(row.branchId, entry)
+  }
 
   // Already on the Swap Deal and Returns screens but not finished, so their
   // money is in no total yet. Shown beside the totals so Reports and those
@@ -2280,6 +2318,7 @@ export async function getReportData(
   return {
     sales,
     loggedReturns,
+    returnsByShop: [...returnsByShop.entries()].map(([branchId, row]) => ({ branchId, ...row })),
     receipts,
     salesReturns,
     waiting,

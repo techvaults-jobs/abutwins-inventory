@@ -6,7 +6,7 @@ import { DrilldownModal } from "@/components/drilldown-modal"
 import { ShopTag, TableEmpty } from "@/components/shared"
 import { TablePager, usePagedRows } from "@/components/table-pager"
 import { Input } from "@/components/ui/input"
-import type { ReportsPack } from "@/lib/reports-pack"
+import { shopActuals, type ReportsPack } from "@/lib/reports-pack"
 import { formatCurrency, formatDate } from "@/lib/utils"
 
 /** One item sold, on an invoice in the report's period. */
@@ -64,18 +64,9 @@ export function ShopSalesDetail({
   const all = shopId === "ALL"
   const shop = all ? null : byShop.find((row) => row.id === shopId) ?? null
 
-  const summary = useMemo(() => {
-    const rows = all ? byShop : shop ? [shop] : []
-    const revenue = rows.reduce((sum, row) => sum + row.revenue, 0)
-    const cost = rows.reduce((sum, row) => sum + row.cost, 0)
-    return {
-      invoices: rows.reduce((sum, row) => sum + row.tickets, 0),
-      revenue,
-      cost,
-      profit: revenue - cost,
-      collected: rows.reduce((sum, row) => sum + row.collected, 0),
-    }
-  }, [all, byShop, shop])
+  // The same figures as the shop's line on Sales by shop: actual sales after
+  // returns, and the cost of those actual sales.
+  const summary = useMemo(() => shopActuals(all ? byShop : shop ? [shop] : []), [all, byShop, shop])
 
   const shopLines = useMemo(
     () => (shopId === null ? [] : all ? lines : lines.filter((line) => line.shopId === shopId)),
@@ -93,7 +84,7 @@ export function ShopSalesDetail({
   const pager = usePagedRows(visible, `${shopId}|${query}`)
 
   const title = all ? "Sales by shop: every shop" : `Sales by shop: ${shop?.name ?? ""}`
-  const margin = summary.revenue > 0 ? (summary.profit / summary.revenue) * 100 : null
+  const margin = summary.actualSales > 0 ? (summary.profit / summary.actualSales) * 100 : null
 
   function rows(): Array<Array<string | number>> {
     const header = [
@@ -116,9 +107,14 @@ export function ShopSalesDetail({
       ["Sales volume (invoices)", summary.invoices],
       ["Items sold", itemsSold],
       ["Total sales", summary.revenue],
+      ["Returns (refunds and credit notes finished in the period)", summary.returns],
+      ["Items returned", summary.returnedItems],
+      ["Actual sales", summary.actualSales],
       ...(showCost
         ? [
             ["Total cost", summary.cost],
+            ["Cost of items returned", summary.returnCost],
+            ["Cost of actual sales", summary.actualCost],
             ["Gross profit", summary.profit],
           ]
         : []),
@@ -181,26 +177,32 @@ export function ShopSalesDetail({
       }
     >
       <div className="space-y-4 p-4">
-        <dl className={`grid gap-2 ${showCost ? "grid-cols-2 sm:grid-cols-4" : "grid-cols-2 sm:grid-cols-3"}`}>
-          <Figure label="Sales volume" value={String(summary.invoices)} hint="Invoices" />
-          <Figure label="Total sales" value={formatCurrency(summary.revenue)} hint={`${itemsSold} item${itemsSold === 1 ? "" : "s"} sold`} />
+        <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <Figure label="Total sales" value={formatCurrency(summary.revenue)} hint={`${summary.invoices} invoice${summary.invoices === 1 ? "" : "s"} · ${itemsSold} item${itemsSold === 1 ? "" : "s"}`} />
+          <Figure
+            label="Returns"
+            value={summary.returns > 0 ? `−${formatCurrency(summary.returns)}` : formatCurrency(0)}
+            hint={`${summary.returnedItems} item${summary.returnedItems === 1 ? "" : "s"} back on refunds and credit notes`}
+          />
+          <Figure label="Actual sales" value={formatCurrency(summary.actualSales)} hint="Total sales less returns" />
+          <Figure label="Payments received" value={formatCurrency(summary.collected)} hint="Money in this period, older debts paid included" />
           {showCost ? (
             <>
-              <Figure label="Total cost" value={formatCurrency(summary.cost)} hint="What the items cost us" />
+              <Figure
+                label="Cost of actual sales"
+                value={formatCurrency(summary.actualCost)}
+                hint={summary.returnCost > 0 ? `${formatCurrency(summary.cost)} less ${formatCurrency(summary.returnCost)} returned` : "What the items cost us"}
+                className="col-span-2"
+              />
               <Figure
                 label="Gross profit"
                 value={formatCurrency(summary.profit)}
-                hint={margin === null ? "Sales less cost" : `${margin.toFixed(1)}% of sales`}
+                hint={margin === null ? "Actual sales less their cost" : `${margin.toFixed(1)}% of actual sales`}
                 tone={summary.profit < 0 ? "danger" : "success"}
+                className="col-span-2"
               />
             </>
           ) : null}
-          <Figure
-            label="Payments received"
-            value={formatCurrency(summary.collected)}
-            hint="Money in this period, older debts paid included"
-            className={showCost ? "col-span-2 sm:col-span-4" : undefined}
-          />
         </dl>
 
         <Input
