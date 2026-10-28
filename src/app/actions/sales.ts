@@ -19,7 +19,7 @@ import { ON_ACCOUNT_NOTE } from "@/lib/shop-cash"
 import { belowCost, blindTillPrices, discountOff, sellFloor, type PriceBasis } from "@/lib/pricing"
 import { readPriceApproval } from "@/lib/price-approval"
 import { dueAfterReturns, returnedValueBySale } from "@/lib/returned-value"
-import { isWatDayKey, watBounds, watDayKey } from "@/lib/lagos-day"
+import { isWatDayKey, watBounds } from "@/lib/lagos-day"
 
 /** Bank tenders before cash, so trimming an over-typed payment comes off the cash (the change). */
 function bankFirst<T extends { method: string }>(tenders: T[]) {
@@ -519,9 +519,6 @@ export async function checkoutSale(input: {
   if ("error" in shopGate) return { error: shopGate.error }
   const saleShopId = shopGate.shopId
   if (!input.items.length) return { error: "Add at least one item." }
-  // A day left unbalanced no longer stops the till. Selling is what the shop is
-  // open to do; counting the money is a separate job, done when the cashier is
-  // ready and for whichever day they are settling. See Balance the till.
 
   const settings = await getAppSettings()
   const products = await prisma.product.findMany({
@@ -1142,7 +1139,6 @@ export async function checkoutSale(input: {
   revalidatePath("/pos")
   revalidatePath("/dashboard")
   revalidatePath("/finance")
-  revalidatePath("/finance/close")
   revalidatePath("/reports")
   revalidatePath("/profits")
   revalidatePath("/customers")
@@ -1873,11 +1869,6 @@ export async function correctSaleLinePrice(formData: FormData) {
     const pay = sale.payments[0]
     const to = Math.max(0, money(total - creditUsed))
     if (Math.abs(to - money(pay.amount)) < 0.005) return { error: "The money on this sale already matches. Untick money typed wrong." }
-    const day = watDayKey(pay.paidAt)
-    const closed = await prisma.dayClose.findFirst({ where: { branchId: sale.branchId, businessDate: day }, select: { id: true } })
-    if (closed) {
-      return { error: `${day} was already closed with this money counted. The money cannot be changed now; correct the price only.` }
-    }
     paymentFix = { id: pay.id, from: money(pay.amount), to, method: pay.method }
   }
   const nextSettled = paymentFix ? money(paymentFix.to + creditUsed) : settled

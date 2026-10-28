@@ -27,7 +27,6 @@ export const pageTitles: Record<string, string> = {
   "/repairs": "Repairs",
   "/reconciliation": "Stock count",
   "/finance": "Money in & out",
-  "/finance/close": "Close the day",
   "/finance/supplier-banks": "Name the bank for supplier payments",
   "/account": "Your login",
   "/help": "How to use this",

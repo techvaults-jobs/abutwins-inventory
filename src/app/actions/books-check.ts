@@ -5,7 +5,6 @@ import { can } from "@/lib/permissions"
 import { scopedBranchId } from "@/lib/rbac"
 import { requireUser } from "@/lib/session"
 import { verifyAuditChain } from "@/lib/audit"
-import { getUnclosedBusinessDays } from "@/app/actions/day-close"
 import { getParkedWatch } from "@/app/actions/parked"
 import { recentWatDays, shopPeriodWindow, shopPreviousWindow, watBounds, watDayKey, type ShopRange } from "@/lib/lagos-day"
 import { getAppSettings } from "@/lib/settings"
@@ -16,7 +15,6 @@ import { payablePurchaseWhere, groupSupplierLedgers } from "@/lib/purchase-money
 import { receiptsInWindow } from "@/lib/receipts"
 import { supplierPaidInWindow } from "@/lib/supplier-pay"
 import { customersOwing } from "@/lib/owed"
-import { healDuplicateDayCloses } from "@/lib/day-close-heal"
 
 export type BooksRange = ShopRange
 
@@ -49,7 +47,6 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
   const allowed = (await can(user.role, "view.finance")) || (await can(user.role, "view.reports"))
   if (!allowed) return null
   await healOpeningStockBills()
-  await healDuplicateDayCloses()
 
   const shops = await prisma.branch.findMany({
     where: { isActive: true },
@@ -67,7 +64,7 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
   const recentDays = recentWatDays(14, day)
   const recentStart = watBounds(recentDays[recentDays.length - 1]).start
 
-  const [sales, priorSales, expenses, priorExpenses, purchases, priorPurchases, closes, debtors, creditors, stock, vaultCounts, products, unclosed, parked, walkIns, integrity, highRisk, failedLogins, recentSaleDates, recentCloses, settings] =
+  const [sales, priorSales, expenses, priorExpenses, purchases, priorPurchases, debtors, creditors, stock, vaultCounts, products, parked, walkIns, integrity, highRisk, failedLogins, recentSaleDates, settings] =
     await Promise.all([
       prisma.sale.findMany({
         where: { status: "COMPLETED", ...shopWhere, saleDate: { gte: window.start, lt: window.end } },
@@ -91,19 +88,6 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
       // window, so a payment on last month's bill never showed in this one.
       supplierPaidInWindow({ branchId: shopId || null, start: window.start, end: window.end }),
       supplierPaidInWindow({ branchId: shopId || null, start: prior.start, end: prior.end }),
-      shopId
-        ? prisma.dayClose.findMany({
-            where: {
-              branchId: shopId,
-              OR: [
-                { businessDate: { gte: window.from, lte: window.to } },
-                { closeDate: { gte: window.start, lt: window.end } },
-              ],
-            },
-            include: { user: { select: { name: true } } },
-            orderBy: { businessDate: "asc" },
-          })
-        : Promise.resolve([]),
       prisma.customer.aggregate({
         where: shopId ? { branchId: shopId } : {},
         _sum: { currentBalance: true },
@@ -125,7 +109,6 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
         _count: { _all: true },
       }),
       prisma.product.findMany({ select: { id: true, name: true, tracking: true } }),
-      shopId ? getUnclosedBusinessDays(shopId) : Promise.resolve([]),
       getParkedWatch(),
       prisma.sale.count({
         where: { status: "COMPLETED", ...shopWhere, customerId: null, saleDate: { gte: window.start, lt: window.end } },
@@ -141,12 +124,6 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
         where: { status: "COMPLETED", ...shopWhere, saleDate: { gte: recentStart, lt: window.end } },
         select: { saleDate: true },
       }),
-      shopId
-        ? prisma.dayClose.findMany({
-            where: { branchId: shopId, OR: [{ businessDate: { in: recentDays } }, { closeDate: { gte: recentStart, lt: window.end } }] },
-            select: { businessDate: true, closeDate: true },
-          })
-        : Promise.resolve([]),
       getAppSettings(),
     ])
 
@@ -172,15 +149,6 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
     const key = watDayKey(sale.saleDate)
     soldOn.set(key, (soldOn.get(key) ?? 0) + 1)
   }
-  const closedOn = new Set(recentCloses.map((row) => row.businessDate || watDayKey(row.closeDate)))
-  // What was sold on each day of the stretch, the figure Balance the till
-  // shows for that day (see the closes below).
-  const soldValueOn = new Map<string, number>()
-  for (const sale of sales) {
-    const key = watDayKey(sale.saleDate)
-    soldValueOn.set(key, (soldValueOn.get(key) ?? 0) + money(sale.totalAmount))
-  }
-  const shop = shops.find((row) => row.id === shopId)
 
   const supplierLedgers = groupSupplierLedgers(
     creditors.map((row) => ({
@@ -195,11 +163,8 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
   )
   const supplierOwed = supplierLedgers.reduce((sum, row) => sum + row.owed, 0)
   const supplierCredit = supplierLedgers.reduce((sum, row) => sum + row.surplus, 0)
-  const closeForDay = span === "day" ? closes.find((row) => (row.businessDate || "") === day) ?? closes[0] ?? null : null
   const expectedCash = now.cash
-  const countedCash = closeForDay ? money(closeForDay.countedCash) : null
-  const variance = countedCash == null ? null : countedCash - expectedCash
-  const closeVariances = closes.filter((row) => money(row.variance) !== 0)
+  const shop = shops.find((row) => row.id === shopId)
 
   const imeiRows = stock
     .filter((row) => {
@@ -240,45 +205,6 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
         ? null
         : "Open Who did what. Find the changed row. Restore from backup if needed.",
       href: "/audit",
-    },
-    {
-      ok: unclosed.length === 0,
-      label: "Till counted every day",
-      detail: unclosed.length
-        ? `${unclosed.length} past day${unclosed.length === 1 ? "" : "s"} with sales still open.`
-        : "Every past day with sales is closed.",
-      fix: unclosed.length
-        ? "Open Close the day for each open day. Count cash only when cash came in."
-        : null,
-      href: "/finance/close",
-    },
-    {
-      ok: span !== "day" || now.count === 0 || Boolean(closeForDay),
-      label: "Day closed",
-      detail:
-        span !== "day"
-          ? `${closes.length} day${closes.length === 1 ? "" : "s"} closed in this stretch.`
-          : closeForDay
-            ? `Day closed. Cash remitted ₦${money(closeForDay.countedCash).toFixed(0)}. Expected ₦${expectedCash.toFixed(0)}.`
-            : now.count
-              ? "This day has sales and is not closed yet."
-              : "No sales on this day.",
-      fix:
-        span === "day" && !closeForDay && now.count
-          ? "Open Close the day, count the till if cash came in, then close."
-          : null,
-      href: `/finance/close?date=${day}`,
-    },
-    {
-      ok: closeVariances.length === 0,
-      label: "Till cash matches",
-      detail: closeVariances.length
-        ? `${closeVariances.length} closed day${closeVariances.length === 1 ? "" : "s"} show a shortage or overage.`
-        : "Closed days match expected cash.",
-      fix: closeVariances.length
-        ? "Open Close the day. Recount cash on those days. If money is truly short, write a shop expense after yes."
-        : null,
-      href: "/finance/close",
     },
     {
       ok: imeiGaps.length === 0,
@@ -369,10 +295,6 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
     supplierOwed,
     supplierCredit,
     expectedCash,
-    countedCash,
-    variance,
-    closed: Boolean(closeForDay),
-    unclosed,
     parked,
     walkIns,
     highRisk,
@@ -412,7 +334,6 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
     recentDays: recentDays.map((key) => ({
       day: key,
       sales: soldOn.get(key) ?? 0,
-      closed: closedOn.has(key),
     })),
     statementRef: `BK-${shop?.code ?? "SHOP"}-${window.from.replaceAll("-", "")}-${window.to.replaceAll("-", "")}`,
     preparedAt: new Date().toISOString(),
@@ -436,22 +357,6 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
       total: money(sale.totalAmount),
       paid: money(sale.paidAmount),
     })),
-    closes: closes.map((row) => {
-      const expectedCash = money(row.expectedCash)
-      const day = row.businessDate || watDayKey(row.closeDate)
-      return {
-        id: row.id,
-        day,
-        staff: row.user.name,
-        // Cash + bank + credit counted money taken on older sales as this
-        // day's sales; the day's own sales are what Balance the till shows.
-        totalSales: soldValueOn.get(day) ?? 0,
-        expected: expectedCash,
-        counted: money(row.countedCash),
-        variance: money(row.variance),
-        sales: row.saleCount,
-      }
-    }),
     byStaff,
     imeiGaps: imeiGaps.length,
     imeiRows: imeiRows.slice(0, 20),

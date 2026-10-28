@@ -7,7 +7,6 @@ import {
   ArrowRightLeft,
   ArrowUpRight,
   Banknote,
-  ClipboardCheck,
   Landmark,
   Scale,
   TrendingDown,
@@ -133,11 +132,6 @@ export function FinanceClientView({ data }: { data: FinanceData }) {
           <Button asChild variant={data.canDeposit ? "default" : "outline"} size="sm">
             <Link href="/finance/deposit">
               <ArrowRightLeft className="mr-1.5 h-4 w-4" /> {data.canDeposit ? "Move cash to bank" : "Cash to bank"}
-            </Link>
-          </Button>
-          <Button asChild variant="outline" size="sm">
-            <Link href="/finance/close">
-              <ClipboardCheck className="mr-1.5 h-4 w-4" /> Close the day
             </Link>
           </Button>
           <Button asChild variant="outline" size="sm">

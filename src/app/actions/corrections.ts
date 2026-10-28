@@ -201,7 +201,7 @@ export async function cancelSale(formData: FormData) {
     return { error: shopError(error, "Could not cancel this sale. Nothing was changed.") }
   }
 
-  for (const path of ["/sales", "/pos", "/dashboard", "/finance", "/finance/close", "/reports", "/profits", "/customers", "/imei", "/inventory", "/audit/books"]) {
+  for (const path of ["/sales", "/pos", "/dashboard", "/finance", "/reports", "/profits", "/customers", "/imei", "/inventory", "/audit/books"]) {
     revalidatePath(path)
   }
   revalidatePath(`/sales/${sale.id}`)
@@ -883,7 +883,7 @@ export async function cancelSwap(formData: FormData) {
     return { error: shopError(error, "Could not cancel this Swap Deal. Nothing was changed.") }
   }
 
-  for (const path of ["/swaps", "/sales", "/pos", "/imei", "/inventory", "/finance", "/finance/close", "/dashboard", "/customers", "/reports", "/audit/books"]) {
+  for (const path of ["/swaps", "/sales", "/pos", "/imei", "/inventory", "/finance", "/dashboard", "/customers", "/reports", "/audit/books"]) {
     revalidatePath(path)
   }
   revalidatePath(`/customers/${swap.customerId}`)

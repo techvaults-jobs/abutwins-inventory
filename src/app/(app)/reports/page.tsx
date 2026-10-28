@@ -44,13 +44,15 @@ export default async function ReportsPage({
   const range = asRange(params.range)
   const date = params.date && /^\d{4}-\d{2}-\d{2}$/.test(params.date) ? params.date : watDayKey()
 
-  const [data, settings, user, branches, opening, supplierReturns] = await Promise.all([
+  const [data, settings, user, branches, opening, supplierReturns, firstMove] = await Promise.all([
     getReportData(selectedBranchId, range, date),
     getAppSettings(),
     requireUser(),
     getBranches(),
     getOpeningReport(selectedBranchId),
     getSupplierReturnsReport(selectedBranchId, range, date),
+    // The stock ledger's first day: Shop stock value can be read back to here.
+    prisma.stockMovement.findFirst({ orderBy: { businessDate: "asc" }, select: { businessDate: true } }),
   ])
 
   const revenue = data.sales.reduce((sum, sale) => sum + money(sale.totalAmount), 0)
@@ -316,6 +318,7 @@ export default async function ReportsPage({
         selectedBranchId={selectedBranchId}
         range={range}
         date={date}
+        stockSince={firstMove?.businessDate ?? watDayKey()}
       />
       {/* Returns outward: what went back to which supplier, how many, and the value. */}
       <SupplierReturnsReport rows={supplierReturns.rows} periodLabel={label} />

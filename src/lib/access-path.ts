@@ -33,9 +33,6 @@ const VIEW_HREFS = [
 export function pathIsAllowed(pathname: string, allowedHrefs: string[]) {
   if (pathname === "/account" || pathname.startsWith("/account/")) return true
   if (pathname === "/help" || pathname.startsWith("/help/")) return true
-  if (pathname === "/finance/close" || pathname.startsWith("/finance/close/")) {
-    return allowedHrefs.includes("/finance") || allowedHrefs.includes("/pos") || allowedHrefs.includes("/finance/close")
-  }
   if (pathname === "/audit/books" || pathname.startsWith("/audit/books/")) {
     // hrefsForKeys adds this only for people who can see both the audit and the money.
     return allowedHrefs.includes("/audit/books")

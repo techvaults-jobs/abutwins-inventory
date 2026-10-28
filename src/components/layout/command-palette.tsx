@@ -26,7 +26,6 @@ const RECENT_KEY = "abutwins.recent-pages"
 const QUICK_ACTIONS = [
   { title: "Sell now", href: "/pos" },
   { title: "Log a return", href: "/returns/new" },
-  { title: "Balance the till", href: "/finance/close" },
   { title: "Ask for a shop bill", href: "/expenses/new" },
   { title: "Start a transfer", href: "/transfers/new" },
   { title: "Move cash to bank", href: "/finance/deposit" },

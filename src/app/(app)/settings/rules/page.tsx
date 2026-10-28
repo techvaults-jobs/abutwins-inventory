@@ -20,7 +20,7 @@ export default async function SettingsRulesPage() {
           These rules are read-only for your job. Only Super Admin can change them.
         </div>
       ) : null}
-      <SettingCards settings={settings.filter((row) => !isCompanySetting(row.key))} canEdit={canEdit} />
+      <SettingCards settings={settings.filter((row) => !isCompanySetting(row.key) && row.key !== "sales.block_until_day_closed")} canEdit={canEdit} />
     </div>
   )
 }

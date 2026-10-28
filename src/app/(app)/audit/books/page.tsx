@@ -60,8 +60,6 @@ export default async function BooksCheckPage({
         <p className="text-sm">
           <Link href="/audit" className="text-primary">Who did what</Link>
           {" · "}
-          <Link href="/finance/close" className="text-primary">Close the day</Link>
-          {" · "}
           <Link href="/reports" className="text-primary">Reports</Link>
         </p>
 
@@ -111,7 +109,7 @@ export default async function BooksCheckPage({
                   className={`rounded-full border px-3 py-1.5 text-xs ${active ? "border-primary bg-primary text-primary-foreground" : "border-border bg-card"}`}
                 >
                   <span className="font-medium">{formatWatLong(row.day)}</span>
-                  <span className="ml-1 opacity-80">{row.sales} transaction{row.sales === 1 ? "" : "s"}{row.closed ? " · Balanced & Closed" : ""}</span>
+                  <span className="ml-1 opacity-80">{row.sales} transaction{row.sales === 1 ? "" : "s"}</span>
                 </Link>
               )
             })}

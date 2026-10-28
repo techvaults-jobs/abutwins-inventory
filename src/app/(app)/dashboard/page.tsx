@@ -7,7 +7,6 @@ import {
   Boxes,
   CheckCircle2,
   ChevronRight,
-  ClipboardCheck,
   Clock,
   CreditCard,
   Gauge,
@@ -43,7 +42,6 @@ import { formatCurrency, money } from "@/lib/utils"
 const QUICK_ACTIONS: Array<{ href: string; label: string; icon: LucideIcon; primary?: boolean }> = [
   { href: "/pos", label: "Sell now", icon: Store, primary: true },
   { href: "/returns", label: "Take a return", icon: Undo2 },
-  { href: "/finance/close", label: "Balance the till", icon: ClipboardCheck },
   { href: "/inventory", label: "Shop stock", icon: Boxes },
   { href: "/products", label: "Price list", icon: Tags },
   { href: "/uploads", label: "Upload stock", icon: Upload },
@@ -58,7 +56,6 @@ const QUICK_ACTIONS: Array<{ href: string; label: string; icon: LucideIcon; prim
 ]
 
 const TASK_ICON: Record<string, LucideIcon> = {
-  "/finance/close": ClipboardCheck,
   "/pos": Clock,
   "/audit?risk=HIGH": AlertTriangle,
   "/incoming": Truck,
@@ -70,7 +67,7 @@ const TASK_ICON: Record<string, LucideIcon> = {
 
 /**
  * How urgent each "Needs you" line is. Stuck work (money or a phone in limbo,
- * a day not closed, someone waiting on a yes) comes first, then work waiting
+ * someone waiting on a yes) comes first, then work waiting
  * on another person, then tidying. The dot carries the level, so the list
  * reads at a glance instead of every line wearing the same amber.
  */
@@ -78,7 +75,6 @@ const URGENCY: Record<string, { rank: number; dot: string; word: string }> = {
   "/swaps": { rank: 0, dot: "bg-danger", word: "Stuck" },
   "/audit?risk=HIGH": { rank: 0, dot: "bg-danger", word: "Stuck" },
   "/approvals": { rank: 0, dot: "bg-danger", word: "Waiting on you" },
-  "/finance/close": { rank: 0, dot: "bg-danger", word: "Stuck" },
   "/returns": { rank: 1, dot: "bg-warning", word: "Waiting" },
   "/pos": { rank: 1, dot: "bg-warning", word: "Waiting" },
   "/incoming": { rank: 1, dot: "bg-warning", word: "Waiting" },
@@ -459,63 +455,6 @@ export default async function DashboardPage() {
                 </li>
               ))}
             </ul>
-          </div>
-        </section>
-      ) : null}
-
-      {data.unclosedDaysDetail.length > 0 ? (
-        <section>
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              Days not balanced
-              <span className="ml-2 rounded-full bg-danger-soft px-2 py-0.5 text-[10px] font-bold text-danger">
-                {data.unclosedDaysDetail.length}
-              </span>
-            </h3>
-            <Link href="/finance/close" className="text-sm font-medium text-primary hover:underline">Balance the till</Link>
-          </div>
-          <div className="surface-card overflow-hidden">
-            <div className="border-b border-border bg-danger-soft px-5 py-2.5 text-xs font-medium text-danger">
-              These days had sales but the cashier has not balanced the till. Call the cashier and ask them to open Balance the till.
-            </div>
-            <ul className="divide-y divide-border">
-              {data.unclosedDaysDetail.map((row) => (
-                <li key={`${row.branchId}:${row.businessDate}`} className="flex items-center gap-3 px-5 py-3.5">
-                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-warning-soft">
-                    <ClipboardCheck className="h-4 w-4 text-warning" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium">
-                      {formatWatLong(row.businessDate)}
-                      <span className="ml-2 text-xs font-normal text-muted-foreground">· {row.shop}</span>
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {row.salesCount} sale{row.salesCount === 1 ? "" : "s"} · {row.cashier}
-                      {row.cashierEmail ? (
-                        <a href={`mailto:${row.cashierEmail}`} className="ml-1 text-primary hover:underline">
-                          {row.cashierEmail}
-                        </a>
-                      ) : null}
-                    </p>
-                  </div>
-                  <div className="shrink-0 text-right">
-                    <p className="text-sm font-semibold tabular-nums">{formatCurrency(row.salesValue)}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {formatCurrency(row.collected)} collected
-                    </p>
-                  </div>
-                </li>
-              ))}
-            </ul>
-            <div className="border-t border-border px-5 py-3">
-              <Link
-                href="/finance/close"
-                className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
-              >
-                <ClipboardCheck className="h-4 w-4" />
-                Open Balance the till to close these days
-              </Link>
-            </div>
           </div>
         </section>
       ) : null}

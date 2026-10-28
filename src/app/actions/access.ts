@@ -279,7 +279,6 @@ export async function correctPaymentMethod(formData: FormData) {
   revalidatePath(`/sales/${payment.sale.id}`)
   revalidatePath("/sales")
   revalidatePath("/finance")
-  revalidatePath("/finance/close")
   if (payment.sale.customerId) revalidatePath(`/customers/${payment.sale.customerId}`)
   return { success: true }
 }

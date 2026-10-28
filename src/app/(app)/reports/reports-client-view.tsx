@@ -1,10 +1,11 @@
 "use client"
 
-import { useMemo, useState } from "react"
+import { useMemo, useRef, useState, useTransition } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { Banknote, ChevronDown, ChevronRight, Lock, Package, PackagePlus, TrendingDown, TrendingUp } from "lucide-react"
 import type { OpeningReport } from "@/app/actions/opening-stock"
+import { getStockAsAt, type StockAsAt } from "@/app/actions/stock-as-at"
 import { formatCurrency, formatDate, money } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Select } from "@/components/ui/select"
@@ -133,6 +134,7 @@ export function ReportsClientView({
   selectedBranchId,
   range = "month",
   date,
+  stockSince,
 }: {
   pack: ReportsPack
   sales: RawSale[]
@@ -147,6 +149,8 @@ export function ReportsClientView({
   selectedBranchId?: string
   range?: "day" | "week" | "month"
   date: string
+  /** First day the stock ledger can answer "what was on the shelf then". */
+  stockSince: string
 }) {
   const router = useRouter()
   const [drilldown, setDrilldown] = useState<Drilldown | null>(null)
@@ -211,7 +215,49 @@ export function ReportsClientView({
   const revenuePager = usePagedRows(sales, drilldown === "REVENUE" ? "REVENUE" : "idle")
   const receivedPager = usePagedRows(paidSales, drilldown === "RECEIVED" ? "RECEIVED" : "idle")
   const expensesPager = usePagedRows(expenses, drilldown === "EXPENSES" ? "EXPENSES" : "idle")
-  const stockPager = usePagedRows(inventory, drilldown === "STOCK" ? "STOCK" : "idle")
+  // Shop stock value as at a past day. Today is the shelf the page already holds;
+  // any earlier day is worked back from the stock ledger on the server.
+  const today = watDayKey()
+  const shopKey = selectedBranchId ?? "all"
+  const [stockDate, setStockDate] = useState(today)
+  const [asAt, setAsAt] = useState<{ key: string; data: StockAsAt } | null>(null)
+  const [asAtError, setAsAtError] = useState("")
+  const [asAtPending, startAsAt] = useTransition()
+  const latestStockDate = useRef(today)
+  const pastStock = stockDate < today && asAt?.key === `${shopKey}:${stockDate}` ? asAt.data : null
+  const stockRows: RawInventory[] = pastStock ? pastStock.rows : inventory
+  const stockTotal = pastStock ? pastStock.total : pack.totals.stock
+  const stockValueOf = (row: RawInventory) => row.quantity * money(showCost ? row.product.costPrice : row.product.sellingPrice)
+  const stockByShop = useMemo(() => {
+    if (pastStock) return pastStock.byShop
+    const shops = new Map<string, { code: string; name: string; units: number; value: number }>()
+    for (const row of inventory) {
+      const shop = shops.get(row.branch.code) ?? { code: row.branch.code, name: row.branch.name, units: 0, value: 0 }
+      shop.units += row.quantity
+      shop.value += row.quantity * money(showCost ? row.product.costPrice : row.product.sellingPrice)
+      shops.set(row.branch.code, shop)
+    }
+    return [...shops.values()].sort((a, b) => b.value - a.value)
+  }, [pastStock, inventory, showCost])
+  function pickStockDate(value: string) {
+    const next = !value || value > today ? today : value
+    setStockDate(next)
+    setAsAtError("")
+    latestStockDate.current = next
+    if (next === today) return
+    startAsAt(async () => {
+      const result = await getStockAsAt({ branchId: selectedBranchId, date: next })
+      // A later pick has already been asked for; this answer is for an old day.
+      if (latestStockDate.current !== next) return
+      if ("error" in result) {
+        setAsAtError(result.error)
+        return
+      }
+      setAsAt({ key: `${shopKey}:${next}`, data: result })
+    })
+  }
+  const stockWhen = stockDate === today ? "today" : `as at the close of ${formatWatLong(stockDate)}`
+  const stockPager = usePagedRows(stockRows, drilldown === "STOCK" ? `STOCK:${shopKey}:${pastStock ? stockDate : today}` : "idle")
   const openingPager = usePagedRows(opening.lines, drilldown === "OPENING" ? "OPENING" : "idle")
   const boughtPager = usePagedRows(opening.boughtSince, drilldown === "BOUGHT" ? "BOUGHT" : "idle")
   const debtorsDrillPager = usePagedRows(pack.debtors, drilldown === "DEBTORS" ? "DEBTORS" : "idle")
@@ -265,17 +311,19 @@ export function ReportsClientView({
       ["Total", "", "", "", "", pack.totals.expenses],
     ],
     STOCK: () => [
+      [`Stock ${stockWhen}`],
       ["Item", "Shop", "Quantity", ...(showCost ? ["Cost price"] : []), "Selling price", valueWord],
-      ...inventory.map((row) => [
+      ...stockRows.map((row) => [
         row.product.name,
         row.branch.code,
         row.quantity,
         ...(showCost ? [money(row.product.costPrice)] : []),
         money(row.product.sellingPrice),
-        row.quantity * money(showCost ? row.product.costPrice : row.product.sellingPrice),
+        stockValueOf(row),
       ]),
       [],
-      ["Total", "", "", ...(showCost ? [""] : []), "", pack.totals.stock],
+      ...stockByShop.map((shop) => [`Total ${shop.name}`, shop.code, shop.units, ...(showCost ? [""] : []), "", shop.value]),
+      ["Total", "", "", ...(showCost ? [""] : []), "", stockTotal],
     ],
     OPENING: () => [
       [
@@ -1012,8 +1060,10 @@ export function ReportsClientView({
             </>
           ) : (
             <>
-              <span>{inventory.length} stock lines</span>
-              <span className="font-semibold text-foreground">{formatCurrency(pack.totals.stock)}</span>
+              <span>
+                {stockRows.length} stock lines · {stockWhen}
+              </span>
+              <span className="font-semibold text-foreground">{formatCurrency(stockTotal)}</span>
             </>
           )
         }
@@ -1161,7 +1211,44 @@ export function ReportsClientView({
 
         {drilldown === "STOCK" ? (
           <div>
-            <table className="data-table">
+            <div className="space-y-3 border-b border-border px-5 py-3">
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="flex flex-col gap-1 text-sm">
+                  <span className="eyebrow">Stock as at</span>
+                  <input
+                    type="date"
+                    value={stockDate}
+                    min={stockSince}
+                    max={today}
+                    onChange={(event) => pickStockDate(event.target.value)}
+                    className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+                  />
+                </label>
+                {stockDate !== today ? (
+                  <Button type="button" variant="outline" size="sm" onClick={() => pickStockDate(today)}>
+                    Back to today
+                  </Button>
+                ) : null}
+                <p className="text-xs text-muted-foreground sm:ml-auto sm:max-w-xs sm:text-right">
+                  {asAtPending
+                    ? "Working out the shelf for that day…"
+                    : `What each shop held at the close of the day, at the ${showCost ? "cost" : "selling price"} of that day. History starts ${formatWatLong(stockSince)}.`}
+                </p>
+              </div>
+              {asAtError ? <p className="text-sm text-danger">{asAtError}</p> : null}
+              {stockByShop.length > 1 ? (
+                <div className="flex flex-wrap gap-2">
+                  {stockByShop.map((shop) => (
+                    <div key={shop.code} className="rounded-md border border-border bg-muted/40 px-3 py-1.5 text-xs">
+                      <span className="font-medium text-foreground">{shop.name}</span>
+                      <span className="ml-2 tabular-nums font-semibold text-foreground">{formatCurrency(shop.value)}</span>
+                      <span className="ml-1 text-muted-foreground">· {shop.units} unit{shop.units === 1 ? "" : "s"}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+            <table className={`data-table ${asAtPending ? "opacity-50" : ""}`}>
               <thead>
                 <tr>
                   <th>Item</th>
@@ -1182,12 +1269,10 @@ export function ReportsClientView({
                     <td className="text-right num">{row.quantity}</td>
                     {showCost ? <td className="text-right num">{formatCurrency(money(row.product.costPrice))}</td> : null}
                     <td className="text-right num">{formatCurrency(money(row.product.sellingPrice))}</td>
-                    <td className="text-right num font-semibold">
-                      {formatCurrency(row.quantity * money(showCost ? row.product.costPrice : row.product.sellingPrice))}
-                    </td>
+                    <td className="text-right num font-semibold">{formatCurrency(stockValueOf(row))}</td>
                   </tr>
                 ))}
-                {inventory.length === 0 ? <TableEmpty colSpan={showCost ? 6 : 5}>Nothing is on the shelf here.</TableEmpty> : null}
+                {stockRows.length === 0 ? <TableEmpty colSpan={showCost ? 6 : 5}>Nothing is on the shelf here.</TableEmpty> : null}
               </tbody>
             </table>
             <TablePager

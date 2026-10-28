@@ -21,7 +21,7 @@ export function ManualLookup({ data }: { data: RoleManual }) {
         <Input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Try: waiting sale, IMEI, close the day, return"
+          placeholder="Try: waiting sale, IMEI, swap, return"
         />
       </label>
       {needle ? (

@@ -54,11 +54,11 @@ const ROLE_JOB: Record<UserRole, { job: string; shops: string }> = {
     shops: "You load for every shop. Each bill names which shop the goods sit in.",
   },
   CASHIER: {
-    job: "You sell, collect money, close the day, record a return, write shop expenses, and call people who still owe us. You do not book incoming goods or change prices.",
+    job: "You sell, collect money, record a return, write shop expenses, and call people who still owe us. You do not book incoming goods or change prices.",
     shops: "You work in the shop the main admin set on your login.",
   },
   SALES_EXECUTIVE: {
-    job: "You sell, close the day, and record a return for a phone this shop sold. You can see customers, who still owes us, shop expenses, and items. A return takes effect as soon as you save it: the item comes back into stock with no approval.",
+    job: "You sell and record a return for a phone this shop sold. You can see customers, who still owes us, shop expenses, and items. A return takes effect as soon as you save it: the item comes back into stock with no approval.",
     shops: "You work in the shop the main admin set on your login.",
   },
   ENGINEER: {
@@ -77,12 +77,10 @@ const PAGES: Array<
     what: "The first picture of the day. Sales, expenses, money collected, work that still needs a person, and IMEI versus shop count. The count table stays on the page even when every row says Match.",
     doThis: [
       "Read Do these next at the top. Click a card to jump to that work.",
-      "If a day is not closed, open it and count the till before anyone sells.",
       "Read IMEI vs shop count. Match means the unique list and the shelf number agree. A gap means count stock. Do not type a new number by hand.",
       "A waiting sale sitting too long goes to Sell now. A vanished waiting sale goes to Who did what.",
     ],
     watch: [
-      "Unclosed days lock Sell now for everyone, including the main admin.",
       "A gap on IMEI vs shop count is unproven stock until someone counts.",
     ],
     cannot: ["Home does not change an invoice or a stock number."],
@@ -221,7 +219,7 @@ const PAGES: Array<
       "Open an invoice. Read the note that this sale cannot be changed.",
       "Print the invoice. The paper has the blue header and the ab mark.",
       "If money is still due and a buyer is attached, collect the rest. That adds a payment line. Old lines stay.",
-      "PAYMENT TAKEN THE WRONG WAY (CEO and main admin): open the invoice, then Fix how a payment was taken. Pick the payment, how it was really taken (Cash, Transfer or POS) and the bank, and say why. The amount stays; the till and the bank follow. If that day was already balanced, count it again on Balance the till.",
+      "PAYMENT TAKEN THE WRONG WAY (CEO and main admin): open the invoice, then Fix how a payment was taken. Pick the payment, how it was really taken (Cash, Transfer or POS) and the bank, and say why. The amount stays; the till and the bank follow.",
       "If the sale was a walk-in, attach a real name before anyone starts a return.",
     ],
     watch: [
@@ -239,7 +237,6 @@ const PAGES: Array<
     what: "The till. One box to scan or type IMEI, serial, phone name, brand, category, or a piece item. Pick the buyer, take Cash or Bank (into a named bank account from Money in and out), or Credit sales, and finish. On credit sales you can still type money received now and say if it was Cash or Bank. What is left is credit sales. The system makes an invoice.",
     doThis: [
       "CREDIT NOTE: pick the buyer. If we owe them from a return, Pay with their credit note shows above How they pay, already ticked. It comes off the sale first; take cash, bank or credit for what is left. If it covers the whole sale, no money is taken. Untick it to keep the credit for later. It needs the network.",
-      "If you see Count the till, close that day first. Complete sale stays locked until you do, even for the main admin.",
       "Confirm you are in the shop you are standing in.",
       "In the one Scan or type box, scan the IMEI or type a name, serial, brand, category, or piece item, then Enter. Use camera if the browser allows it. Coming phones will not appear.",
       "For a pouch or charger cord, type how many in Pieces. Any whole number from 1 up is allowed while you type. Complete sale still needs enough on hand in this shop.",
@@ -254,30 +251,8 @@ const PAGES: Array<
       "If someone wipes a waiting sale off the device, Who did what records it as vanished.",
       "The floor is the item's lowest allowed price, not the price the till offers first. You may price a deal anywhere from the floor up, and raise it for a walk-in buyer. There is no percentage limit: any price can be charged. Going under the floor, or under what the item cost us, needs a reason and the CEO or Super Admin. If they are not the one selling, tap Complete sale, then Send for approval: the CEO and the main admin see it on their screens at once, with your prices and reasons, and the first to answer decides. Keep working while you wait; the till tells you the answer and, once approved, you tap Complete sale. Change a price after they approve and it needs approving again. A request nobody answers lapses after 30 minutes. Every price that leaves the standard one shows on Profit, under Price changes, with who approved it.",
     ],
-    cannot: ["You cannot sell a Coming phone. You cannot force a live sale while an older day with sales is still open."],
+    cannot: ["You cannot sell a Coming phone."],
     lookup: ["sell", "till", "pos", "scan", "parked", "offline", "complete sale"],
-  },
-  {
-    id: "close",
-    href: "/finance/close",
-    title: "Close the day",
-    what: "Close every past day that had sales so Sell now can open. If cash came into the till, count it and type cash remitted. If the day was only Bank, close with no till count.",
-    doThis: [
-      "Open Close the day from the left, from the lock on Sell now, or from Home.",
-      "Confirm the date is the unclosed day, not today, if yesterday still needs a close.",
-      "Read cash expected and Bank received.",
-      "If cash expected is more than zero, count the drawer and type cash remitted.",
-      "If cash expected is zero, click Close the day. No till count is needed.",
-      "Close this day. If another old day is still listed, close that one too.",
-    ],
-    watch: [
-      "Cash expected is only cash sales for that business day.",
-      "Bank days still need a close, but not a till count.",
-      "You cannot close the same shop day twice.",
-      "Cashiers and sales people can close even if they cannot see the full Money in & out page.",
-    ],
-    cannot: ["Closing the day does not change any invoice."],
-    lookup: ["close", "till", "count", "variance", "expected cash"],
   },
   {
     id: "purchases",
@@ -290,7 +265,7 @@ const PAGES: Array<
       "Save. Open the bill. Book IMEIs as Coming if the carton is still on the road.",
       "When the boxes are on the counter, confirm they are in this shop. Then cashiers can sell.",
       "Search by IMEI, bill number, supplier, or product to open that carton trail.",
-      "Before Close the day, read Sold today against Still in shop. If the shelf is short of Still in shop, count stock.",
+      "At the end of the day, read Sold today against Still in shop. If the shelf is short of Still in shop, count stock.",
       "Pay the supplier as a separate money step.",
       "If units must go back, open Send back to supplier and scan or type each IMEI, one after the other. Do not pick the supplier. The phone name, the house, and the cost fill in from that number. Check the list against the phones in front of you, then press Review and confirm. Nothing is sent until you confirm, and an unsent list stays on that device.",
     ],
@@ -473,7 +448,6 @@ const PAGES: Array<
       "If you may set opening money, type opening cash for the shop and save. Add a bank with its account number and opening balance.",
       "Read Money in from sales, Money spent to run the shop, and what is left over.",
       "Open People who still owe us and call anyone with a balance.",
-      "Open Close the day from here if the till still needs a count.",
     ],
     watch: [
       "Figures are in naira. They come from real invoices and approvals.",
@@ -497,7 +471,6 @@ const PAGES: Array<
     watch: [
       "You cannot move more than the cash in that till. Shop bills waiting for a yes are held back.",
       "The move shows on both ledgers: Cash to bank on Cash in the till, Cash from the till on Bank.",
-      "Close the day still counts the cash taken that day; a deposit does not change it.",
     ],
     cannot: ["Only the CEO or the main admin can undo a deposit, and they must say why. The record stays, marked undone."],
     lookup: ["deposit", "bank", "lodge", "cash to bank", "move cash", "teller"],
@@ -782,7 +755,6 @@ function alwaysSections(keys: Set<string>): ManualSection[] {
       "A sale is a finished paper. You add a payment, a return, or a swap as a new step.",
       "Coming is not In shop. Do not promise a Coming phone as if it is on the shelf.",
       "A walk-in sale needs a name before a return.",
-      "If a past business day had sales and is not closed, nobody starts a new live sale.",
     ],
     watch: ["Who did what is never wiped. Check the books does not change any invoice."],
     cannot: ["The system will not invent a buyer name or let staff secretly change an old invoice."],

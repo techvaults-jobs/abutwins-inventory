@@ -83,7 +83,6 @@ export const navGroups: NavGroup[] = [
     items: [
       { name: "Home", href: "/dashboard", icon: LayoutDashboard },
       { name: "Sell now", href: "/pos", icon: Store },
-      { name: "Balance the till", href: "/finance/close", icon: ClipboardCheck },
       { name: "Needs approval", href: "/approvals", icon: BadgeCheck },
     ],
   },

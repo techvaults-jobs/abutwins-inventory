@@ -6,7 +6,7 @@ import type { BooksCheck } from "@/app/actions/books-check"
 import { Button } from "@/components/ui/button"
 import { booksCompareRows, booksMoneyLines, booksPeriodLabel, booksRangeTitle, formatPdfMoney, formatPdfMove } from "@/lib/books-pack"
 import { letterheadFromCompany } from "@/lib/letterhead"
-import { formatLagosStamp, formatWatLong } from "@/lib/lagos-day"
+import { formatLagosStamp } from "@/lib/lagos-day"
 import { drawPdfLetterhead, drawPdfPaperFooter, loadLogoDataUrl } from "@/lib/pdf-letterhead"
 import { formatDateTime } from "@/lib/utils"
 
@@ -189,9 +189,7 @@ export function BooksPdfButton({ data }: { data: BooksCheck }) {
       row("Still owed to suppliers", formatPdfMoney(data.supplierOwed))
       row("Suppliers who owe us", formatPdfMoney(data.supplierCredit))
       row("Sales with no customer name", String(data.walkIns))
-      row("Cash sales (Expected in till)", formatPdfMoney(data.expectedCash))
-      row("Cash remitted", data.countedCash == null ? "Day not closed" : formatPdfMoney(data.countedCash))
-      row("Shortage / Overage", data.variance == null ? "Day not closed" : formatPdfMoney(data.variance), undefined, undefined, PAPER)
+      row("Cash sales", formatPdfMoney(data.expectedCash), undefined, undefined, PAPER)
 
       section("Sales")
       if (data.invoices.length === 0) {
@@ -205,15 +203,6 @@ export function BooksPdfButton({ data }: { data: BooksCheck }) {
             formatPdfMoney(item.paid),
             index % 2 ? PAPER : undefined
           )
-        })
-      }
-
-      section("Close the day")
-      if (data.closes.length === 0) {
-        row("No days closed in this period", "")
-      } else {
-        data.closes.forEach((item, index) => {
-          row(`${formatWatLong(item.day)}  ·  ${item.staff}`, formatPdfMoney(item.expected), "Difference", formatPdfMoney(item.variance), index % 2 ? PAPER : undefined)
         })
       }
 

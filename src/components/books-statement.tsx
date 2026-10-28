@@ -3,7 +3,7 @@ import type { BooksCheck } from "@/app/actions/books-check"
 import { DocumentLetterhead, DocumentPaperFooter } from "@/components/document-letterhead"
 import { booksCompareRows, booksMoneyLines, booksPeriodLabel, booksRangeTitle } from "@/lib/books-pack"
 import { letterheadFromCompany } from "@/lib/letterhead"
-import { formatLagosStamp, formatWatLong } from "@/lib/lagos-day"
+import { formatLagosStamp } from "@/lib/lagos-day"
 import { formatCurrency, formatDateTime } from "@/lib/utils"
 import { ArrowRight, AlertCircle, CheckCircle2, ShieldCheck } from "lucide-react"
 
@@ -233,19 +233,9 @@ export function BooksStatement({ data }: { data: BooksCheck }) {
               <span className="text-slate-500">Walk-in transactions</span>
               <span>{data.walkIns}</span>
             </p>
-            <p className="flex justify-between gap-3">
-              <span className="text-slate-500">Expected cash in till</span>
-              <span className="tabular-nums font-medium">{formatCurrency(data.expectedCash)}</span>
-            </p>
-            <p className="flex justify-between gap-3">
-              <span className="text-slate-500">Cash remitted</span>
-              <span className="tabular-nums">{data.countedCash == null ? "Not closed" : formatCurrency(data.countedCash)}</span>
-            </p>
             <p className="flex justify-between gap-3 font-semibold">
-              <span>Shortage / Overage</span>
-              <span className={`tabular-nums ${data.variance && data.variance !== 0 ? "text-rose-600" : "text-emerald-700"}`}>
-                {data.variance == null ? "Not closed" : formatCurrency(data.variance)}
-              </span>
+              <span>Cash sales</span>
+              <span className="tabular-nums">{formatCurrency(data.expectedCash)}</span>
             </p>
           </div>
         </div>
@@ -286,40 +276,7 @@ export function BooksStatement({ data }: { data: BooksCheck }) {
         </table>
       </div>
 
-      <div className="grid border-t border-slate-200 md:grid-cols-2">
-        <div className="border-b border-slate-200 px-6 py-5 md:border-b-0 md:border-r">
-          <h3 className="text-sm font-semibold">Days we closed</h3>
-          <table className="mt-3 w-full text-[11px]">
-            <thead>
-              <tr className="border-y border-slate-200 bg-slate-50 text-left text-[10px] uppercase tracking-wider text-slate-500">
-                <th className="py-2 pr-2">Day</th>
-                <th className="py-2 pr-2 text-right">Total sales</th>
-                <th className="py-2 text-right">Shortage / Overage</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.closes.map((row) => (
-                <tr key={row.id} className="border-b border-slate-100">
-                  <td className="py-1.5 pr-2">
-                    <Link href={`/finance/close?date=${row.day}`} className="hover:underline font-medium text-primary">
-                      {formatWatLong(row.day)}
-                    </Link>
-                    <span className="block text-[10px] text-slate-500">{row.staff}</span>
-                  </td>
-                  <td className="py-1.5 pr-2 text-right tabular-nums font-semibold">{formatCurrency(row.totalSales ?? row.expected)}</td>
-                  <td className="py-1.5 text-right tabular-nums font-semibold">
-                    <span className={row.variance === 0 ? "text-emerald-700" : "text-rose-700"}>
-                      {row.variance === 0 ? "Balanced" : (row.variance > 0 ? `+${formatCurrency(row.variance)}` : formatCurrency(row.variance))}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-              {data.closes.length === 0 ? (
-                <tr><td colSpan={3} className="py-4 text-slate-500">No till close in this period.</td></tr>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
+      <div className="border-t border-slate-200">
         <div className="px-6 py-5">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold">IMEI list against shop count</h3>

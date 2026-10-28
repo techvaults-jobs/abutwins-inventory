@@ -10,7 +10,7 @@ import { getViewShopOptions } from "@/app/actions/view-shop"
 import { isShopOwner } from "@/lib/roles"
 import { settleDoneAlerts } from "@/lib/settled-alerts"
 
-const WATCHED = ["/audit", "/settings", "/staff", "/staff/access", "/finance", "/finance/close", "/reports", "/profits"]
+const WATCHED = ["/audit", "/settings", "/staff", "/staff/access", "/finance", "/reports", "/profits"]
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await getCurrentUser()

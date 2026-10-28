@@ -61,14 +61,6 @@ export function SettingCards({ settings, canEdit }: { settings: SettingRow[]; ca
               ) : (
                 <Input name="value" defaultValue={setting.value} />
               )}
-              {setting.key === "sales.block_until_day_closed" ? (
-                <p className="text-xs text-muted-foreground">
-                  A day with sales must still be counted on Close the day, and Sell now shows the days
-                  a shop owes. This only decides whether an uncounted day stops the till. Stopping it
-                  keeps the cash tight; it also means nobody can sell on a busy morning until someone
-                  counts yesterday.
-                </p>
-              ) : null}
               {setting.key === "sales.allow_below_minimum" ? (
                 <p className="text-xs text-muted-foreground">
                   On Sell now, each item&apos;s lowest allowed price is the floor. Sellers may price a deal

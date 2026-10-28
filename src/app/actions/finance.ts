@@ -1315,7 +1315,6 @@ export async function correctExpense(formData: FormData) {
   })
   revalidatePath("/expenses")
   revalidatePath("/finance")
-  revalidatePath("/finance/close")
   revalidatePath("/approvals")
   return { success: true }
 }

@@ -362,10 +362,6 @@ export function viewKeyForPath(pathname: string) {
 
 export function hrefsForKeys(keys: Set<string>) {
   const hrefs: string[] = VIEW_PERMS.filter((row) => keys.has(row.key)).map((row) => row.href)
-  // Close the day sits under Money in & out / Sell now for till staff.
-  if ((keys.has("view.finance") || keys.has("view.pos")) && !hrefs.includes("/finance/close")) {
-    hrefs.push("/finance/close")
-  }
   // Check the books is an audit paper. Do not unlock it just because someone
   // can open Money in & out (cashiers must not see that left-menu item).
   // It is a money paper too, so it also needs a door to the money.
