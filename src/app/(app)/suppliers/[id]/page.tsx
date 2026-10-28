@@ -6,9 +6,10 @@ import { canHardDelete } from "@/lib/rbac"
 import { requireUser } from "@/lib/session"
 import { SupplierOpeningCard } from "./supplier-opening-card"
 import { SupplierBillsDownload } from "./supplier-bills-download"
-import { watDayKey } from "@/lib/lagos-day"
+import { linkPeriod, watDayKey } from "@/lib/lagos-day"
+import { PeriodPicker } from "@/components/period-picker"
 import { statusLabel } from "@/lib/status"
-import { PageHeader, StatCard, StatGrid, StatusBadge } from "@/components/shared"
+import { PageHeader, StatCard, StatGrid, StatusBadge, TonePill, Toolbar } from "@/components/shared"
 import { formatCurrency, formatDate, money } from "@/lib/utils"
 import {
   formatPurchaseBalanceCell,
@@ -17,8 +18,17 @@ import {
   purchaseBalance,
 } from "@/lib/purchase-money"
 
-export default async function SupplierDetailPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function SupplierDetailPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>
+  searchParams: Promise<{ range?: string; from?: string; date?: string }>
+}) {
   const { id } = await params
+  // Any period, for analysis: the bills dated in it, and what stands on them
+  // today. All time (the default) is the whole account, as before.
+  const period = linkPeriod(await searchParams)
   const supplier = await getSupplier(id)
   if (!supplier) notFound()
   const opening = await getSupplierOpening(id)
@@ -31,28 +41,33 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
     supplier.imeiRecords.length === 0 &&
     !supplier.openingBills.length
 
-  const totalPurchased = supplier.purchases.reduce((sum, row) => sum + money(row.totalAmount), 0)
-  const totalPaid = supplier.purchases.reduce((sum, row) => sum + money(row.paidAmount), 0)
+  const purchases = supplier.purchases.filter((row) => period.holds(row.createdAt))
+  const openingBills = supplier.openingBills.filter((row) => period.holds(row.createdAt))
+  // Send-back credit not on a bill, and phones added without one, carry no
+  // bill date, so they belong to All time only.
+  const extraCredit = period.window ? 0 : money(supplier.creditBalance)
+  const totalPurchased = purchases.reduce((sum, row) => sum + money(row.totalAmount), 0)
+  const totalPaid = purchases.reduce((sum, row) => sum + money(row.paidAmount), 0)
   let net = 0
   let totalShipping = 0
-  for (const row of supplier.purchases) {
+  for (const row of purchases) {
     const bal = purchaseBalance(row)
     net += bal.remaining - bal.paid
     totalShipping += bal.shipping
   }
-  net -= money(supplier.creditBalance)
+  net -= extraCredit
   const totalOwed = Math.max(0, net)
   const totalSurplus = Math.max(0, -net)
   // Opening stock loaded under this name: the shop's starting value. Shown in
   // full, kept out of everything above, because nothing on it is owed.
-  const unbilled = supplier.unbilledOpening
-  const openingValue = supplier.openingBills.reduce((sum, row) => sum + money(row.totalAmount), 0) + unbilled.value
-  const openingUnits = supplier.openingBills.reduce((sum, row) => sum + row._count.imeiRecords, 0) + unbilled.units
-  const hasOpening = supplier.openingBills.length > 0 || unbilled.units > 0
+  const unbilled = period.window ? { units: 0, value: 0 } : supplier.unbilledOpening
+  const openingValue = openingBills.reduce((sum, row) => sum + money(row.totalAmount), 0) + unbilled.value
+  const openingUnits = openingBills.reduce((sum, row) => sum + row._count.imeiRecords, 0) + unbilled.units
+  const hasOpening = openingBills.length > 0 || unbilled.units > 0
 
   // The account as a sheet: every bill as on screen, opening stock (never
   // owed), then the totals. Plain numbers, so the columns add up in Excel.
-  const billTotals = supplier.purchases.reduce(
+  const billTotals = purchases.reduce(
     (acc, row) => {
       const bal = purchaseBalance(row)
       acc.billed += bal.billed
@@ -65,8 +80,10 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
     { billed: 0, shipping: 0, payable: 0, paid: 0, sentBack: 0 }
   )
   const accountRows: Array<Array<string | number>> = [
+    [supplier.name, period.window ? `Bills dated ${period.label}` : "All time"],
+    [],
     ["Bill number", "Date", "Shop", "Uploaded value (₦)", "Shipping fee (₦)", "Payable value (₦)", "Payment (₦)", "Stock return (₦)", "We owe (₦)", "They owe us (₦)", "Status"],
-    ...supplier.purchases.map((row) => {
+    ...purchases.map((row) => {
       const bal = purchaseBalance(row)
       return [
         row.invoiceNumber,
@@ -82,7 +99,7 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
         statusLabel(row.status),
       ]
     }),
-    ...supplier.openingBills.map((row) => [
+    ...openingBills.map((row) => [
       row.invoiceNumber,
       watDayKey(row.createdAt),
       row.branch.name || row.branch.code,
@@ -99,7 +116,7 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
       ? [[`${unbilled.units} phone${unbilled.units === 1 ? "" : "s"} added without a bill`, "", "", unbilled.value, 0, 0, 0, 0, 0, 0, "Opening stock · not owed"]]
       : []),
     [
-      `Total (${supplier.purchases.length} bill${supplier.purchases.length === 1 ? "" : "s"})`,
+      `Total (${purchases.length} bill${purchases.length === 1 ? "" : "s"})`,
       "",
       "",
       billTotals.billed,
@@ -109,10 +126,11 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
       billTotals.sentBack,
       totalOwed,
       totalSurplus,
-      money(supplier.creditBalance) > 0 ? `Includes ${formatCurrency(money(supplier.creditBalance))} send-back credit not on a bill` : "",
+      extraCredit > 0 ? `Includes ${formatCurrency(extraCredit)} send-back credit not on a bill` : "",
     ],
   ]
-  const accountFile = `supplier-${supplier.name.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "account"}-${watDayKey()}`
+  const periodPart = period.window ? (period.from === period.date ? period.from : `${period.from}-to-${period.date}`) : `all-time-${watDayKey()}`
+  const accountFile = `supplier-${supplier.name.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").toLowerCase() || "account"}-${periodPart}`
 
   return (
     <div className="space-y-6">
@@ -160,6 +178,18 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
         />
       ) : null}
 
+      <Toolbar className="justify-between">
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center">
+          <PeriodPicker range={period.range} from={period.from} date={period.date} allowAll />
+          <TonePill tone={period.window ? "primary" : "neutral"}>{period.window ? `Bills dated ${period.label}` : "All time"}</TonePill>
+        </div>
+        {period.window ? (
+          <p className="text-xs text-muted-foreground sm:max-w-sm sm:text-right">
+            Payment, stock return and balance are what stands on these bills today. Send-back credit not on a bill shows under All time.
+          </p>
+        ) : null}
+      </Toolbar>
+
       <StatGrid>
         {hasOpening ? (
           <StatCard
@@ -170,9 +200,9 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
           />
         ) : null}
         <StatCard
-          label="Total uploaded value"
+          label={period.window ? "Uploaded in this period" : "Total uploaded value"}
           value={formatCurrency(totalPurchased)}
-          hint={`${supplier.purchases.length} supplier bill${supplier.purchases.length === 1 ? "" : "s"}`}
+          hint={`${purchases.length} supplier bill${purchases.length === 1 ? "" : "s"}`}
           href="#supplier-bills"
         />
         {totalShipping > 0 ? (
@@ -184,19 +214,19 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
           />
         ) : null}
         <StatCard
-          label="Payment"
+          label={period.window ? "Payment on these bills" : "Payment"}
           value={formatCurrency(totalPaid)}
           tone="success"
           href="#supplier-bills"
         />
         <StatCard
-          label="We owe them (−)"
+          label={period.window ? "We owe them on these bills (−)" : "We owe them (−)"}
           value={formatValueOwingMinus(totalOwed)}
           tone={totalOwed > 0 ? "warning" : "neutral"}
           href="#supplier-bills"
         />
         <StatCard
-          label="They owe us"
+          label={period.window ? "They owe us on these bills" : "They owe us"}
           value={formatValueOwingPlus(totalSurplus)}
           tone={totalSurplus > 0 ? "success" : "neutral"}
           href="#supplier-bills"
@@ -230,7 +260,7 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/60">
-                {supplier.openingBills.map((row) => (
+                {openingBills.map((row) => (
                   <tr key={row.id}>
                     <td className="px-5 py-3">
                       <Link href={`/purchases/${row.id}`} className="whitespace-nowrap font-semibold text-primary hover:underline">
@@ -292,7 +322,7 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
               </tr>
             </thead>
             <tbody className="divide-y divide-border/60">
-              {supplier.purchases.map((row) => {
+              {purchases.map((row) => {
                 const poVal = money(row.totalAmount)
                 const poPaid = money(row.paidAmount)
                 const bal = purchaseBalance(row)
@@ -340,6 +370,13 @@ export default async function SupplierDetailPage({ params }: { params: Promise<{
                   </tr>
                 )
               })}
+              {purchases.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="px-5 py-4 text-sm text-muted-foreground">
+                    {period.window ? "No bill from this supplier is dated in this period." : "No supplier bill yet."}
+                  </td>
+                </tr>
+              ) : null}
             </tbody>
           </table>
         </div>

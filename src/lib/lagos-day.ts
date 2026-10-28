@@ -198,3 +198,25 @@ export function matchesWhenFilter(date: Date | string | null | undefined, when: 
   if (when === "month") return recentWatDays(30).includes(day)
   return true
 }
+
+/**
+ * A screen's period from its link (range, from, date), All time when none is
+ * set: the choices of the period picker. `window` is null for All time.
+ */
+export function linkPeriod(params: { range?: string; from?: string; date?: string }) {
+  const range: ReportRange | "all" = params.range && params.range !== "all" ? asReportRange(params.range) : "all"
+  const date = params.date && isWatDayKey(params.date) ? params.date : watDayKey()
+  const window = range === "all" ? null : reportPeriodWindow(date, range, range === "custom" ? params.from : undefined)
+  const label = !window
+    ? "all time"
+    : window.from === window.to
+      ? formatWatLong(window.from)
+      : `${formatWatLong(window.from)} to ${formatWatLong(window.to)}`
+  /** Whether a moment falls in the period (always, for All time). */
+  const holds = (when: Date | string) => {
+    if (!window) return true
+    const at = new Date(when)
+    return at >= window.start && at < window.end
+  }
+  return { range, from: window?.from ?? date, date: window?.to ?? date, window, label, holds }
+}

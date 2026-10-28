@@ -311,6 +311,7 @@ const PAGES: Array<
       "Add a supplier with a name, a phone, and where they ship from. If we already owed them, type Opening balance we still owe for the shop.",
       "If the house is already on the list, pick that name. Do not type it again.",
       "Open the full page if you need the carton trail bill by bill.",
+      "Pick a Period (One day, Last 7 days, This month so far, Pick dates (from – to), or All time) on the list or on a supplier's page to see only the bills dated in it. Payment, stock return and balance are what stands on those bills today. Excel and CSV follow the period.",
     ],
     watch: [
       "One supplier list keeps pay-outs honest.",

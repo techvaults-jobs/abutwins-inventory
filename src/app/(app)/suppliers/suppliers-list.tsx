@@ -5,7 +5,8 @@ import Link from "next/link"
 import { Coins, FileSpreadsheet, HandCoins, PackageCheck, Undo2, Wallet } from "lucide-react"
 import { DataTable, type DataColumn } from "@/components/data-table"
 import { FilterChips } from "@/components/filter-chips"
-import { StatCard, StatGrid, StatusBadge, TonePill } from "@/components/shared"
+import { PeriodPicker, type PickerRange } from "@/components/period-picker"
+import { StatCard, StatGrid, StatusBadge, TonePill, Toolbar } from "@/components/shared"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent } from "@/components/ui/sheet"
 import { downloadTable, downloadWorkbook } from "@/lib/download-table"
@@ -267,8 +268,15 @@ function billSheet(houses: House[]): Array<Array<string | number>> {
   ]
 }
 
-export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
-  const houses = useMemo(() => buildHouses(suppliers), [suppliers])
+/** The period on screen: All time, or bills dated in a chosen stretch. */
+export type SupplierPeriod = { range: PickerRange; from: string; date: string; label: string; all: boolean }
+
+export function SuppliersList({ suppliers, period }: { suppliers: SupplierRow[]; period: SupplierPeriod }) {
+  // In a period, a supplier with no bill dated in it has nothing to show.
+  const houses = useMemo(
+    () => buildHouses(suppliers).filter((house) => period.all || house.bills.length > 0 || house.openingBills.length > 0),
+    [suppliers, period.all]
+  )
   const [filter, setFilter] = useState<HouseFilter>("all")
   const [open, setOpen] = useState<House | null>(null)
   const [query, setQuery] = useState("")
@@ -301,7 +309,8 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
       return words.every((word) => hay.includes(word))
     })
   }
-  const fileName = () => `suppliers-${FILTER_NAMES[filter]}-${watDayKey()}`
+  const fileName = () =>
+    `suppliers-${FILTER_NAMES[filter]}-${period.all ? `all-time-${watDayKey()}` : period.from === period.date ? period.from : `${period.from}-to-${period.date}`}`
 
   function pickFilter(next: HouseFilter) {
     setFilter(next)
@@ -363,23 +372,37 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
 
   return (
     <div className="space-y-5">
+      <Toolbar className="justify-between">
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap sm:items-center">
+          <PeriodPicker range={period.range} from={period.from} date={period.date} allowAll />
+          <TonePill tone={period.all ? "neutral" : "primary"}>
+            {period.all ? "All time" : `Bills dated ${period.label}`}
+          </TonePill>
+        </div>
+        {!period.all ? (
+          <p className="text-xs text-muted-foreground sm:max-w-sm sm:text-right">
+            {houses.length} supplier{houses.length === 1 ? "" : "s"} with bills in this period. Paid, sent back and balance are what stands on those bills today.
+          </p>
+        ) : null}
+      </Toolbar>
+
       <StatGrid>
         <StatCard
-          label="Bought, all time"
+          label={period.all ? "Bought, all time" : "Bought in this period"}
           value={formatCurrency(totalInvoiced)}
           icon={<Coins className="h-4 w-4" />}
           tone="primary"
           onClick={() => pickFilter("bought")}
         />
         <StatCard
-          label="Paid"
+          label={period.all ? "Paid" : "Paid on these bills"}
           value={formatCurrency(totalPaid)}
           icon={<HandCoins className="h-4 w-4" />}
           tone="success"
           onClick={() => pickFilter("paid")}
         />
         <StatCard
-          label="We owe"
+          label={period.all ? "We owe" : "We owe on these bills"}
           value={formatValueOwingMinus(totalOwed)}
           hint={owingCount > 0 ? `${owingCount} supplier${owingCount === 1 ? "" : "s"}` : undefined}
           icon={<Wallet className="h-4 w-4" />}
@@ -387,7 +410,7 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
           onClick={() => pickFilter("owing")}
         />
         <StatCard
-          label="They owe us"
+          label={period.all ? "They owe us" : "They owe us on these bills"}
           value={formatValueOwingPlus(totalSurplus)}
           icon={<Undo2 className="h-4 w-4" />}
           tone={totalSurplus > 0 ? "success" : "neutral"}
@@ -426,7 +449,7 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
                   const shown = shownHouses()
                   void downloadWorkbook(
                     [
-                      { name: "Suppliers", rows: supplierSheet(shown) },
+                      { name: "Suppliers", rows: [[period.all ? "All time" : `Bills dated ${period.label}`], [], ...supplierSheet(shown)] },
                       { name: "Bills", rows: billSheet(shown) },
                     ],
                     `${fileName()}.xlsx`
@@ -470,7 +493,13 @@ export function SuppliersList({ suppliers }: { suppliers: SupplierRow[] }) {
             value: formatCurrency(house.bills.length || !house.openingValue ? house.purchased : house.openingValue),
             valueHint: <HouseBalance house={house} />,
           })}
-          empty={houses.length === 0 ? "No suppliers on the books yet. Add one with the form." : "No supplier matches this filter."}
+          empty={
+            houses.length === 0
+              ? period.all
+                ? "No suppliers on the books yet. Add one with the form."
+                : "No supplier bill is dated in this period."
+              : "No supplier matches this filter."
+          }
         />
       </div>
 
