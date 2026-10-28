@@ -15,7 +15,7 @@ import { lineValueAfterOrderDiscount, saleTenders, sumSaleTenders } from "@/lib/
 import { healOpeningStockBills } from "@/lib/opening-stock-money"
 import { openingStockSupplierWhere, payablePurchaseWhere, groupSupplierLedgers, purchaseBalance, SUPPLIER_PAYMENT_NOTE } from "@/lib/purchase-money"
 import { listPayingBanks, resolveSupplierPayChannel, SUPPLIER_PAYMENT_UNDO_NOTE } from "@/lib/supplier-pay"
-import { reportPeriodWindow, reportPreviousWindow, shopPeriodWindow, shopPreviousWindow, watDayKey, type ReportRange } from "@/lib/lagos-day"
+import { reportPeriodWindow, reportPreviousWindow, shopPeriodWindow, shopPreviousWindow, watBounds, watDayKey, type ReportRange } from "@/lib/lagos-day"
 import { writeAudit } from "@/lib/audit"
 import {
   displayAccountNumber,
@@ -2307,7 +2307,7 @@ export async function getReportData(
  * control that makes flexible pricing safe: prices may move for a buyer, and
  * the shop can see afterwards who moved them, by how much, and why.
  */
-export async function getPriceChanges(limit = 200) {
+export async function getPriceChanges(limit = 200, period?: { from: string; to: string } | null) {
   const user = await requireUser()
   // Sits on the Profit screen and carries cost and "below cost" lines: profit roles only.
   if (!canSeeProfit(user.role)) {
@@ -2316,7 +2316,11 @@ export async function getPriceChanges(limit = 200) {
   const branchId = await viewBranchFilter(user)
   const rows = await prisma.saleItem.findMany({
     where: {
-      sale: { status: "COMPLETED", ...(branchId ? { branchId } : {}) },
+      sale: {
+        status: "COMPLETED",
+        ...(branchId ? { branchId } : {}),
+        ...(period ? { saleDate: { gte: watBounds(period.from).start, lt: watBounds(period.to).end } } : {}),
+      },
       // A line only counts as a price change when there is a standard to compare
       // against. Sales written before the standard was recorded carry 0.
       listPrice: { gt: 0 },
@@ -2398,24 +2402,54 @@ export type PriceChangeLine = {
   approvedBy: string
 }
 
-export async function getProfitData() {
+export type ProfitByShop = {
+  name: string
+  items: number
+  sales: number
+  cost: number
+  shopProfit: number
+  expenses: number
+  net: number
+}
+
+/**
+ * Profit for a period: the Reports periods (one day, last 7 days, this month
+ * so far, or any From and To days), or "all" for every sale ever. Leaving the
+ * range out reads every sale, as the screen did before it had a period.
+ */
+export async function getProfitData(range: ReportRange | "all" = "all", businessDate?: string, fromDate?: string) {
   const user = await requireUser()
+  const day = businessDate && /^\d{4}-\d{2}-\d{2}$/.test(businessDate) ? businessDate : watDayKey()
+  const period = range === "all" ? null : reportPeriodWindow(day, range, fromDate)
   if (!canSeeProfit(user.role)) {
-    return { shopLines: [], expenses: 0, byShop: [] as Array<{ name: string; shopProfit: number; expenses: number; net: number }> }
+    return {
+      shopLines: [],
+      expenses: 0,
+      byShop: [] as ProfitByShop[],
+      period: period ? { from: period.from, to: period.to } : null,
+      invoices: 0,
+      invoiceTotal: 0,
+      tax: 0,
+      returnedValue: 0,
+      mismatched: [] as Array<{ invoice: string; invoiceTotal: number; linesTotal: number }>,
+    }
   }
   const branchId = await viewBranchFilter(user)
-  // Every sale, not the latest 200: the page adds these up into "profit from
-  // our own stock", and a cap silently dropped older sales from that total.
-  // Only the fields the sums and the list use are read.
+  const when = period ? { gte: period.start, lt: period.end } : undefined
+  // Every sale in the period, not the latest 200: the page adds these up into
+  // "profit from our own stock", and a cap silently dropped older sales from
+  // that total. Only the fields the sums and the list use are read.
   const [sales, expenseRows, returned] = await Promise.all([
     prisma.sale.findMany({
-      where: { status: "COMPLETED", ...(branchId ? { branchId } : {}) },
+      where: { status: "COMPLETED", ...(branchId ? { branchId } : {}), ...(when ? { saleDate: when } : {}) },
       select: {
         id: true,
         invoiceNumber: true,
         saleDate: true,
         subtotal: true,
         discount: true,
+        tax: true,
+        totalAmount: true,
         branch: { select: { name: true } },
         items: {
           select: {
@@ -2428,17 +2462,23 @@ export async function getProfitData() {
             discount: true,
             priceReason: true,
             product: { select: { name: true, storage: true, condition: true, color: true, costPrice: true } },
+            imei: { select: { imei1: true, serialNumber: true } },
           },
         },
       },
       orderBy: { saleDate: "desc" },
     }),
+    // Shop bills dated in the same period, as Reports counts them.
     prisma.expense.findMany({
-      where: { ...(branchId ? { branchId } : {}), approvedAt: { not: null } },
+      where: { ...(branchId ? { branchId } : {}), approvedAt: { not: null }, ...(when ? { date: when } : {}) },
       include: { branch: true },
     }),
     returnedSaleLineIds(prisma),
   ])
+
+  // What came back off these invoices, at what it had fetched, so the page
+  // can show how the invoices' total comes down to the sales counted here.
+  let returnedValue = 0
 
   // What came back for a refund or a credit note made no sale in the end: it
   // is back on the shelf. It stays on the invoice, not here. A line that came
@@ -2447,6 +2487,8 @@ export async function getProfitData() {
   const shopLines = sales.flatMap((sale) =>
     sale.items.flatMap((item) => {
       const kept = piecesStillSold(returned, sale.id, item)
+      const fetched = lineValueAfterOrderDiscount(item.totalPrice, sale)
+      if (item.quantity > 0) returnedValue += (fetched * Math.max(0, item.quantity - kept)) / item.quantity
       if (kept <= 0) return []
       const share = kept / item.quantity
       // The cost copied onto the line on the day it sold. Sales written before
@@ -2455,7 +2497,7 @@ export async function getProfitData() {
       const unitCost = money(item.costPrice) || money(item.product.costPrice)
       const cost = unitCost * kept
       // What the line really fetched once the whole-order discount is shared out.
-      const sell = lineValueAfterOrderDiscount(item.totalPrice, sale) * share
+      const sell = fetched * share
       const list = money(item.listPrice)
       return [{
         id: item.id,
@@ -2466,6 +2508,7 @@ export async function getProfitData() {
         storage: item.product.storage,
         condition: item.product.condition,
         color: item.product.color,
+        unit: item.imei ? item.imei.imei1 || item.imei.serialNumber || "" : "",
         quantity: kept,
         sell,
         cost,
@@ -2480,16 +2523,32 @@ export async function getProfitData() {
     })
   )
 
-  const shopByKey = new Map<string, { name: string; shopProfit: number; expenses: number }>()
+  const shopByKey = new Map<string, Omit<ProfitByShop, "net">>()
   function bucket(name: string) {
-    const current = shopByKey.get(name) ?? { name, shopProfit: 0, expenses: 0 }
+    const current = shopByKey.get(name) ?? { name, items: 0, sales: 0, cost: 0, shopProfit: 0, expenses: 0 }
     shopByKey.set(name, current)
     return current
   }
-  for (const line of shopLines) bucket(line.shop).shopProfit += line.profit
+  for (const line of shopLines) {
+    const row = bucket(line.shop)
+    row.items += line.quantity
+    row.sales += line.sell
+    row.cost += line.cost
+    row.shopProfit += line.profit
+  }
   for (const row of expenseRows) bucket(row.branch.name).expenses += money(row.amount)
 
-  const byShop = [...shopByKey.values()]
+  // An invoice whose lines do not add up to its total (a line changed and the
+  // total not, or the other way round). Profit reads the lines and Reports the
+  // total, so these are the invoices behind any gap between the two screens.
+  const mismatched = sales.flatMap((sale) => {
+    const linesTotal =
+      sale.items.reduce((sum, item) => sum + lineValueAfterOrderDiscount(item.totalPrice, sale), 0) + money(sale.tax)
+    const invoiceTotal = money(sale.totalAmount)
+    return Math.abs(linesTotal - invoiceTotal) >= 1 ? [{ invoice: sale.invoiceNumber, invoiceTotal, linesTotal }] : []
+  })
+
+  const byShop: ProfitByShop[] = [...shopByKey.values()]
     .map((row) => ({ ...row, net: row.shopProfit - row.expenses }))
     .sort((a, b) => b.net - a.net)
 
@@ -2497,5 +2556,12 @@ export async function getProfitData() {
     shopLines,
     expenses: expenseRows.reduce((sum, row) => sum + money(row.amount), 0),
     byShop,
+    period: period ? { from: period.from, to: period.to } : null,
+    invoices: sales.length,
+    /** The invoices as written: the Total sales figure on Reports for the same period. */
+    invoiceTotal: sales.reduce((sum, sale) => sum + money(sale.totalAmount), 0),
+    tax: sales.reduce((sum, sale) => sum + money(sale.tax), 0),
+    returnedValue,
+    mismatched,
   }
 }
