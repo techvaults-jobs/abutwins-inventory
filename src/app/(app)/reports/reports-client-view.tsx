@@ -29,6 +29,8 @@ import { shopActuals, type ReportsPack } from "@/lib/reports-pack"
 import { formatWatLong, watDayKey } from "@/lib/lagos-day"
 import { groupOwedHouses, type OwedHouse } from "@/lib/purchase-money"
 import { ShopSalesDetail, type ShopSaleLine } from "./shop-sales-detail"
+import { CategoryReportView } from "./category-report-view"
+import type { CategoryReport } from "@/lib/category-report"
 
 type RawSale = {
   id: string
@@ -129,6 +131,7 @@ export function ReportsClientView({
   swaps = [],
   returns = [],
   shopLines = [],
+  categories,
   opening,
   branches,
   selectedBranchId,
@@ -145,6 +148,8 @@ export function ReportsClientView({
   returns?: RawReturn[]
   /** Every item sold in the period, for the list behind each line of Sales by shop. */
   shopLines?: ShopSaleLine[]
+  /** Sales by category and Bought by category for the period. */
+  categories: CategoryReport
   opening: OpeningReport
   branches: BranchOption[]
   selectedBranchId?: string
@@ -1023,6 +1028,16 @@ export function ReportsClientView({
           </TableShell>
         </div>
       </div>
+
+      <CategoryReportView
+        report={categories}
+        shopLines={shopLines}
+        showCost={showCost}
+        scope={pack.scope}
+        periodLabel={pack.periodLabel}
+        fileScope={fileScope}
+        scopeKey={scopeKey}
+      />
 
       <ShopSalesDetail
         shopId={openShop}

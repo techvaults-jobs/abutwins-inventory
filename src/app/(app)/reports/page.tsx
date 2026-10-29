@@ -20,6 +20,7 @@ import { stockedPairs } from "@/lib/stocked-pairs"
 import { ReportsClientView } from "./reports-client-view"
 import { SupplierReturnsReport } from "./supplier-returns-report"
 import { getSupplierReturnsReport } from "@/app/actions/supplier-returns"
+import { getCategoryReport } from "@/lib/category-report"
 
 type ShopRow = ReportsPack["byShop"][number]
 
@@ -103,7 +104,9 @@ export default async function ReportsPage({
             unitPrice: true,
             totalPrice: true,
             costPrice: true,
-            product: { select: { name: true, storage: true, condition: true, costPrice: true } },
+            product: {
+              select: { name: true, storage: true, condition: true, costPrice: true, categoryId: true, category: { select: { name: true } } },
+            },
             imei: { select: { imei1: true, serialNumber: true } },
           },
         })
@@ -135,6 +138,8 @@ export default async function ReportsPage({
         returned:
           returnedLines.saleItemIds.has(line.id) ||
           (line.imeiId ? returnedLines.imeiOnSale.has(`${sale.id}:${line.imeiId}`) : false),
+        categoryId: line.product.categoryId,
+        category: line.product.category.name,
       },
     ]
   })
@@ -183,6 +188,15 @@ export default async function ReportsPage({
     shopRows[row.branchId].returnCost = showCost ? row.cost : 0
   }
   const byShop = Object.values(shopRows).sort((a, b) => b.revenue - a.revenue)
+
+  // Sales by category and Bought by category, over the same shops and period.
+  const categories = await getCategoryReport({
+    branchId: scopedShop,
+    start: data.period.start,
+    end: data.period.end,
+    showCost,
+    sales: data.sales,
+  })
 
   const selectedBranch = branches.find((b) => b.id === selectedBranchId)
   const scope = selectedBranch ? `${selectedBranch.name} (${selectedBranch.code})` : "All shops together"
@@ -330,6 +344,7 @@ export default async function ReportsPage({
           imei: row.imei ? { imei1: row.imei.imei1, product: { name: row.imei.product.name } } : null,
         }))}
         shopLines={shopLines}
+        categories={categories}
         opening={plainMoney(opening)}
         branches={branches.map(({ id, name, code }) => ({ id, name, code }))}
         selectedBranchId={selectedBranchId}

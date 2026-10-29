@@ -8,6 +8,7 @@ import { receiveTransfer, rejectTransfer } from "@/app/actions/ops"
 import { cancelTransfer } from "@/app/actions/corrections"
 import { CancelRecordCard } from "@/components/cancel-record-card"
 import { ActionForm } from "@/components/action-form"
+import { DayRangeFilter } from "@/components/day-range-filter"
 import { StatusBadge } from "@/components/shared"
 import { DataTable, type DataColumn } from "@/components/data-table"
 import { Sheet, SheetContent } from "@/components/ui/sheet"
@@ -17,7 +18,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Button } from "@/components/ui/button"
 import { downloadTable } from "@/lib/download-table"
-import { formatShopWhen, watDayKey } from "@/lib/lagos-day"
+import { formatShopWhen, matchesDayRange, watDayKey } from "@/lib/lagos-day"
 import { formatCurrency, money } from "@/lib/utils"
 import { useUrlFilter } from "@/lib/use-url-filter"
 
@@ -58,6 +59,11 @@ type TransferRow = {
   canDecide: boolean
   /** May this person undo it after it was accepted (CEO, main admin)? */
   canCancel: boolean
+}
+
+/** The day a transfer shows under When: accepted or rejected, else sent, else started. */
+function whenOf(row: TransferRow) {
+  return row.receivedAt ?? row.sentAt ?? row.createdAt
 }
 
 /** Accepted, but not all of it arrived. */
@@ -112,21 +118,28 @@ export function TransfersList({
   const unitWord = atCost ? "Unit cost" : "Unit price"
   const valueWord = atCost ? "Cost value" : "Value at sell price"
   const [status, setStatus] = useUrlFilter(initialStatus, TRANSFER_FILTERS)
+  const [range, setRange] = useState({ from: "", to: "" })
+
+  // The period picks transfers by the day shown under When; the stage tiles
+  // then count inside that period.
+  const inRange = useMemo(
+    () => transfers.filter((transfer) => matchesDayRange(whenOf(transfer), range.from, range.to)),
+    [transfers, range]
+  )
 
   const filtered = useMemo(
-    () => transfers.filter((transfer) => (status === "all" ? true : tileOf(transfer.status) === status)),
-    [transfers, status]
+    () => inRange.filter((transfer) => (status === "all" ? true : tileOf(transfer.status) === status)),
+    [inRange, status]
   )
 
   const counts = useMemo(() => {
-    const byStatus: Record<string, number> = { all: transfers.length }
-    for (const transfer of transfers) {
+    const byStatus: Record<string, number> = { all: inRange.length }
+    for (const transfer of inRange) {
       const tile = tileOf(transfer.status)
       byStatus[tile] = (byStatus[tile] ?? 0) + 1
     }
     return byStatus
-  }, [transfers])
-
+  }, [inRange])
 
   function extractList(format: "csv" | "xlsx") {
     const rows: Array<Array<string | number>> = [
@@ -204,13 +217,13 @@ export function TransfersList({
     }
     const stamp = watDayKey()
     const stage = status === "all" ? "all" : status.toLowerCase()
-    void downloadTable(rows, `shop-to-shop-transfers-${stage}-${stamp}.${format}`, format)
+    const period = range.from || range.to ? `-${range.from || "start"}-to-${range.to || stamp}` : ""
+    void downloadTable(rows, `shop-to-shop-transfers-${stage}${period}-${stamp}.${format}`, format)
     toast.success(format === "xlsx" ? "Excel extracted for this list." : "CSV extracted for this list.")
   }
 
   const [open, setOpen] = useState<TransferRow | null>(null)
   const isOpenWork = (row: TransferRow) => row.status === "PENDING" || row.status === "IN_TRANSIT"
-  const whenOf = (row: TransferRow) => row.receivedAt ?? row.sentAt ?? row.createdAt
 
   const columns: DataColumn<TransferRow>[] = [
     {
@@ -291,7 +304,7 @@ export function TransfersList({
         columns={columns}
         rowKey={(row) => row.id}
         noun="transfers"
-        filterKey={status}
+        filterKey={`${status}|${range.from}|${range.to}`}
         onRowClick={setOpen}
         searchText={(row) =>
           [
@@ -305,6 +318,7 @@ export function TransfersList({
           ].join(" ")
         }
         searchPlaceholder="Search transfer number, shop, staff name, IMEI or item"
+        filters={<DayRangeFilter label="When it moved" from={range.from} to={range.to} onChange={setRange} />}
         actions={
           <>
             <Button type="button" variant="outline" size="sm" className="h-10" disabled={!filtered.length} onClick={() => extractList("xlsx")} aria-label="Download as Excel">
@@ -338,7 +352,13 @@ export function TransfersList({
             ),
           }
         }}
-        empty={transfers.length === 0 ? "No shop-to-shop transfers yet." : "Nothing in this stage. Tap another stage above."}
+        empty={
+          transfers.length === 0
+            ? "No shop-to-shop transfers yet."
+            : inRange.length === 0
+              ? "No transfers in this period. Pick other days above."
+              : "Nothing in this stage. Tap another stage above."
+        }
       />
 
       <Sheet open={Boolean(open)} onOpenChange={(value) => !value && setOpen(null)}>

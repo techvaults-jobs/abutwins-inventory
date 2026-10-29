@@ -597,6 +597,8 @@ const PAGES: Array<
       "Pick One day, Last 7 days, or This month so far. Or pick Pick dates (from – to), then choose the first day under From and the last day under To. They can be in different months.",
       "Read this period next to last period.",
       "Read the cards and the shop-by-shop table. On Sales by shop, Actual sales is Total sales less what customers returned for a refund or a credit note in the period, and Cost of actual sales leaves out what came back.",
+      "Read Sales by category: total sales, total return value, actual sales, actual cost on sales, profit and payment received for each category. Tap a category to see every item sold and returned.",
+      "Read Bought by category: what was bought from suppliers in the period for each category, what went back, and how many sold. Tap a category to see every bill line.",
       "On Still owed to suppliers, read the house name and the amount. Click the house to open its bills.",
       "On Suppliers who owe us, read the surplus after send-backs.",
       "Download the PDF, or print it and save it as a PDF.",

@@ -31,6 +31,9 @@ export type ShopSaleLine = {
   cost: number
   /** Came back later for a refund or credit note. */
   returned: boolean
+  /** The item's category, for Sales by category. */
+  categoryId?: string
+  category?: string
 }
 
 type ShopRow = ReportsPack["byShop"][number]
@@ -293,7 +296,7 @@ export function ShopSalesDetail({
   )
 }
 
-function Figure({
+export function Figure({
   label,
   value,
   hint,
