@@ -4,6 +4,7 @@ import { checkoutSale } from "@/app/actions/sales"
 import {
   clearOfflineEvents,
   getDeviceId,
+  markSaleRefused,
   parkedHeartbeatRows,
   readOfflineEvents,
   readSaleQueue,
@@ -55,6 +56,7 @@ export async function flushParkedSales(reason: "auto" | "manual") {
       })
       if (result.error) {
         await recordOfflineEvent("SYNC_FAILED", { queueId: row.id, error: result.error })
+        await markSaleRefused(row.id, result.error)
         failed.push(row.id)
         lastError = result.error
         continue

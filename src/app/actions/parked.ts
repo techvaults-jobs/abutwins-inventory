@@ -134,6 +134,53 @@ export async function markParkedPosted(offlineId: string, saleId: string) {
   })
 }
 
+/**
+ * Staff take a waiting sale the system keeps refusing off their phone. Money may
+ * be in the drawer with no invoice, so a reason is required, the record is high
+ * risk, and the watchers are told. Removing the row stops it reading as vanished.
+ */
+export async function dismissParkedSale(input: {
+  id: string
+  reason: string
+  lastError?: string
+  queuedAt: string
+  branchId: string
+  itemCount: number
+  paidAmount: number
+}) {
+  const user = await requireUser()
+  const id = String(input.id || "").slice(0, 80)
+  const reason = String(input.reason || "").trim().slice(0, 300)
+  if (!id) return { error: "We could not find that waiting sale." }
+  if (reason.length < 3) return { error: "Say why this waiting sale is being removed." }
+  const row = await prisma.parkedSale.findUnique({ where: { id }, select: { userId: true } })
+  if (row && row.userId !== user.id) return { error: "Only the person who parked this sale can remove it." }
+  const branchId = input.branchId && (await canReachBranch(user, input.branchId)) ? input.branchId : user.branchId
+  await writeAudit({
+    userId: user.id,
+    action: "DELETE",
+    entityType: "ParkedSale",
+    entityId: id,
+    newValue: JSON.stringify({
+      result: "removed by staff",
+      reason,
+      refusedWith: String(input.lastError || "").slice(0, 300) || null,
+      queuedAt: input.queuedAt,
+      itemCount: Number(input.itemCount) || 0,
+      paidAmount: Number(input.paidAmount) || 0,
+    }),
+    branchId,
+    risk: "HIGH",
+  })
+  if (row) await prisma.parkedSale.delete({ where: { id } })
+  await alertWatchers(
+    "A waiting sale was removed",
+    `${user.name ?? user.email} removed a waiting sale of ${Number(input.paidAmount) || 0} naira from their phone. Reason: ${reason}. Check the drawer against it.`,
+    "/audit?risk=HIGH"
+  )
+  return { success: true }
+}
+
 export async function getParkedWatch() {
   const user = await requireUser()
   const branchId = await scopedBranchId(user.role, user.branchId)

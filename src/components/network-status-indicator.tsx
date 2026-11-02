@@ -12,6 +12,7 @@ import {
 } from "lucide-react"
 import { toast } from "sonner"
 import { useNetworkStatus, getNetworkMonitor } from "@/lib/network-status"
+import { RefusedSale } from "@/components/refused-sale"
 import { flushParkedSales, requestParkedFlush } from "@/lib/flush-parked"
 import {
   getDeviceId,
@@ -401,8 +402,9 @@ function OfflineSyncCenterDialog({
                 {queue.map((row) => (
                   <div
                     key={row.id}
-                    className="flex items-center justify-between rounded-xl border border-border bg-background p-3 text-xs shadow-xs"
+                    className="rounded-xl border border-border bg-background p-3 text-xs shadow-xs"
                   >
+                  <div className="flex items-center justify-between">
                     <div>
                       <div className="flex items-center gap-2">
                         <span className="font-semibold text-foreground">
@@ -421,6 +423,8 @@ function OfflineSyncCenterDialog({
                         {formatCurrency(row.payload.paidAmount)}
                       </strong>
                     </div>
+                  </div>
+                  <RefusedSale row={row} onRemoved={() => undefined} />
                   </div>
                 ))}
               </div>

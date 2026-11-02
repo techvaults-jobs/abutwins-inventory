@@ -5,7 +5,7 @@ import { revalidatePath } from "next/cache"
 import { prisma } from "@/lib/prisma"
 import { canReachBranch, OTHER_SHOP, resolveWritableShopId, scopeRecord, viewBranchFilter } from "@/lib/branch-scope"
 import { requireUser } from "@/lib/session"
-import { canApprove, canHardDelete, canManageFinance, canSell, canSetOpeningMoney, isShopOwner } from "@/lib/rbac"
+import { canApprove, canHardDelete, canManageFinance, canSeeAllBranches, canSell, canSetOpeningMoney, isShopOwner } from "@/lib/rbac"
 import { shopError } from "@/lib/shop-speak"
 import { ConflictError, settle, shiftCustomerBalance } from "@/lib/concurrency"
 import { can } from "@/lib/permissions"
@@ -321,6 +321,9 @@ export async function setCustomerOpeningBalance(formData: FormData) {
   const reason = String(formData.get("reason") || "").trim()
   if (reason.length < 3) return { error: "Say why the opening balance is being set or changed." }
 
+  // Asked here, not inside the posting: it can read permissions, and a
+  // transaction waiting on a second connection can deadlock the pool.
+  const seesAllShops = await canSeeAllBranches(user.role)
   const result = await settle(() =>
     prisma.$transaction(async (tx) => {
       const customer = await tx.customer.findUnique({
@@ -328,7 +331,7 @@ export async function setCustomerOpeningBalance(formData: FormData) {
         select: { id: true, name: true, branchId: true, currentBalance: true },
       })
       if (!customer) throw new ConflictError("We could not find that customer.")
-      if (!(await canReachBranch(user, customer.branchId))) {
+      if (!seesAllShops && user.branchId !== customer.branchId) {
         throw new ConflictError("This customer belongs to another shop.")
       }
       const lines = await tx.ledgerEntry.findMany({
@@ -876,7 +879,6 @@ export async function setSupplierOpeningBalance(formData: FormData) {
 
 export async function getBranches() {
   const user = await requireUser()
-  const { canSeeAllBranches } = await import("@/lib/rbac")
   const canAll = await canSeeAllBranches(user.role)
   return prisma.branch.findMany({
     where: canAll ? undefined : user.branchId ? { id: user.branchId } : { id: "__none__" },

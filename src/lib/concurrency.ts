@@ -18,14 +18,27 @@ export class ConflictError extends Error {
 }
 
 /**
- * Run a posting and turn a lost race into the normal { error } shape instead of
- * a crash. Anything else still throws, so real faults stay loud.
+ * Prisma's codes for a transaction that gave up because the database was too
+ * busy: timed out, no free connection, or lost a write conflict. All of them
+ * roll the whole posting back.
+ */
+const BUSY_CODES = new Set(["P2024", "P2028", "P2034"])
+
+/**
+ * Run a posting and turn a lost race or a busy database into the normal
+ * { error } shape instead of a crash. Anything else still throws, so real
+ * faults stay loud.
  */
 export async function settle<T>(run: () => Promise<T>): Promise<{ data: T } | { error: string }> {
   try {
     return { data: await run() }
   } catch (error) {
     if (error instanceof ConflictError) return { error: error.message }
+    const code = (error as { code?: unknown } | null)?.code
+    if (typeof code === "string" && BUSY_CODES.has(code)) {
+      console.error(`[settle] database busy (${code}):`, error)
+      return { error: "The shop system is very busy and this was not saved. Wait a moment and try again." }
+    }
     throw error
   }
 }

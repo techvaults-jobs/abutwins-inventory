@@ -655,6 +655,10 @@ model Sale {
   /// their own password. Name is copied in so the record reads the same later.
   priceApprovedById String?
   priceApprovedBy   String?
+  /// The till's own id for this sale, made before the first send. A sale sent
+  /// again, because the reply never reached the till, finds the first invoice
+  /// instead of selling the goods twice.
+  clientRef     String?       @unique
   isWholesale   Boolean       @default(false)
   saleDate      DateTime      @default(now())
   createdAt     DateTime      @default(now())

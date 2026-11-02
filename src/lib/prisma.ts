@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks"
 import { PrismaClient } from "@prisma/client"
 import { inferRisk, requestContext, stampHash, userIdFromCreate } from "@/lib/audit-meta"
 import { recordKindLabel } from "@/lib/shop-speak"
@@ -10,7 +11,18 @@ const base =
     log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
   })
 
-export const prisma = base.$extends({
+/**
+ * The transaction this code is running inside, if any. An audit row written in
+ * a transaction must read the last hash on that transaction's own connection.
+ * Asking the pool for a second one deadlocked the moment as many transactions
+ * were open as the pool had connections: each held one and waited for another,
+ * until they all timed out and every sale among them failed.
+ */
+const openTransaction = new AsyncLocalStorage<{
+  auditLog: { findFirst: typeof base.auditLog.findFirst }
+}>()
+
+const extended = base.$extends({
   query: {
     auditLog: {
       async create({ args, query }) {
@@ -20,7 +32,7 @@ export const prisma = base.$extends({
         const action = String(data.action)
         const entityType = String(data.entityType ?? "")
         const success = data.success !== false
-        const last = await base.auditLog.findFirst({
+        const last = await (openTransaction.getStore() ?? base).auditLog.findFirst({
           orderBy: { createdAt: "desc" },
           select: { hash: true },
         })
@@ -49,6 +61,22 @@ export const prisma = base.$extends({
     },
   },
 }) as unknown as PrismaClient
+
+export const prisma = new Proxy(extended, {
+  get(target, key) {
+    const value = Reflect.get(target, key)
+    if (key !== "$transaction") return value
+    return (work: unknown, options: unknown) =>
+      typeof work === "function"
+        ? (value as (run: unknown, opts: unknown) => unknown).call(
+            target,
+            (tx: Parameters<typeof openTransaction.run>[0]) =>
+              openTransaction.run(tx, () => (work as (client: unknown) => unknown)(tx)),
+            options
+          )
+        : (value as (run: unknown, opts: unknown) => unknown).call(target, work, options)
+  },
+})
 
 type WatchedRow = {
   userId?: string | null

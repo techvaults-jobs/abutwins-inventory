@@ -520,6 +520,24 @@ export async function checkoutSale(input: {
   const saleShopId = shopGate.shopId
   if (!input.items.length) return { error: "Add at least one item." }
 
+  // The till may be sending this again because the reply to the first send never
+  // reached it. Hand back the first invoice before any stock check: the phone is
+  // Sold by now, and accessories would otherwise be sold a second time.
+  const clientRef = String(input.offlineId || "").trim().slice(0, 80) || null
+  const findSentSale = async () => {
+    if (!clientRef) return null
+    const sent = await prisma.sale.findUnique({
+      where: { clientRef },
+      select: { id: true, userId: true, branchId: true },
+    })
+    return sent?.userId === user.id && sent.branchId === saleShopId ? sent : null
+  }
+  const alreadySent = await findSentSale()
+  if (alreadySent) {
+    await markParkedPosted(clientRef as string, alreadySent.id)
+    return { success: true, saleId: alreadySent.id }
+  }
+
   const settings = await getAppSettings()
   const products = await prisma.product.findMany({
     where: { id: { in: input.items.map((item) => item.productId) } },
@@ -658,7 +676,10 @@ export async function checkoutSale(input: {
     })
     if (item.imeiId) {
       const imei = imeiById.get(item.imeiId)
-      if (!imei || imei.status !== "IN_STOCK") return { error: `IMEI ${imei?.imei1 ?? ""} is not available.` }
+      if (!imei) return { error: "A phone on this sale is no longer on the system. Remove it and scan it again." }
+      if (imei.status !== "IN_STOCK") {
+        return { error: `${imei.imei1} cannot be sold. ${await whyNotOnTill([{ id: imei.id }], saleShopId)}` }
+      }
       if (imei.branchId !== saleShopId) return { error: `${imei.imei1} is not in this shop.` }
       if (reservedOnTransfer.has(imei.imei1)) {
         return {
@@ -872,6 +893,7 @@ export async function checkoutSale(input: {
       const created = await tx.sale.create({
         data: {
           invoiceNumber,
+          clientRef,
           branchId: saleShopId,
           userId: user.id,
           customerId: input.customerId || null,
@@ -1109,10 +1131,21 @@ export async function checkoutSale(input: {
 
       return created
     })
-  )
+  ).catch(async (error: unknown) => {
+    // Two sends of one sale at the same moment: the first won the unique id,
+    // and this one rolled back whole. Answer with the first invoice.
+    const fault = error as { code?: unknown; meta?: { target?: unknown } } | null
+    const sent =
+      fault?.code === "P2002" && String(fault.meta?.target ?? "").includes("clientRef")
+        ? await findSentSale()
+        : null
+    if (!sent) throw error
+    return { data: sent, repeat: true as const }
+  })
 
   if ("error" in posted) return { error: posted.error }
   const sale = posted.data
+  if ("repeat" in posted) return { success: true, saleId: sale.id }
 
   await fanOutSaleAlerts({
     branchId: saleShopId,
@@ -1253,6 +1286,9 @@ export async function collectPayment(formData: FormData) {
   const settleMethod =
     tenders.length > 1 ? ("SPLIT_PAYMENT" as const) : tenders[0].method
 
+  // Asked here, not inside the posting: it can read permissions, and a
+  // transaction waiting on a second connection can deadlock the pool.
+  const seesAllShops = await canSeeAllBranches(user.role)
   const posted = await settle(() =>
     prisma.$transaction(async (tx) => {
       // Read the debt inside the posting, not before it. Two clerks taking money
@@ -1263,7 +1299,7 @@ export async function collectPayment(formData: FormData) {
         select: { id: true, name: true, branchId: true, currentBalance: true },
       })
       if (!customer) throw new ConflictError("We could not find that customer.")
-      if (!(await canReachBranch(user, customer.branchId))) throw new ConflictError(OTHER_SHOP)
+      if (!seesAllShops && user.branchId !== customer.branchId) throw new ConflictError(OTHER_SHOP)
       const owing = money(customer.currentBalance)
       if (owing <= 0) throw new ConflictError("This customer does not owe us anything.")
 

@@ -3,6 +3,8 @@ import Dexie, { type Table } from "dexie"
 export type QueuedSale = {
   id: string
   createdAt: string
+  /** Why the shop system last refused this sale. Empty until it has been refused. */
+  lastError?: string
   payload: {
     customerId?: string
     branchId: string
@@ -193,13 +195,20 @@ export async function clearOfflineEvents() {
   notify()
 }
 
-export async function pushSaleQueue(payload: QueuedSale["payload"]) {
+/** Made before a sale's first send, and kept for every send after it. */
+export function newSaleId() {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+export async function pushSaleQueue(payload: QueuedSale["payload"], id = newSaleId()) {
   if (typeof window === "undefined") return []
   await ensureOfflineStore()
   const store = browserDb()
   if (!store) return []
   const row: QueuedSale = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id,
     createdAt: new Date().toISOString(),
     payload,
   }
@@ -213,6 +222,13 @@ export async function pushSaleQueue(payload: QueuedSale["payload"]) {
   })
   notify()
   return store.parkedSales.orderBy("createdAt").toArray()
+}
+
+export async function markSaleRefused(id: string, lastError: string) {
+  if (typeof window === "undefined") return
+  await ensureOfflineStore()
+  await browserDb()?.parkedSales.update(id, { lastError })
+  notify()
 }
 
 export async function removeSaleQueue(id: string) {

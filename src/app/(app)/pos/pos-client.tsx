@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Select } from "@/components/ui/select"
-import { pushSaleQueue } from "@/lib/offline-sales"
+import { newSaleId, pushSaleQueue } from "@/lib/offline-sales"
 import { requestParkedFlush } from "@/lib/flush-parked"
 import { applyParkedToTillSnapshot, readTillSnapshot, saveTillSnapshot, type TillBankAccount, type TillBranch, type TillCustomer, type TillImei, type TillProduct, type TillSnapshot } from "@/lib/till-catalog"
 import { formatCurrency, money } from "@/lib/utils"
@@ -75,6 +75,9 @@ function matchesTillQuery(
   const hay = fields.filter(Boolean).join(" ").toLowerCase()
   return hay.includes(q)
 }
+
+/** How long a till waits before reloading its list when staff come back to it. */
+const TILL_REFRESH_MS = 60_000
 
 export function PosClient({
   products: serverProducts,
@@ -252,6 +255,8 @@ export function PosClient({
     setCustomerId("")
   }
 
+  const saleAttempt = useRef<{ fingerprint: string; id: string } | null>(null)
+
   useEffect(() => {
     const onLine = () => {
       const down = !navigator.onLine
@@ -273,6 +278,24 @@ export function PosClient({
     return () => {
       window.removeEventListener("online", onLine)
       window.removeEventListener("offline", onLine)
+    }
+  }, [router])
+
+  // A till stays open all shift. Going back to it after working elsewhere brings
+  // its list up to date, so a phone sold at another till stops showing as In shop.
+  useEffect(() => {
+    let lastLoad = Date.now()
+    const onReturn = () => {
+      if (document.visibilityState !== "visible" || !navigator.onLine) return
+      if (Date.now() - lastLoad < TILL_REFRESH_MS) return
+      lastLoad = Date.now()
+      router.refresh()
+    }
+    window.addEventListener("focus", onReturn)
+    document.addEventListener("visibilitychange", onReturn)
+    return () => {
+      window.removeEventListener("focus", onReturn)
+      document.removeEventListener("visibilitychange", onReturn)
     }
   }, [router])
 
@@ -1037,9 +1060,17 @@ export function PosClient({
         priceReason: String(line.priceReason || "").trim() || undefined,
       })),
     }
+    // One id for this exact sale, however many times it is sent. If a send fails
+    // and it may have landed, pressing the button again cannot sell it twice.
+    const fingerprint = JSON.stringify(payload)
+    if (saleAttempt.current?.fingerprint !== fingerprint) {
+      saleAttempt.current = { fingerprint, id: newSaleId() }
+    }
+    const saleId = saleAttempt.current.id
     setBusy(true)
     async function keepOnDevice() {
-      await pushSaleQueue(payload)
+      await pushSaleQueue(payload, saleId)
+      saleAttempt.current = null
       await requestParkedFlush()
       const next = await applyParkedToTillSnapshot(payload)
       if (next) setDeviceList(next)
@@ -1054,17 +1085,29 @@ export function PosClient({
     }
     let result: Awaited<ReturnType<typeof checkoutSale>>
     try {
-      result = await checkoutSale(payload)
-    } catch {
-      await keepOnDevice()
-      toast.message("The shop system did not answer. This sale is waiting on this phone.")
+      result = await checkoutSale({ ...payload, offlineId: saleId })
+    } catch (error) {
+      // The browser raises a TypeError when the request never got an answer.
+      // Anything else means the server answered with a fault, and parking that
+      // would blame the network and hide it. The sale stays on screen to retry.
+      if (error instanceof TypeError) {
+        await keepOnDevice()
+        toast.message("The shop system did not answer. This sale is waiting on this phone.")
+        return
+      }
+      setBusy(false)
+      console.error("Checkout failed on the server:", error)
+      toast.error("The shop system hit a problem. Press Complete again. If it keeps failing, call the main admin.")
       return
     }
     setBusy(false)
     if (result.error) {
       toast.error(result.error)
+      // A refusal usually means this till's list is behind. Bring it up to date.
+      router.refresh()
       return
     }
+    saleAttempt.current = null
     toast.success("Sale saved. Nobody can change this invoice.")
     resetSale()
     // Straight to the receipt, printing itself, so the customer is handed it

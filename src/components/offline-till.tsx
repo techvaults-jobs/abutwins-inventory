@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react"
 import { PosClient } from "@/app/(app)/pos/pos-client"
+import { RefusedSale } from "@/components/refused-sale"
 import { flushParkedSales } from "@/lib/flush-parked"
 import { formatLagosStamp } from "@/lib/lagos-day"
 import { readSaleQueue, type QueuedSale } from "@/lib/offline-sales"
@@ -119,6 +120,7 @@ export function OfflineTill() {
                     {row.payload.items.length} item{row.payload.items.length === 1 ? "" : "s"} · {formatCurrency(row.payload.paidAmount)} · {statusLabel(row.payload.paymentMethod)}
                   </p>
                   <p className="mt-1 text-muted-foreground">Waiting since {formatLagosStamp(new Date(row.createdAt))}</p>
+                  <RefusedSale row={row} onRemoved={() => void readSaleQueue().then(setQueue)} />
                 </li>
               ))}
             </ul>
