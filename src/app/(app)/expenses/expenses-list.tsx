@@ -3,11 +3,12 @@
 import { useMemo, useState } from "react"
 import { FileSpreadsheet } from "lucide-react"
 import { DataTable, type DataColumn } from "@/components/data-table"
+import { DayRangeFilter } from "@/components/day-range-filter"
 import { FilterChips } from "@/components/filter-chips"
 import { StatusBadge } from "@/components/shared"
 import { Button } from "@/components/ui/button"
 import { downloadTable } from "@/lib/download-table"
-import { formatShopWhen } from "@/lib/lagos-day"
+import { formatShopWhen, matchesDayRange, watDayKey } from "@/lib/lagos-day"
 import { statusLabel } from "@/lib/status"
 import { formatCurrency } from "@/lib/utils"
 import { FixExpenseDialog } from "./fix-expense-dialog"
@@ -36,24 +37,35 @@ const isWaiting = (row: ExpenseRow) => !row.approvedAt && !row.saidNo && !isCanc
 export function ExpensesList({ expenses, canFix = false }: { expenses: ExpenseRow[]; canFix?: boolean }) {
   const [status, setStatus] = useState<ExpenseFilter>("all")
   const [fixing, setFixing] = useState<ExpenseRow | null>(null)
+  const [range, setRange] = useState({ from: "", to: "" })
+
+  // The period picks bills by the day they were written; the approval chips,
+  // the total and the download then count inside that period.
+  const inRange = useMemo(
+    () => expenses.filter((expense) => matchesDayRange(expense.when, range.from, range.to)),
+    [expenses, range]
+  )
 
   const filtered = useMemo(
     () =>
-      expenses.filter((expense) => {
+      inRange.filter((expense) => {
         if (status === "waiting") return isWaiting(expense)
         if (status === "approved") return Boolean(expense.approvedAt)
         return true
       }),
-    [expenses, status]
+    [inRange, status]
   )
   const counts = useMemo(
     () => ({
-      all: expenses.length,
-      waiting: expenses.filter(isWaiting).length,
-      approved: expenses.filter((expense) => Boolean(expense.approvedAt)).length,
+      all: inRange.length,
+      waiting: inRange.filter(isWaiting).length,
+      approved: inRange.filter((expense) => Boolean(expense.approvedAt)).length,
     }),
-    [expenses]
+    [inRange]
   )
+
+  const stamp = watDayKey()
+  const period = range.from || range.to ? `-${range.from || "start"}-to-${range.to || stamp}` : ""
 
   const columns: DataColumn<ExpenseRow>[] = [
     {
@@ -129,7 +141,7 @@ export function ExpensesList({ expenses, canFix = false }: { expenses: ExpenseRo
       columns={columns}
       rowKey={(row) => row.id}
       noun="expenses"
-      filterKey={status}
+      filterKey={`${status}|${range.from}|${range.to}`}
       initialSort={{ id: "when", dir: "desc" }}
       searchText={(row) => [row.description, row.expenseNumber, statusLabel(row.category), row.shop].join(" ")}
       searchPlaceholder="Search what it was for, number or shop"
@@ -139,7 +151,7 @@ export function ExpensesList({ expenses, canFix = false }: { expenses: ExpenseRo
           variant="outline"
           size="sm"
           className="h-10"
-          onClick={() => downloadTable(exportRows(filtered), "expenses.xlsx", "xlsx")}
+          onClick={() => downloadTable(exportRows(filtered), `expenses${period}-${stamp}.xlsx`, "xlsx")}
           aria-label="Download these expenses as Excel"
         >
           <FileSpreadsheet className="h-4 w-4 sm:mr-1.5" />
@@ -147,16 +159,19 @@ export function ExpensesList({ expenses, canFix = false }: { expenses: ExpenseRo
         </Button>
       }
       filters={
-        <FilterChips
-          label="Approval"
-          activeKey={status}
-          onSelect={(key) => setStatus(key as ExpenseFilter)}
-          chips={[
-            { key: "all", label: "All", count: counts.all },
-            { key: "waiting", label: "Waiting", count: counts.waiting, tone: "warning" },
-            { key: "approved", label: "Approved", count: counts.approved, tone: "success" },
-          ]}
-        />
+        <>
+          <DayRangeFilter label="When it was written" from={range.from} to={range.to} onChange={setRange} />
+          <FilterChips
+            label="Approval"
+            activeKey={status}
+            onSelect={(key) => setStatus(key as ExpenseFilter)}
+            chips={[
+              { key: "all", label: "All", count: counts.all },
+              { key: "waiting", label: "Waiting", count: counts.waiting, tone: "warning" },
+              { key: "approved", label: "Approved", count: counts.approved, tone: "success" },
+            ]}
+          />
+        </>
       }
       card={(row) => ({
         title: row.description,
@@ -182,7 +197,7 @@ export function ExpensesList({ expenses, canFix = false }: { expenses: ExpenseRo
           <td colSpan={canFix ? 3 : 2} />
         </tr>
       )}
-      empty={expenses.length === 0 ? "No expenses recorded yet." : "No expense matches this filter."}
+      empty={expenses.length === 0 ? "No expenses recorded yet." : range.from || range.to ? "No expense in this period matches." : "No expense matches this filter."}
     />
     {canFix ? <FixExpenseDialog expense={fixing} onOpenChange={(open) => !open && setFixing(null)} /> : null}
     </>

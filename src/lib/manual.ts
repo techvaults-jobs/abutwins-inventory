@@ -523,6 +523,7 @@ const PAGES: Array<
       "Create the expense with an amount at or under that cash, and a description.",
       "Wait on Waiting for yes.",
       "After yes, the pay-out shows in Money in & out and cash in the till drops.",
+      "To see one period, pick Today, Last 7 days or Last 30 days under When it was written, or tap Pick days and choose the first and last day. The Approval counts, the total and the Excel download follow the period.",
       "EXPENSE TYPED WRONG (CEO and main admin): press Fix on the expense. Change the amount, what it was for or its kind, or tick Cancel this expense. Say why. The till follows; a cancelled expense stays on the list at nothing.",
     ],
     watch: [
