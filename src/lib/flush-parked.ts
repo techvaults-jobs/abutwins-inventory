@@ -37,7 +37,9 @@ export async function flushParkedSales(reason: "auto" | "manual") {
     // Line may have dropped again. Flush still tries to post waiting sales.
   }
 
-  const pendingSales = await readSaleQueue()
+  // A sale the shop system refused is not sent again on its own: it would be
+  // refused again, on every page, forever. Staff send it again or remove it.
+  const pendingSales = (await readSaleQueue()).filter((row) => reason === "manual" || !row.lastError)
   const pendingEvents = await readOfflineEvents()
   if (!pendingSales.length && !pendingEvents.length) {
     return { posted: [] as string[], leftover: 0 }

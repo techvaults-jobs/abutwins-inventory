@@ -106,11 +106,15 @@ export function NetworkStatusIndicator() {
     }
   }, [reloadData])
 
+  // Only sales not yet refused go on their own. This used to fire again each time
+  // a send finished, so one refused sale was sent, refused and shown over and over.
+  const sendable = queue.filter((row) => !row.lastError).length
+  const refused = queue.length - sendable
   React.useEffect(() => {
-    if (network.state === "online" && queue.length > 0 && !syncing && !isFlushing.current) {
+    if (network.state === "online" && sendable > 0 && !syncing && !isFlushing.current) {
       void handleSync("auto")
     }
-  }, [network.state, queue.length, syncing, handleSync])
+  }, [network.state, sendable, syncing, handleSync])
 
   React.useEffect(() => {
     const onOffline = () => {
@@ -252,7 +256,9 @@ export function NetworkStatusIndicator() {
                 {queue.length} waiting sale{queue.length === 1 ? "" : "s"} on this phone
               </p>
               <p className="text-xs text-muted-foreground">
-                The line is up. Send them when you are ready.
+                {refused > 0
+                  ? `The shop system refused ${refused === queue.length ? (refused === 1 ? "it" : "them") : refused}. Open the sync centre to see why, then send again or remove.`
+                  : "The line is up. Send them when you are ready."}
               </p>
             </div>
           </div>

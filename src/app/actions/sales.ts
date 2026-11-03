@@ -524,6 +524,59 @@ export async function checkoutSale(input: {
   // reached it. Hand back the first invoice before any stock check: the phone is
   // Sold by now, and accessories would otherwise be sold a second time.
   const clientRef = String(input.offlineId || "").trim().slice(0, 80) || null
+  // A sale parked before tills sent their own id. If the first send did land and
+  // only the reply was lost, its phones are Sold on one invoice by this person, in
+  // this shop, with exactly these lines. That invoice is this sale: hand it back,
+  // and stamp it so the next send finds it by id.
+  const findSaleSentBeforeIds = async () => {
+    if (!clientRef || !input.queuedAt) return null
+    const phoneIds = input.items.map((item) => item.imeiId).filter((id): id is string => Boolean(id))
+    if (!phoneIds.length) return null
+    const units = await prisma.imeiRecord.findMany({
+      where: { id: { in: phoneIds } },
+      select: { status: true, saleId: true },
+    })
+    const saleIds = new Set(units.map((unit) => unit.saleId))
+    if (units.length !== phoneIds.length || units.some((unit) => unit.status !== "SOLD") || saleIds.size !== 1) return null
+    const [saleId] = [...saleIds]
+    if (!saleId) return null
+    const queuedAt = new Date(input.queuedAt)
+    if (Number.isNaN(queuedAt.getTime())) return null
+    const sale = await prisma.sale.findUnique({
+      where: { id: saleId },
+      select: {
+        id: true,
+        userId: true,
+        branchId: true,
+        clientRef: true,
+        status: true,
+        createdAt: true,
+        items: { select: { productId: true, imeiId: true, quantity: true } },
+      },
+    })
+    if (!sale || sale.clientRef || sale.status !== "COMPLETED") return null
+    if (sale.userId !== user.id || sale.branchId !== saleShopId) return null
+    // The first send is made just before the sale is parked, so it lands at most
+    // a few minutes before the park time.
+    if (sale.createdAt.getTime() < queuedAt.getTime() - 15 * 60 * 1000) return null
+    const lineKey = (line: { productId: string; imeiId?: string | null; quantity: number }) =>
+      `${line.productId}|${line.imeiId ?? ""}|${line.quantity}`
+    const wanted = input.items.map(lineKey).sort().join(",")
+    if (sale.items.map(lineKey).sort().join(",") !== wanted) return null
+    const stamped = await prisma.sale.updateMany({ where: { id: sale.id, clientRef: null }, data: { clientRef } })
+    if (stamped.count !== 1) return null
+    await prisma.auditLog.create({
+      data: {
+        userId: user.id,
+        action: "UPDATE",
+        entityType: "ParkedSale",
+        entityId: clientRef,
+        newValue: JSON.stringify({ result: "already posted", saleId: sale.id, queuedAt: input.queuedAt }),
+        branchId: saleShopId,
+      },
+    })
+    return { id: sale.id, userId: sale.userId, branchId: sale.branchId }
+  }
   const findSentSale = async () => {
     if (!clientRef) return null
     const sent = await prisma.sale.findUnique({
@@ -532,7 +585,7 @@ export async function checkoutSale(input: {
     })
     return sent?.userId === user.id && sent.branchId === saleShopId ? sent : null
   }
-  const alreadySent = await findSentSale()
+  const alreadySent = (await findSentSale()) ?? (await findSaleSentBeforeIds())
   if (alreadySent) {
     await markParkedPosted(clientRef as string, alreadySent.id)
     return { success: true, saleId: alreadySent.id }
