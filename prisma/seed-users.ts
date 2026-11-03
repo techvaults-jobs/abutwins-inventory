@@ -93,14 +93,9 @@ async function main() {
   for (const branch of BRANCHES) {
     const row = await prisma.branch.upsert({
       where: { code: branch.code },
-      update: {
-        name: branch.name,
-        address: branch.address,
-        phone: branch.phone,
-        email: branch.email,
-        isActive: true,
-        isHq: branch.isHq,
-      },
+      // Only a missing shop is created. This runs on every deploy, and writing the
+      // details here undid staff edits and reopened any shop that had been closed.
+      update: {},
       create: branch,
     })
     branches.set(row.code, row.id)

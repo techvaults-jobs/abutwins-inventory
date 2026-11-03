@@ -39,6 +39,10 @@ export async function settle<T>(run: () => Promise<T>): Promise<{ data: T } | { 
       console.error(`[settle] database busy (${code}):`, error)
       return { error: "The shop system is very busy and this was not saved. Wait a moment and try again." }
     }
+    // A row this posting needed is gone: someone else got there first.
+    if (code === "P2025") {
+      return { error: "Someone else changed this while you were working. Refresh and check it." }
+    }
     throw error
   }
 }
@@ -218,6 +222,40 @@ export async function setStock(
   })
   await recordMovement(tx, { ...input, quantity: next - before })
   return { before, after: next }
+}
+
+/**
+ * Move a shelf by a difference rather than to a figure. The database does the
+ * addition, so stock sold between a count and its approval stays sold. The shelf
+ * stops at zero, and the ledger line says what really moved.
+ */
+export async function shiftStock(
+  tx: Tx,
+  input: {
+    productId: string
+    branchId: string
+    delta: number
+    move: StockMove
+    lastStockCheck?: boolean
+  }
+) {
+  const delta = Math.trunc(input.delta)
+  const stamp = input.lastStockCheck ? { lastStockCheck: new Date() } : {}
+  const where = { productId_branchId: { productId: input.productId, branchId: input.branchId } }
+  const row = await tx.inventory.upsert({
+    where,
+    update: { quantity: { increment: delta }, ...stamp },
+    create: { productId: input.productId, branchId: input.branchId, quantity: Math.max(0, delta), ...stamp },
+    select: { quantity: true },
+  })
+  const shortBy = row.quantity < 0 ? -row.quantity : 0
+  if (shortBy) await tx.inventory.update({ where, data: { quantity: 0 } })
+  await recordMovement(tx, {
+    productId: input.productId,
+    branchId: input.branchId,
+    quantity: delta + shortBy,
+    move: input.move,
+  })
 }
 
 /**

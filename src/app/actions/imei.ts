@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache"
 import { PRODUCT_SPEC_SELECT } from "@/lib/product-specs"
 import { IMEIStatus, type Prisma } from "@prisma/client"
 import { prisma } from "@/lib/prisma"
-import { recordMovement } from "@/lib/concurrency"
+import { ConflictError, recordMovement, settle } from "@/lib/concurrency"
 import { shopError } from "@/lib/shop-speak"
 import { canReachBranch, viewBranchFilter } from "@/lib/branch-scope"
 import { requireUser } from "@/lib/session"
@@ -484,9 +484,12 @@ async function applyShelfState(input: {
   const leavingSellable = current.status === "IN_STOCK" && nextStatus === "FAULTY"
   const returningSellable = current.status === "FAULTY" && nextStatus === "IN_STOCK"
 
-  await prisma.$transaction(async (tx) => {
-    await tx.imeiRecord.update({
-      where: { id: current.id },
+  const saved = await settle(() =>
+    prisma.$transaction(async (tx) => {
+    // Only while the phone is as this person saw it. A sale at the till at the
+    // same moment used to be overwritten, leaving a sold phone back in the shop.
+    const moved = await tx.imeiRecord.updateMany({
+      where: { id: current.id, status: current.status as IMEIStatus },
       data: {
         status: nextStatus,
         cosmeticGrade: nextGrade,
@@ -494,6 +497,9 @@ async function applyShelfState(input: {
         ...(input.photoData !== undefined ? { photoData: input.photoData } : {}),
       },
     })
+    if (moved.count !== 1) {
+      throw new ConflictError(`${current.imei1} was just sold or moved by someone else. Refresh and check it.`)
+    }
 
     if (leavingSellable) {
       await tx.inventory.updateMany({
@@ -542,6 +548,8 @@ async function applyShelfState(input: {
       },
     })
   })
+  )
+  if ("error" in saved) return { error: saved.error }
 
   revalidatePath("/imei")
   revalidatePath(`/imei/${current.id}`)

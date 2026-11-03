@@ -4,7 +4,8 @@ import { revalidatePath } from "next/cache"
 import { ExpenseCategory, Prisma, UserRole } from "@prisma/client"
 import * as bcrypt from "bcryptjs"
 import { prisma } from "@/lib/prisma"
-import { setStock } from "@/lib/concurrency"
+import { shiftStock } from "@/lib/concurrency"
+import { shopError } from "@/lib/shop-speak"
 import { branchFilter, canReachBranch, OTHER_SHOP, resolveWritableShopId, viewBranchFilter } from "@/lib/branch-scope"
 import { requireUser } from "@/lib/session"
 import { canApprove, canHardDelete, canManageFinance, canManageStaff, canEditLetterhead, canSeeAllBranches, canSetOpeningMoney, canSeeProfit, isShopOwner, scopedBranchId } from "@/lib/rbac"
@@ -1418,6 +1419,7 @@ export async function decideApproval(id: string, status: "APPROVED" | "REJECTED"
   })
   if (claimed.count !== 1) return { error: "Somebody has already decided on this one." }
 
+  try {
   if (approval.entityType === "Return" || approval.type === "RETURN") {
     const record = await prisma.stockReturn.findFirst({
       where: { OR: [{ id: approval.entityId }, { returnNumber: approval.entityId }] },
@@ -1428,8 +1430,10 @@ export async function decideApproval(id: string, status: "APPROVED" | "REJECTED"
         data: { status: status === "APPROVED" ? "APPROVED" : "REJECTED", approvedBy: user.id, approvedAt: new Date() },
       })
       if (status === "REJECTED" && record.imeiId) {
-        await prisma.imeiRecord.update({
-          where: { id: record.imeiId },
+        // Only a phone still waiting on this return. One that has moved on since
+        // keeps its real status, and its shelf count stays true.
+        await prisma.imeiRecord.updateMany({
+          where: { id: record.imeiId, status: "RETURNED" },
           data: { status: "SOLD" },
         })
       }
@@ -1487,13 +1491,13 @@ export async function decideApproval(id: string, status: "APPROVED" | "REJECTED"
         })
         if (decided.count !== 1 || status !== "APPROVED") return
         for (const item of recon.items) {
-          // A count says what the shelf is, so the ledger line is the difference
-          // against the shelf as it stands now, not the variance worked out on
-          // the day of the count — the shelf may have moved since.
-          await setStock(tx, {
+          // Apply what the count found, not the counted figure. Setting the shelf
+          // to the figure put back everything sold between the count and this
+          // approval, so sold phones showed in stock again.
+          await shiftStock(tx, {
             productId: item.productId,
             branchId: recon.branchId,
-            quantity: item.countedQty,
+            delta: item.countedQty - item.expectedQty,
             lastStockCheck: true,
             move: {
               kind: "COUNT_ADJUST",
@@ -1504,6 +1508,16 @@ export async function decideApproval(id: string, status: "APPROVED" | "REJECTED"
         }
       }, { timeout: 60_000 })
     }
+  }
+  } catch (error) {
+    // The decision was marked first so that only one lands. If its work failed,
+    // put it back: otherwise it reads as decided with nothing done.
+    await prisma.approval.updateMany({
+      where: { id, status },
+      data: { status: "PENDING", approvedBy: null, approvedAt: null },
+    })
+    console.error("[decideApproval] failed:", error)
+    return { error: shopError(error, "This could not be finished, so it is still waiting. Try again.") }
   }
 
   await prisma.auditLog.create({
@@ -1569,11 +1583,19 @@ export async function startReconciliation(formData: FormData) {
     where: { branchId },
     include: { product: true },
   })
+  // A blank box means the shelf was as expected. Anything else must be a real count.
+  const countOf = new Map<string, number>()
+  for (const row of stock) {
+    const typed = String(formData.get(`count_${row.productId}`) ?? "").trim()
+    const value = typed === "" ? row.quantity : Number(typed)
+    if (!Number.isInteger(value) || value < 0) {
+      return { error: `Enter a whole number, 0 or more, for ${row.product.name}.` }
+    }
+    countOf.set(row.productId, value)
+  }
+  const countedQtyOf = (productId: string) => countOf.get(productId) ?? 0
   const expected = stock.reduce((sum, row) => sum + row.quantity * money(row.product.costPrice), 0)
-  const counted = stock.reduce((sum, row) => {
-    const countedQty = Number(formData.get(`count_${row.productId}`) || row.quantity)
-    return sum + countedQty * money(row.product.costPrice)
-  }, 0)
+  const counted = stock.reduce((sum, row) => sum + countedQtyOf(row.productId) * money(row.product.costPrice), 0)
 
   const recon = await prisma.reconciliation.create({
     data: {
@@ -1588,7 +1610,7 @@ export async function startReconciliation(formData: FormData) {
       notes: String(formData.get("notes") || "") || null,
       items: {
         create: stock.map((row) => {
-          const countedQty = Number(formData.get(`count_${row.productId}`) || row.quantity)
+          const countedQty = countedQtyOf(row.productId)
           return {
             productId: row.productId,
             expectedQty: row.quantity,

@@ -4,7 +4,7 @@ import { UserRole } from "@prisma/client"
 import { SUPPLIER_PAYMENT_UNDO_NOTE } from "@/lib/supplier-pay"
 import { revalidatePath } from "next/cache"
 import { prisma } from "@/lib/prisma"
-import { ConflictError, shiftCustomerBalance } from "@/lib/concurrency"
+import { ConflictError, settle, shiftCustomerBalance } from "@/lib/concurrency"
 import { requireUser } from "@/lib/session"
 import { canHardDelete, isShopOwner } from "@/lib/rbac"
 import { ALL_PERM_KEYS, CEO_ONLY_KEYS, TOTALS_ONLY_KEYS, ensureRolePermissions } from "@/lib/permissions"
@@ -112,7 +112,8 @@ export async function reverseInvoicePayment(formData: FormData) {
   if (!last) return { error: "Nobody has paid on this sale yet, so there is nothing to undo." }
 
   const amount = Number(last.amount)
-  await prisma.$transaction(async (tx) => {
+  const undone = await settle(() =>
+    prisma.$transaction(async (tx) => {
     await tx.payment.delete({ where: { id: last.id } })
     // The database does the subtraction and the addition, so an undo landing at
     // the same moment as a collection cannot wipe the other one out.
@@ -159,6 +160,8 @@ export async function reverseInvoicePayment(formData: FormData) {
       },
     })
   })
+  )
+  if ("error" in undone) return { error: undone.error }
   revalidatePath(`/sales/${sale.id}`)
   revalidatePath("/sales")
   revalidatePath("/finance")
@@ -226,7 +229,8 @@ export async function correctPaymentMethod(formData: FormData) {
   const now = label(nextMethod, bank?.label ?? null)
   const ledgerOf = (method: string) => (method === "CASH" ? "CASH" : "BANK")
 
-  await prisma.$transaction(async (tx) => {
+  const fixed = await settle(() =>
+    prisma.$transaction(async (tx) => {
     await tx.payment.update({
       where: { id: payment.id },
       data: {
@@ -278,6 +282,8 @@ export async function correctPaymentMethod(formData: FormData) {
       },
     })
   })
+  )
+  if ("error" in fixed) return { error: fixed.error }
   revalidatePath(`/sales/${payment.sale.id}`)
   revalidatePath("/sales")
   revalidatePath("/finance")

@@ -9,6 +9,10 @@ const base =
   globalForPrisma.prisma ??
   new PrismaClient({
     log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
+    // Prisma's defaults (wait 2s for a connection, 5s to finish) fail a posting
+    // with many lines, such as a large transfer, on a busy or distant database.
+    // A posting that needs longer sets its own.
+    transactionOptions: { maxWait: 10_000, timeout: 20_000 },
   })
 
 /**
