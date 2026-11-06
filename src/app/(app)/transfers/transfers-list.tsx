@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button"
 import { downloadTable } from "@/lib/download-table"
 import { formatShopWhen, matchesDayRange, watDayKey } from "@/lib/lagos-day"
 import { formatCurrency, money } from "@/lib/utils"
+import { statusLabel } from "@/lib/status"
 import { useUrlFilter } from "@/lib/use-url-filter"
 
 type TransferRow = {
@@ -88,6 +89,20 @@ function transferTotals(transfer: TransferRow) {
     qty: phoneQty + pieceQty,
     costValue: phoneCost + pieceCost,
   }
+}
+
+/**
+ * A transfer's status in the words of the boxes above the list. The list used
+ * to say "Cancelled" under a "Rejected" box, so the auditor read them as two
+ * different things.
+ */
+function transferStatusWord(status: string, rejectedBecause?: string | null) {
+  // Undoing a transfer after it was accepted also ends it as CANCELLED; its
+  // note starts "Cancelled after it was accepted". Only that one is Cancelled.
+  if (status === "CANCELLED") return rejectedBecause?.startsWith("Cancelled after") ? "Cancelled" : "Rejected"
+  if (status === "PENDING" || status === "IN_TRANSIT") return "Waiting"
+  if (status === "RECEIVED") return "Received"
+  return statusLabel(status)
 }
 
 const TRANSFER_FILTERS = ["all", "PENDING", "RECEIVED", "CANCELLED"] as const
@@ -167,7 +182,7 @@ export function TransfersList({
           const unit = money(imei.costPrice)
           rows.push([
             transfer.transferNumber,
-            transfer.status,
+            transferStatusWord(transfer.status, transfer.rejectedBecause),
             transfer.fromBranch.name,
             transfer.toBranch.name,
             imei.name,
@@ -185,7 +200,7 @@ export function TransfersList({
         const unit = money(item.product.costPrice)
         rows.push([
           transfer.transferNumber,
-          transfer.status,
+          transferStatusWord(transfer.status, transfer.rejectedBecause),
           transfer.fromBranch.name,
           transfer.toBranch.name,
           item.product.name,
@@ -201,7 +216,7 @@ export function TransfersList({
       if (!transfer.imeis.length && !pieceLines(transfer).length) {
         rows.push([
           transfer.transferNumber,
-          transfer.status,
+          transferStatusWord(transfer.status, transfer.rejectedBecause),
           transfer.fromBranch.name,
           transfer.toBranch.name,
           "",
@@ -266,7 +281,7 @@ export function TransfersList({
       sortValue: (row) => row.status,
       cell: (row) => (
         <span className="inline-flex items-center gap-1.5">
-          <StatusBadge value={row.status} />
+          <StatusBadge value={row.status} label={transferStatusWord(row.status, row.rejectedBecause)} />
           {isPartial(row) ? <span className="whitespace-nowrap text-[11px] font-medium text-warning">part</span> : null}
         </span>
       ),
@@ -294,8 +309,8 @@ export function TransfersList({
         steps={[
           { key: "all", label: "All transfers", count: counts.all, hint: "Every shop to shop" },
           { key: "PENDING", label: "Waiting for accept", count: counts.PENDING ?? 0, hint: "Receiving shop to check" },
-          { key: "RECEIVED", label: "Accepted", count: counts.RECEIVED ?? 0, hint: "On the other shelf" },
-          { key: "CANCELLED", label: "Rejected", count: counts.CANCELLED ?? 0, hint: "Stock went back" },
+          { key: "RECEIVED", label: "Received", count: counts.RECEIVED ?? 0, hint: "On the other shelf" },
+          { key: "CANCELLED", label: "Rejected or cancelled", count: counts.CANCELLED ?? 0, hint: "Stock went back" },
         ]}
       />
 
@@ -337,7 +352,7 @@ export function TransfersList({
             subtitle: `${row.transferNumber} · ${formatShopWhen(whenOf(row))}`,
             value: `${totals.qty} item${totals.qty === 1 ? "" : "s"}`,
             valueHint: <span className="text-muted-foreground">{formatCurrency(totals.costValue)}</span>,
-            badge: <StatusBadge value={row.status} />,
+            badge: <StatusBadge value={row.status} label={transferStatusWord(row.status, row.rejectedBecause)} />,
             meta: (
               <span className="flex flex-col gap-0.5">
                 <TransferPeople row={row} inline />
@@ -400,7 +415,7 @@ function TransferDetail({
         </div>
         <div>
           <p className="text-[11px] uppercase tracking-wider text-muted-foreground">Status</p>
-          <StatusBadge value={transfer.status} />
+          <StatusBadge value={transfer.status} label={transferStatusWord(transfer.status, transfer.rejectedBecause)} />
         </div>
       </div>
 

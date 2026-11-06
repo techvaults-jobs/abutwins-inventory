@@ -422,8 +422,8 @@ export function TableEmpty({
   )
 }
 
-export function StatusBadge({ value }: { value: string }) {
-  return <Badge variant={statusTone(value)}>{statusLabel(value)}</Badge>
+export function StatusBadge({ value, label }: { value: string; label?: string }) {
+  return <Badge variant={statusTone(value)}>{label ?? statusLabel(value)}</Badge>
 }
 
 export function EmptyState({

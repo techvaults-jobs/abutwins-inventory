@@ -129,19 +129,22 @@ export default async function BooksCheckPage({
         </div>
 
         <StatGrid>
+          {/* The same figure as Payments received on the paper below: cash and
+              bank by the day it came in. This card used to read what was paid
+              on the period's sales, a different number under a "cash" name. */}
           <StatCard
-            label="Cash Collections"
-            value={formatCurrency(data.collected)}
-            hint={`Prior period: ${formatCurrency(data.compare.priorCollected)} · ${data.compare.collected.value}`}
+            label="Payments received"
+            value={formatCurrency(data.methodSum)}
+            hint={`Prior period: ${formatCurrency(data.compare.priorMethodSum)} · ${data.compare.methodSum.value}`}
             tone="success"
           />
           <StatCard
-            label="Gross Sales Revenue"
+            label="Total sales"
             value={formatCurrency(data.revenue)}
             hint={`Prior period: ${formatCurrency(data.compare.priorRevenue)} · ${data.compare.revenue.value}`}
           />
           <StatCard
-            label="Transaction Volume"
+            label="Sales volume"
             value={String(data.salesCount)}
             hint={`Prior period: ${data.compare.priorCount} · ${data.compare.count.value}`}
           />

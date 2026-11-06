@@ -118,8 +118,8 @@ export function BooksPdfButton({ data }: { data: BooksCheck }) {
 
       const boxes = [
         ["SALES", String(data.salesCount)],
-        ["COLLECTED", formatPdfMoney(data.methodSum)],
-        ["POSTED", formatPdfMoney(data.revenue)],
+        ["PAYMENTS RECEIVED", formatPdfMoney(data.methodSum)],
+        ["TOTAL SALES", formatPdfMoney(data.revenue)],
         ["MONEY OUT", formatPdfMoney(data.moneyOut)],
       ]
       boxes.forEach(([label, value], index) => {
@@ -154,6 +154,10 @@ export function BooksPdfButton({ data }: { data: BooksCheck }) {
 
       section("Money summary")
       booksMoneyLines(data).forEach((item, index) => {
+        if (item.head) {
+          row(item.label.toUpperCase(), "")
+          return
+        }
         row(item.label, formatPdfMoney(item.value), undefined, undefined, item.total ? [232, 237, 255] : index % 2 ? PAPER : undefined)
       })
 
@@ -175,12 +179,12 @@ export function BooksPdfButton({ data }: { data: BooksCheck }) {
         y += 13
       })
 
-      section("Payments received by staff")
+      section("Sales by staff (value sold / paid on them so far)")
       if (data.byStaff.length === 0) {
         row("No sales in this period", "")
       } else {
         data.byStaff.forEach((item, index) => {
-          row(`${item.name}  ·  ${item.count} sale${item.count === 1 ? "" : "s"}`, formatPdfMoney(item.collected), undefined, undefined, index % 2 ? PAPER : undefined)
+          row(`${item.name}  ·  ${item.count} sale${item.count === 1 ? "" : "s"}`, formatPdfMoney(item.sold), "", formatPdfMoney(item.collected), index % 2 ? PAPER : undefined)
         })
       }
 
@@ -189,7 +193,7 @@ export function BooksPdfButton({ data }: { data: BooksCheck }) {
       row("Still owed to suppliers", formatPdfMoney(data.supplierOwed))
       row("Suppliers who owe us", formatPdfMoney(data.supplierCredit))
       row("Sales with no customer name", String(data.walkIns))
-      row("Cash sales", formatPdfMoney(data.expectedCash), undefined, undefined, PAPER)
+      row("Cash received in this period", formatPdfMoney(data.expectedCash), undefined, undefined, PAPER)
 
       section("Sales")
       if (data.invoices.length === 0) {
@@ -211,7 +215,7 @@ export function BooksPdfButton({ data }: { data: BooksCheck }) {
         row("No phones or laptops on the IMEI list for this shop", "")
       } else {
         data.imeiRows.forEach((item, index) => {
-          row(item.product, `${item.shopQty} / ${item.imeis}`, undefined, item.delta === 0 ? "Matched" : String(item.delta), index % 2 ? PAPER : undefined)
+          row(`${item.product}  ·  ${item.shop}`, `${item.shopQty} / ${item.imeis}`, undefined, item.delta === 0 ? "Matched" : String(item.delta), index % 2 ? PAPER : undefined)
         })
       }
 

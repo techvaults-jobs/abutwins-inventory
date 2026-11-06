@@ -7,6 +7,9 @@ import { formatLagosStamp } from "@/lib/lagos-day"
 import { formatCurrency, formatDateTime } from "@/lib/utils"
 import { ArrowRight, AlertCircle, CheckCircle2, ShieldCheck } from "lucide-react"
 
+const INVOICES_ON_PAPER = 40
+const IMEI_ROWS_ON_PAPER = 20
+
 function moneyOrCount(value: number, isMoney: boolean) {
   return isMoney ? formatCurrency(value) : String(value)
 }
@@ -79,7 +82,7 @@ export function BooksStatement({ data }: { data: BooksCheck }) {
       <div className="grid grid-cols-2 sm:grid-cols-4 print:grid-cols-4 sm:divide-x print:divide-x divide-slate-200 border-b border-slate-200">
         {[
           ["Sales volume", String(data.salesCount)],
-          ["Payment received", formatCurrency(data.methodSum)],
+          ["Payments received", formatCurrency(data.methodSum)],
           ["Total sales", formatCurrency(data.revenue)],
           ["Total expenditure", formatCurrency(data.moneyOut)],
         ].map(([label, value]) => (
@@ -126,14 +129,20 @@ export function BooksStatement({ data }: { data: BooksCheck }) {
       <div className="grid border-t border-slate-200 md:grid-cols-2">
         <div className="border-b border-slate-200 px-6 py-5 md:border-b-0 md:border-r">
           <h3 className="text-sm font-semibold">Financial Reconciliation Summary</h3>
-          <p className="mb-3 text-[11px] text-slate-500">Structured accounting breakdown. All figures verified to balance.</p>
+          <p className="mb-3 text-[11px] text-slate-500">Each block adds up to its own total line.</p>
           <div className="space-y-1.5 text-[12px]">
-            {moneyLines.map((row) => (
-              <div key={row.label} className={`flex justify-between gap-3 ${row.total ? "border-t border-slate-200 pt-1.5 font-semibold text-slate-900" : "text-slate-600"}`}>
-                <span>{row.label}</span>
-                <span className="tabular-nums text-slate-900">{formatCurrency(row.value)}</span>
-              </div>
-            ))}
+            {moneyLines.map((row) =>
+              row.head ? (
+                <p key={row.label} className="pt-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500 first:pt-0">
+                  {row.label}
+                </p>
+              ) : (
+                <div key={row.label} className={`flex justify-between gap-3 ${row.total ? "border-t border-slate-200 pt-1.5 font-semibold text-slate-900" : "text-slate-600"}`}>
+                  <span>{row.label}</span>
+                  <span className="tabular-nums text-slate-900">{formatCurrency(row.value)}</span>
+                </div>
+              )
+            )}
           </div>
         </div>
         <div className="px-6 py-5">
@@ -197,12 +206,16 @@ export function BooksStatement({ data }: { data: BooksCheck }) {
 
       <div className="grid border-t border-slate-200 md:grid-cols-2">
         <div className="border-b border-slate-200 px-6 py-5 md:border-b-0 md:border-r">
-          <h3 className="text-sm font-semibold">Payments received by staff</h3>
+          <h3 className="text-sm font-semibold">Sales by staff</h3>
+          <p className="text-[11px] text-slate-500">Value sold, and what has been paid on those sales so far.</p>
           <div className="mt-3 space-y-1.5 text-[12px]">
             {data.byStaff.map((row) => (
               <p key={row.name} className="flex justify-between gap-3">
                 <span>{row.name} · {row.count} sale{row.count === 1 ? "" : "s"}</span>
-                <span className="tabular-nums font-medium">{formatCurrency(row.collected)}</span>
+                <span className="text-right tabular-nums">
+                  <span className="font-medium">{formatCurrency(row.sold)}</span>
+                  <span className="block text-[10px] text-slate-500">paid {formatCurrency(row.collected)}</span>
+                </span>
               </p>
             ))}
             {data.byStaff.length === 0 ? <p className="text-slate-500">No completed sales in this period.</p> : null}
@@ -234,7 +247,7 @@ export function BooksStatement({ data }: { data: BooksCheck }) {
               <span>{data.walkIns}</span>
             </p>
             <p className="flex justify-between gap-3 font-semibold">
-              <span>Cash sales</span>
+              <span>Cash received in this period</span>
               <span className="tabular-nums">{formatCurrency(data.expectedCash)}</span>
             </p>
           </div>
@@ -258,7 +271,7 @@ export function BooksStatement({ data }: { data: BooksCheck }) {
             </tr>
           </thead>
           <tbody>
-            {data.invoices.map((row) => (
+            {data.invoices.slice(0, INVOICES_ON_PAPER).map((row) => (
               <tr key={row.id} className="border-b border-slate-100">
                 <td className="py-1.5 pr-2">
                   <span className="font-semibold text-slate-900">{row.invoice}</span>
@@ -271,6 +284,13 @@ export function BooksStatement({ data }: { data: BooksCheck }) {
             ))}
             {data.invoices.length === 0 ? (
               <tr><td colSpan={4} className="py-4 text-slate-500">No completed sales in this period.</td></tr>
+            ) : null}
+            {data.invoices.length > INVOICES_ON_PAPER ? (
+              <tr>
+                <td colSpan={4} className="py-2 text-slate-500">
+                  First {INVOICES_ON_PAPER} of {data.invoices.length} sales shown. The CSV and PDF list every one.
+                </td>
+              </tr>
             ) : null}
           </tbody>
         </table>
@@ -293,9 +313,12 @@ export function BooksStatement({ data }: { data: BooksCheck }) {
               </tr>
             </thead>
             <tbody>
-              {data.imeiRows.map((row) => (
+              {data.imeiRows.slice(0, IMEI_ROWS_ON_PAPER).map((row) => (
                 <tr key={`${row.product}-${row.shop}`} className="border-b border-slate-100">
-                  <td className="py-1.5 pr-2 font-medium">{row.product}</td>
+                  <td className="py-1.5 pr-2 font-medium">
+                    {row.product}
+                    <span className="ml-1 text-[10px] font-normal text-slate-500">{row.shop}</span>
+                  </td>
                   <td className="py-1.5 pr-2 text-right tabular-nums font-mono">{row.shopQty} / {row.imeis}</td>
                   <td className="py-1.5 text-right tabular-nums font-bold">
                     <span className={row.delta === 0 ? "text-emerald-700" : "text-rose-600"}>
@@ -306,6 +329,13 @@ export function BooksStatement({ data }: { data: BooksCheck }) {
               ))}
               {data.imeiRows.length === 0 ? (
                 <tr><td colSpan={3} className="py-4 text-slate-500">No phone or serial item in this shop.</td></tr>
+              ) : null}
+              {data.imeiRows.length > IMEI_ROWS_ON_PAPER ? (
+                <tr>
+                  <td colSpan={3} className="py-2 text-slate-500">
+                    First {IMEI_ROWS_ON_PAPER} of {data.imeiRows.length} items shown, gaps first. The CSV and PDF list every one.
+                  </td>
+                </tr>
               ) : null}
             </tbody>
           </table>

@@ -50,6 +50,18 @@ function saleDue(sale: SaleRow) {
   return Math.max(0, sale.totalAmount - sale.paidAmount - sale.returned)
 }
 
+/**
+ * The part of a sale's returned value that went back to the buyer as a refund
+ * or a credit note. A return clears what was still owed first; only the rest
+ * is given back. With it the figures tie, sale by sale:
+ * after returns = received − given back + still owed − paid over.
+ */
+function givenBack(sale: SaleRow) {
+  if (sale.status === "CANCELLED") return 0
+  const unpaid = Math.max(0, sale.totalAmount - sale.paidAmount)
+  return Math.max(0, sale.returned - unpaid)
+}
+
 function payKey(sale: SaleRow): Exclude<PayFilter, "all"> {
   if (saleDue(sale) <= 0.001) return "paid"
   if (sale.paidAmount <= 0) return "unpaid"
@@ -180,10 +192,14 @@ export function SalesList({ sales }: { sales: SaleRow[] }) {
           acc.sales += sale.totalAmount
           acc.paid += sale.paidAmount
           acc.returned += sale.returned
-          acc.balance += saleBalance(sale)
+          // Owed and paid-over kept apart. They used to be added into one
+          // balance, so one buyer's overpayment shrank what the others owe.
+          acc.owed += saleDue(sale)
+          acc.over += Math.max(0, sale.paidAmount - sale.totalAmount)
+          acc.givenBack += givenBack(sale)
           return acc
         },
-        { sales: 0, paid: 0, returned: 0, balance: 0 }
+        { sales: 0, paid: 0, returned: 0, owed: 0, over: 0, givenBack: 0 }
       ),
     [visible]
   )
@@ -337,13 +353,24 @@ export function SalesList({ sales }: { sales: SaleRow[] }) {
         />
         <Figure
           label="Still owed to us"
-          value={Math.max(0, -totals.balance)}
+          value={totals.owed}
           hint={`${counts.part + counts.unpaid} bill${counts.part + counts.unpaid === 1 ? "" : "s"} · tap to see`}
-          tone={balanceTone(totals.balance)}
+          tone={balanceTone(-totals.owed)}
           active={pay === "unpaid" || pay === "part"}
           onClick={() => setPay(pay === "unpaid" ? "part" : "unpaid")}
         />
       </div>
+
+      {/* How the four figures tie. A return first clears what the buyer still
+          owed; only the rest of it was paid back (a refund or a credit note). */}
+      {totals.sales > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          How it adds up: {formatCurrency(totals.sales - totals.returned)} after returns = {formatCurrency(totals.paid)} received
+          {totals.givenBack > 0.005 ? ` − ${formatCurrency(totals.givenBack)} given back on returns` : ""}
+          {" "}+ {formatCurrency(totals.owed)} still owed
+          {totals.over > 0.005 ? ` − ${formatCurrency(totals.over)} paid over the bill` : ""}
+        </p>
+      ) : null}
 
       <DataTable
         rows={filtered}
@@ -423,7 +450,7 @@ export function SalesList({ sales }: { sales: SaleRow[] }) {
             <td className="hidden whitespace-nowrap text-right tabular-nums text-warning lg:table-cell">
               {totals.returned > 0 ? `−${formatCurrency(totals.returned)}` : "—"}
             </td>
-            <td className={cn("whitespace-nowrap text-right tabular-nums", balanceTone(totals.balance))}>{balanceWords(totals.balance)}</td>
+            <td className={cn("whitespace-nowrap text-right tabular-nums", balanceTone(-totals.owed))}>{balanceWords(-totals.owed)}</td>
             <td className="hidden lg:table-cell" />
             <td className="hidden xl:table-cell" />
           </tr>

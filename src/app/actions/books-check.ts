@@ -15,26 +15,64 @@ import { payablePurchaseWhere, groupSupplierLedgers } from "@/lib/purchase-money
 import { receiptsInWindow } from "@/lib/receipts"
 import { supplierPaidInWindow } from "@/lib/supplier-pay"
 import { customersOwing } from "@/lib/owed"
+import { returnedValueBySale } from "@/lib/returned-value"
+import { customerPayOutsInWindow } from "@/lib/customer-payouts"
 
 export type BooksRange = ShopRange
 
-function sumSales(
-  rows: Array<{
-    paymentMethod: string
-    totalAmount: unknown
-    paidAmount: unknown
-    payments?: Array<{ method: string; amount: unknown }> | null
-  }>
-) {
+type BooksSaleRow = {
+  id: string
+  paymentMethod: string
+  totalAmount: unknown
+  paidAmount: unknown
+  creditNoteUsed?: unknown
+  payments?: Array<{ method: string; amount: unknown }> | null
+}
+
+/**
+ * Where each naira of the period's sales stands, so the lines add back to
+ * Total sales: paid in cash or bank, paid from a credit note, cleared by a
+ * return, still owed, less anything paid over the bill.
+ *
+ * "Still owed" used to be invoice minus paid, with returns ignored, so it
+ * disagreed with Sales and Customers for the same invoices, and the paper
+ * showed it beside a near-identical "Credit sales" line that did not add up
+ * with anything else on the page.
+ */
+function splitSales(rows: BooksSaleRow[], returned: Map<string, number>) {
+  let paidMoney = 0
+  let paidCreditNote = 0
+  let clearedByReturns = 0
+  let owed = 0
+  let paidOver = 0
+  for (const sale of rows) {
+    const total = money(sale.totalAmount)
+    const paid = money(sale.paidAmount)
+    const creditNote = Math.min(paid, money(sale.creditNoteUsed))
+    paidMoney += paid - creditNote
+    paidCreditNote += creditNote
+    const unpaid = Math.max(0, total - paid)
+    const cleared = Math.min(unpaid, returned.get(sale.id) ?? 0)
+    clearedByReturns += cleared
+    owed += unpaid - cleared
+    paidOver += Math.max(0, paid - total)
+  }
+  return { paidMoney, paidCreditNote, clearedByReturns, owed, paidOver }
+}
+
+function sumSales(rows: BooksSaleRow[], returned: Map<string, number>) {
   const mix = sumSaleTenders(rows)
+  const split = splitSales(rows, returned)
   return {
+    ...split,
     cash: mix.cash,
     transfer: mix.transfer,
     pos: mix.pos,
     credit: mix.credit,
     revenue: mix.revenue,
     collected: mix.collected,
-    due: mix.revenue - mix.collected,
+    // Still owed on these sales once returns have cleared their share.
+    due: split.owed,
     methodSum: mix.received,
     count: mix.count,
   }
@@ -64,7 +102,7 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
   const recentDays = recentWatDays(14, day)
   const recentStart = watBounds(recentDays[recentDays.length - 1]).start
 
-  const [sales, priorSales, expenses, priorExpenses, purchases, priorPurchases, debtors, creditors, stock, vaultCounts, products, parked, walkIns, integrity, highRisk, failedLogins, recentSaleDates, settings] =
+  const [sales, priorSales, expenses, priorExpenses, purchases, priorPurchases, payOuts, priorPayOuts, creditors, stock, vaultCounts, products, parked, walkIns, integrity, highRisk, failedLogins, recentSaleDates, settings] =
     await Promise.all([
       prisma.sale.findMany({
         where: { status: "COMPLETED", ...shopWhere, saleDate: { gte: window.start, lt: window.end } },
@@ -73,7 +111,7 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
       }),
       prisma.sale.findMany({
         where: { status: "COMPLETED", ...shopWhere, saleDate: { gte: prior.start, lt: prior.end } },
-        select: { paymentMethod: true, totalAmount: true, paidAmount: true, creditNoteUsed: true, payments: { select: { method: true, amount: true } } },
+        select: { id: true, paymentMethod: true, totalAmount: true, paidAmount: true, creditNoteUsed: true, payments: { select: { method: true, amount: true } } },
       }),
       prisma.expense.aggregate({
         where: { ...shopWhere, date: { gte: window.start, lt: window.end }, approvedAt: { not: null } },
@@ -88,10 +126,10 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
       // window, so a payment on last month's bill never showed in this one.
       supplierPaidInWindow({ branchId: shopId || null, start: window.start, end: window.end }),
       supplierPaidInWindow({ branchId: shopId || null, start: prior.start, end: prior.end }),
-      prisma.customer.aggregate({
-        where: shopId ? { branchId: shopId } : {},
-        _sum: { currentBalance: true },
-      }),
+      // Refunds on returns and Swap Deal pay-outs: money that left the shop
+      // for customers. Total expenditure used to leave it out.
+      customerPayOutsInWindow({ branchId: shopId || null, start: window.start, end: window.end }),
+      customerPayOutsInWindow({ branchId: shopId || null, start: prior.start, end: prior.end }),
       prisma.purchase.findMany({
         where: {
           ...(shopId ? { branchId: shopId } : {}),
@@ -129,16 +167,20 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
 
   // "Total payments received" is money by the day it arrived, like the till:
   // debts collected in the period count; the per-sale mix stays for the rest.
-  const [receiptsNow, receiptsThen] = await Promise.all([
+  const [receiptsNow, receiptsThen, returnedNow, returnedThen] = await Promise.all([
     receiptsInWindow({ branchId: shopId || null, start: window.start, end: window.end }),
     receiptsInWindow({ branchId: shopId || null, start: prior.start, end: prior.end }),
+    returnedValueBySale(prisma, sales.map((sale) => sale.id)),
+    returnedValueBySale(prisma, priorSales.map((sale) => sale.id)),
   ])
-  const now = { ...sumSales(sales), methodSum: receiptsNow.total, cash: receiptsNow.cash, transfer: receiptsNow.transfer, pos: receiptsNow.pos }
-  const then = { ...sumSales(priorSales), methodSum: receiptsThen.total, cash: receiptsThen.cash, transfer: receiptsThen.transfer, pos: receiptsThen.pos }
+  const now = { ...sumSales(sales, returnedNow), methodSum: receiptsNow.total, cash: receiptsNow.cash, transfer: receiptsNow.transfer, pos: receiptsNow.pos }
+  const then = { ...sumSales(priorSales, returnedThen), methodSum: receiptsThen.total, cash: receiptsThen.cash, transfer: receiptsThen.transfer, pos: receiptsThen.pos }
   const expenseNow = money(expenses._sum.amount)
   const expenseThen = money(priorExpenses._sum.amount)
   const paidNow = purchases
   const paidThen = priorPurchases
+  const moneyOutNow = expenseNow + paidNow + payOuts
+  const moneyOutThen = expenseThen + paidThen + priorPayOuts
   const change = (current: number, previous: number) => {
     if (!previous) return { value: current ? "New" : "0", amount: current - previous, up: current >= previous }
     const pct = ((current - previous) / previous) * 100
@@ -166,33 +208,52 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
   const expectedCash = now.cash
   const shop = shops.find((row) => row.id === shopId)
 
-  const imeiRows = stock
-    .filter((row) => {
-      const product = products.find((item) => item.id === row.productId)
-      return product && product.tracking !== "NONE"
-    })
-    .map((row) => {
-      const imeis = vaultCounts.find((item) => item.productId === row.productId && item.branchId === row.branchId)?._count._all ?? 0
-      return {
-        product: row.product.name,
-        shop: row.branch.code,
-        shopQty: row.quantity,
-        imeis,
-        delta: imeis - row.quantity,
-      }
-    })
-    .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+  const productById = new Map(products.map((item) => [item.id, item]))
+  const countedPairs = new Set(stock.map((row) => `${row.productId}:${row.branchId}`))
+  const imeiRows = [
+    ...stock
+      .filter((row) => {
+        const product = productById.get(row.productId)
+        return product && product.tracking !== "NONE"
+      })
+      .map((row) => {
+        const imeis = vaultCounts.find((item) => item.productId === row.productId && item.branchId === row.branchId)?._count._all ?? 0
+        return {
+          product: row.product.name,
+          shop: row.branch.code,
+          shopQty: row.quantity,
+          imeis,
+          delta: imeis - row.quantity,
+        }
+      }),
+    // Phones on the IMEI list in a shop that has no stock row for them at all.
+    // They used to be skipped, so the check said "matches" with phones that
+    // the shop count did not know about.
+    ...vaultCounts
+      .filter((row) => !countedPairs.has(`${row.productId}:${row.branchId}`))
+      .map((row) => ({
+        product: productById.get(row.productId)?.name ?? "Unknown item",
+        shop: shops.find((item) => item.id === row.branchId)?.code ?? "",
+        shopQty: 0,
+        imeis: row._count._all,
+        delta: row._count._all,
+      })),
+  ].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
   const imeiGaps = imeiRows.filter((row) => row.delta !== 0)
 
+  // Sales each staff member made in the period: their value and what has been
+  // paid on them so far. Money by the day it arrived is Total payments
+  // received; this is per sale, so the two are not meant to agree.
   const byStaff = Object.values(
-    sales.reduce<Record<string, { name: string; count: number; collected: number }>>((acc, sale) => {
+    sales.reduce<Record<string, { name: string; count: number; sold: number; collected: number }>>((acc, sale) => {
       const name = sale.user?.name ?? "Unknown"
-      acc[name] = acc[name] ?? { name, count: 0, collected: 0 }
+      acc[name] = acc[name] ?? { name, count: 0, sold: 0, collected: 0 }
       acc[name].count += 1
+      acc[name].sold += money(sale.totalAmount)
       acc[name].collected += money(sale.paidAmount)
       return acc
     }, {})
-  ).sort((a, b) => b.collected - a.collected)
+  ).sort((a, b) => b.sold - a.sold)
 
   const papers = [
     {
@@ -285,11 +346,16 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
     collected: now.collected,
     revenue: now.revenue,
     due: now.due,
+    paidMoney: now.paidMoney,
+    paidCreditNote: now.paidCreditNote,
+    clearedByReturns: now.clearedByReturns,
+    paidOver: now.paidOver,
     methodSum: now.methodSum,
     debtsCollected: receiptsNow.debtsCollected,
     expenses: expenseNow,
     purchasesPaid: paidNow,
-    moneyOut: expenseNow + paidNow,
+    customerPayOuts: payOuts,
+    moneyOut: moneyOutNow,
     // Same rule as Home and Reports (customersOwing).
     customersOwe: (await customersOwing(shopId || null)).reduce((sum, row) => sum + row.owed, 0),
     supplierOwed,
@@ -316,7 +382,8 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
       credit: change(now.credit, then.credit),
       due: change(now.due, then.due),
       expenses: change(expenseNow, expenseThen),
-      moneyOut: change(expenseNow + paidNow, expenseThen + paidThen),
+      moneyOut: change(moneyOutNow, moneyOutThen),
+      bank: change(now.transfer + now.pos, then.transfer + then.pos),
       priorRevenue: then.revenue,
       priorCollected: then.collected,
       priorMethodSum: then.methodSum,
@@ -328,7 +395,8 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
       priorDue: then.due,
       priorExpenses: expenseThen,
       priorPurchasesPaid: paidThen,
-      priorMoneyOut: expenseThen + paidThen,
+      priorCustomerPayOuts: priorPayOuts,
+      priorMoneyOut: moneyOutThen,
     },
     comparePicked: Boolean(compareDay),
     recentDays: recentDays.map((key) => ({
@@ -347,7 +415,9 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
       logo: settings.companyLogo,
       footer: settings.companyFooter,
     },
-    invoices: sales.slice(0, 40).map((sale) => ({
+    // Every sale in the period. The paper shows the first ones; the CSV, which
+    // the auditor works from, used to stop at 40 without saying so.
+    invoices: sales.map((sale) => ({
       id: sale.id,
       invoice: sale.invoiceNumber,
       when: sale.saleDate.toISOString(),
@@ -359,7 +429,7 @@ export async function getBooksCheck(branchId?: string, businessDate?: string, ra
     })),
     byStaff,
     imeiGaps: imeiGaps.length,
-    imeiRows: imeiRows.slice(0, 20),
+    imeiRows,
   }
 }
 
